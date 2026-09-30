@@ -51,5 +51,8 @@
     "typescript": "^5.7.2",
     "vite": "^5.4.11",
     "zustand": "^5.0.2"
+  },
+  "repository": {
+    "url": "https://github.com/smart-open/OmniGet.git"
   }
 }
