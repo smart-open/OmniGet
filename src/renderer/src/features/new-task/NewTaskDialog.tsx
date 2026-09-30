@@ -115,6 +115,11 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
       setPhase('input')
       return
     }
+    if (res.kind === 'started') {
+      // 音乐查询：创建即入队，无文件树，直接关框（任务出现在列表中）
+      onClose()
+      return
+    }
     setTaskId(res.taskId)
     setParsed(res.parsed)
     setSniffType(res.sniff.type)

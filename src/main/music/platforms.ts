@@ -8,6 +8,7 @@ import { randomUUID } from 'crypto'
 import { mkdir, rename, stat, unlink, writeFile } from 'fs/promises'
 import { getJson, postForm, postJson, getText, fetchToFile, downloadFile, hostOf } from './http'
 import { HostGate } from './gate'
+import { sanitizeFilename } from '@shared/sanitize'
 
 export type Quality = 'standard' | 'high' | 'lossless'
 
@@ -61,7 +62,8 @@ const EMPTY_LRC = '[00:00.000]暂无歌词\n'
 // ── 工具（与 Python 静态方法同口径）────────────────────────────────
 
 export function sanitizeName(name: string): string {
-  return name.replace(/[\\/:*?"<>|]/g, '_').trim()
+  // 复用统一清洗（保留名 CON/NUL、控制字符、尾点/空格、超长截断），额外处理路径分隔符
+  return sanitizeFilename(name.replace(/[\\/]/g, '_'))
 }
 
 export function artistMatches(artistStr: string, singer: string): boolean {
@@ -626,7 +628,8 @@ export class PlatformEngine {
   async trySoda(song: PlatformSong, mp3Path: string, lrcPath: string): Promise<boolean> {
     const songId = song.id
     try {
-      const url = 'http://qiuyu520.fun/qishuiParse/api/track/v2'
+      // 2026-09-30 实测：https 证书有效（Python 原版 http 为历史遗留），切换防中间人篡改
+      const url = 'https://qiuyu520.fun/qishuiParse/api/track/v2'
       await this.gate(url)
       const data = await postJson<{ data?: { url?: string; lyric?: string } }>(
         url,
@@ -634,8 +637,8 @@ export class PlatformEngine {
         {
           Accept: 'application/json, text/plain, */*',
           'User-Agent': 'Mozilla/5.0',
-          Referer: 'http://qiuyu520.fun/qishui/',
-          Origin: 'http://qiuyu520.fun'
+          Referer: 'https://qiuyu520.fun/qishui/',
+          Origin: 'https://qiuyu520.fun'
         },
         { signal: this.cb.signal, timeoutMs: 10_000 }
       )

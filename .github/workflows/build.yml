@@ -47,21 +47,29 @@ jobs:
       - name: Build renderer & main
         run: npm run build
 
-      # sidecar 就位检查：缺失时给出明确告警而非静默空包
+      # sidecar 收集（遗留清单 #1）：官方/高星发布源下载 aria2c / yt-dlp / ffmpeg 到引擎目录
+      # 本地仓库若已提交引擎二进制则脚本按"已存在跳过"处理
+      - name: Collect sidecars
+        run: node scripts/fetch-sidecars.mjs
+
+      # sidecar 就位门禁（发布口径）：缺失即 fail，杜绝"零引擎安装包"静默出包
       - name: Verify sidecars
         shell: bash
         run: |
           plat="${{ matrix.platform }}"
           case "$plat" in
-            win) dirs="resources/engines/win32-x64"; bin="aria2c.exe" ;;
-            mac) dirs="resources/engines/darwin-arm64 resources/engines/darwin-x64"; bin="aria2c" ;;
-            linux) dirs="resources/engines/linux-x64"; bin="aria2c" ;;
+            win) dirs="resources/engines/win32-x64"; bins="aria2c.exe yt-dlp.exe ffmpeg.exe ffprobe.exe" ;;
+            mac) dirs="resources/engines/darwin-arm64"; bins="aria2c yt-dlp_macos ffmpeg ffprobe" ;;
+            linux) dirs="resources/engines/linux-x64"; bins="aria2c yt-dlp_linux ffmpeg ffprobe" ;;
           esac
-          for dir in $dirs; do
-            if [ ! -f "$dir/$bin" ]; then
-              echo "::warning::sidecar 缺失：$dir/$bin —— 发布前请在该平台构建并提交 sidecar"
+          missing=0
+          for bin in $bins; do
+            if [ ! -f "$dirs/$bin" ]; then
+              echo "::error::sidecar 缺失：$dirs/$bin"
+              missing=1
             fi
           done
+          exit $missing
 
       - name: Package (electron-builder)
         run: |

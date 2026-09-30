@@ -90,8 +90,8 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
     }
   }
 
-  /** F1 试听：经服务代理的预览流（16801，符合 CSP media-src） */
-  function togglePreview(c: MusicCandidate): void {
+  /** F1 试听：经主进程 omniget-preview:// 协议代理的预览流（符合 CSP media-src） */
+  async function togglePreview(c: MusicCandidate): Promise<void> {
     const key = `${c.platform}:${c.id}`
     if (playingId === key) {
       audioRef.current?.pause()
@@ -99,7 +99,7 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
       return
     }
     audioRef.current?.pause()
-    const url = window.omniget.musicPreview(c.platform, c.id)
+    const url = await window.omniget.musicPreview(c.platform, c.id).catch(() => '')
     if (!url) {
       setNotices((prev) =>
         [{ level: 'warning' as const, message: '该平台暂不支持试听' }, ...prev].slice(0, 4)

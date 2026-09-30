@@ -34,7 +34,7 @@ sidecar 引擎按 **`resources/engines/<platform>-<arch>/`** 目录分发，与�
 
 | 平台 | 目录 | 说明 |
 |---|---|---|
-| Windows x64 | `win32-x64` | aria2c.exe / yt-dlp.exe / ffmpeg.exe / omni-service.exe |
+| Windows x64 | `win32-x64` | aria2c.exe / yt-dlp.exe / ffmpeg.exe（音乐引擎已内嵌主进程，无 sidecar 服务） |
 | macOS arm64 | `darwin-arm64` | 无后缀 |
 | macOS x64 | `darwin-x64` | 无后缀 |
 | Linux x64 | `linux-x64` | 无后缀 |

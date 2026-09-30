@@ -29,6 +29,10 @@ export function registerPreviewHandler(): void {
       const platform = url.searchParams.get('platform') ?? 'netease'
       const sid = url.searchParams.get('id') ?? ''
       const quality = url.searchParams.get('quality') ?? 'standard'
+      // 纵深防御：入口即校验（engine.previewUrl 内部还有同口径校验）
+      if (platform !== 'netease' || !/^\d{1,20}$/.test(sid)) {
+        return new Response('bad request', { status: 400 })
+      }
       const mirror = await getMusicEngine().previewUrl(platform, sid, quality)
       if (!mirror) return new Response('preview unavailable', { status: 404 })
       const upstream = await openStream(mirror)

@@ -1,6 +1,7 @@
 // 任务管理器（M1-1/M1-11，§4.5）：编排、状态机驱动、持久化恢复、事件广播。
 
 import { app } from 'electron'
+import { basename, dirname } from 'path'
 import type {
   Task,
   TaskEvent,
@@ -150,6 +151,17 @@ export class TaskManager {
     const s = sniff(input.source)
     if (!s) return { kind: 'failed', error: makeError('PARSE_FAILED').message }
 
+    // 音乐查询（纯文本歌名）无解析/勾选阶段：直接走音乐工作台通道创建并入队，
+    // 避免 engine=music 落入 aria2.parse 报"不支持的任务类型"
+    if (s.type === 'music') {
+      const { taskId } = await this.createMusicTask({
+        q: input.source,
+        quality: 'high',
+        saveDir: input.saveDir
+      })
+      return { kind: 'started', taskId }
+    }
+
     // 入参校验（防止空目录/越界线程落库后在引擎侧报晦涩错误）
     const saveDir = input.saveDir?.trim() ?? ''
     if (!saveDir) {
@@ -184,13 +196,11 @@ export class TaskManager {
       source: s.source,
       name: '',
       engine:
-        s.type === 'music'
-          ? 'music'
-          : s.type === 'video'
-            ? 'ytdlp'
-            : s.type === 'tool'
-              ? 'tool'
-              : 'aria2',
+        s.type === 'video'
+          ? 'ytdlp'
+          : s.type === 'tool'
+            ? 'tool'
+            : 'aria2',
       status: 'parsing',
       saveDir,
       totalBytes: 0,
@@ -353,13 +363,19 @@ export class TaskManager {
     switch (input.action) {
       case 'pause':
         if (task.status === 'running' || task.status === 'queued') {
-          // M3-1：yt-dlp pause = SIGTERM（.part 保留）；aria2 = RPC pause
-          if (task.engine === 'ytdlp') this.ytdlp?.pause(task)
-          else
+          if (task.engine === 'ytdlp') {
+            // M3-1：yt-dlp pause = SIGTERM（.part 保留）
+            this.ytdlp?.pause(task)
+          } else if (task.engine === 'music') {
+            // 音乐：真取消（AbortSignal 即刻中断，引擎产物已清理），槽位由后续 done(cancelled) 事件释放
+            if (task.engineGid) void this.music?.cancel(task.engineGid)
+            updateTaskFields(task.id, { engineGid: null })
+          } else {
             await this.aria2.pause(task).catch(() => {
               // 极端竞态：forcePause 仍被拒（如刚重启 aria2 会话丢失）→ 不转状态，抛友好提示
               throw new Error('任务正忙，无法立即暂停，请稍候重试')
             })
+          }
           this.transition(task, 'paused')
           this.pushEvent({ taskId: task.id, status: 'paused' })
         }
@@ -370,6 +386,13 @@ export class TaskManager {
           if (task.engine === 'ytdlp') {
             // resume：同参数重 spawn（恢复凭据是任务参数本身，§4.1）
             if (!this.ytdlp?.resume(task)) throw new Error('无法恢复：任务参数已丢失，请重试')
+          } else if (task.engine === 'music') {
+            // 音乐：暂停时引擎任务已终止，恢复 = 取消可能残留的旧引擎任务后重新入队
+            if (task.engineGid) void this.music?.cancel(task.engineGid)
+            updateTaskFields(task.id, { status: 'queued', engineGid: null })
+            this.pushEvent({ taskId: task.id, status: 'queued' })
+            this.pumpMusic()
+            break
           } else {
             await this.aria2.resume(task)
           }
@@ -615,7 +638,8 @@ export class TaskManager {
             tool: input.tool,
           sourcePath: input.sourcePath,
           params: input.params,
-          saveDir: input.saveDir || input.sourcePath
+          // 缺省回退：源文件所在目录（而非文件本身——那会让 mkdir 失败）
+          saveDir: input.saveDir || dirname(input.sourcePath)
         },
           task.id
         )
@@ -764,6 +788,19 @@ export class TaskManager {
     return { taskId: task.id }
   }
 
+  /**
+   * B1：音乐引擎就绪后恢复队列（原 sidecar onMusicEngineOnline 语义）。
+   * 启动时 recoverOnStartup 只置回 queued，若无人泵则任务永久卡死；此方法在
+   * setMusicEngine 之后调用，清理残留 gid 并立即泵队列。
+   */
+  resumeMusicQueue(): void {
+    if (!this.music || !this.music.isOnline) return
+    for (const t of listTasks({ status: ['queued'] })) {
+      if (t.engine === 'music' && t.engineGid) updateTaskFields(t.id, { engineGid: null })
+    }
+    this.pumpMusic()
+  }
+
   /** M2-6 信号量泵：队列 FIFO 出队 → 占位 → 提交内嵌引擎 */
   private pumpMusic(): void {
     if (!this.music || !this.music.isOnline) return
@@ -830,14 +867,13 @@ export class TaskManager {
       return
     }
 
-    // engineGid = 音乐引擎任务 id
-    const all = listTasks({ status: ['queued', 'running'] })
-    const task = all.find((t) => t.engine === 'music' && t.engineGid === ev.taskId) as
-      | TaskExt
-      | undefined
-    if (!task) return
-
     if (ev.type === 'music.progress') {
+      // engineGid = 音乐引擎任务 id
+      const all = listTasks({ status: ['queued', 'running'] })
+      const task = all.find((t) => t.engine === 'music' && t.engineGid === ev.taskId) as
+        | TaskExt
+        | undefined
+      if (!task) return
       if (task.status === 'queued') {
         this.transition(task, 'running')
       }
@@ -852,7 +888,21 @@ export class TaskManager {
       return
     }
 
-    // music.done（cancelled：服务端协作式取消完成，产物已删，任务多半已随删除消失）
+    // music.done：每个 done 都对应一个经 pumpMusic 占槽的引擎任务。
+    // 任务可能已被删除/暂停（gid 已清），此时查找会落空——但槽位必须照常释放，
+    // 否则每取消/删除一个运行中任务就永久泄漏 1 个并发位（上限 4，泄漏满后音乐队列全卡死）。
+    this.activeMusic = Math.max(0, this.activeMusic - 1)
+
+    const all = listTasks({ status: ['queued', 'running'] })
+    const task = all.find((t) => t.engine === 'music' && t.engineGid === ev.taskId) as
+      | TaskExt
+      | undefined
+    if (!task) {
+      this.pumpMusic()
+      return
+    }
+
+    // cancelled：取消完成（引擎产物已清理；任务多已随删除/暂停流转，此处兜底标记）
     if ((ev as { cancelled?: boolean }).cancelled) {
       try {
         this.transition(task, 'failed')
@@ -868,8 +918,7 @@ export class TaskManager {
       // F3：用真实文件名回填展示名
       let name = task.name
       if (ev.mp3Path) {
-        const base = ev.mp3Path.replace(/\\/g, '/').split('/').pop() ?? ''
-        name = base.replace(/\.(mp3|flac|m4a)$/i, '')
+        name = basename(ev.mp3Path).replace(/\.(mp3|flac|m4a)$/i, '')
       }
       updateTaskFields(task.id, {
         downloaded: bytes,
@@ -898,8 +947,6 @@ export class TaskManager {
       updateTaskFields(task.id, { error: message })
       this.pushEvent({ taskId: task.id, status: 'failed', error: message })
     }
-    // 释放信号量槽位
-    this.activeMusic = Math.max(0, this.activeMusic - 1)
     this.pumpMusic()
   }
 }

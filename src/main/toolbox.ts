@@ -7,7 +7,7 @@ import { mkdir, stat } from 'fs/promises'
 import { basename, join } from 'path'
 import type { ToolCreateInput, ToolEvent } from '@shared/types'
 import { createLogger } from './logger'
-import { toolPath } from './orchestrator/binaries'
+import { toolPath, ensureVerified } from './orchestrator/binaries'
 
 const log = createLogger('toolbox')
 
@@ -64,8 +64,11 @@ export const TOOL_DEFS: ToolDef[] = [
     ],
     build: (input, outDir, params) => {
       const out = join(outDir, `${baseName(input)}_trim.mp3`)
+      // 数值白名单：params 来自渲染层，`-` 开头值会被 ffmpeg 当作选项
+      const from = Math.min(86400 * 7, Math.max(0, Number(params.from) || 0))
+      const duration = Math.min(86400 * 7, Math.max(1, Number(params.duration) || 30))
       return {
-        args: ['-y', '-ss', String(params.from ?? '0'), '-t', String(params.duration ?? '30'), '-i', input, '-c', 'copy', out],
+        args: ['-y', '-ss', String(from), '-t', String(duration), '-i', input, '-c', 'copy', out],
         output: out
       }
     }
@@ -232,7 +235,8 @@ export class ToolboxRunner {
     }
   }
 
-  private runFfmpeg(args: string[], output: string, taskId: string): Promise<void> {
+  private async runFfmpeg(args: string[], output: string, taskId: string): Promise<void> {
+    await ensureVerified('ffmpeg') // TOFU 强制校验
     const ffmpeg = toolPath('ffmpeg')
     return new Promise((resolve, reject) => {
       const proc = spawn(ffmpeg, args, { windowsHide: true })

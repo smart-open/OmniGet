@@ -3,10 +3,12 @@
 // - 下载：真取消（AbortSignal 贯穿所有网络请求），取消后清理产物
 // - 试听：网易云镜像直链（经 omniget-preview:// 协议流式代理）
 
-import { join } from 'path'
-import { stat, unlink } from 'fs/promises'
+import { dirname, extname, join } from 'path'
+import { rename, stat, unlink } from 'fs/promises'
 import type { MusicSearchResult, ServiceEvent } from '@shared/types'
 import { HostGate } from './gate'
+import { isTrustedAudioHost } from './http'
+import { DEFAULT_TEMPLATE, getNamingTemplate, renderNamingTemplate } from '../naming'
 import {
   PlatformEngine,
   PLATFORM_LABELS,
@@ -203,6 +205,9 @@ export class MusicEngine {
         lrcPath: result.lrcPath
       }
       if (out.success && out.mp3Path) {
+        const renamed = await this.applyNaming(out.mp3Path, out.lrcPath ?? '', artist ?? '', song ?? '')
+        out.mp3Path = renamed.mp3
+        out.lrcPath = renamed.lrc
         out.bytes = await stat(out.mp3Path).then((s) => s.size).catch(() => 0)
       }
       job.status = out.success ? 'completed' : 'failed'
@@ -235,6 +240,38 @@ export class MusicEngine {
     }
   }
 
+  /** M4-11：音乐完成重命名（naming.template 非默认时生效；{{title}}=歌名 {{artist}}=歌手）。
+   *  返回最终 mp3 路径；lrc 同步改名；目标冲突时追加序号防覆盖。 */
+  private async applyNaming(
+    mp3Path: string,
+    lrcPath: string,
+    artist: string,
+    song: string
+  ): Promise<{ mp3: string; lrc: string }> {
+    const tpl = getNamingTemplate().trim()
+    if (!tpl || tpl === DEFAULT_TEMPLATE || !mp3Path) return { mp3: mp3Path, lrc: lrcPath }
+    const base =
+      sanitizeName(renderNamingTemplate(tpl, { title: song, artist }).replace(/\.{2,}/g, '.')) ||
+      sanitizeName(song)
+    const dir = dirname(mp3Path)
+    const ext = extname(mp3Path)
+    const preferred = join(dir, base + ext)
+    if (preferred === mp3Path) return { mp3: mp3Path, lrc: lrcPath }
+    let final = preferred
+    for (let n = 2; n < 50; n++) {
+      const exists = await stat(final).then(() => true).catch(() => false)
+      if (!exists) break
+      final = join(dir, `${base} (${n})${ext}`)
+    }
+    const renamed = await rename(mp3Path, final)
+      .then(() => true)
+      .catch(() => false)
+    if (!renamed) return { mp3: mp3Path, lrc: lrcPath } // 重命名失败不视为下载失败
+    const lrcFinal = final.replace(/\.\w+$/, '.lrc')
+    if (lrcPath) await rename(lrcPath, lrcFinal).catch(() => {})
+    return { mp3: final, lrc: lrcFinal }
+  }
+
   /** F1：按网易云 ID 精确下载（搜索降级时的可靠通道） */
   async downloadById(
     jobId: string,
@@ -257,15 +294,26 @@ export class MusicEngine {
       )
         ? (input.quality as Quality)
         : 'high'
+      // 防注入：ID 直接内插镜像 API URL，必须纯数字
+      const nid = input.neteaseId.trim()
+      if (!/^\d{1,20}$/.test(nid)) {
+        return {
+          success: false,
+          source: '',
+          message: `无效的歌曲 ID: ${input.neteaseId.slice(0, 40)}`,
+          mp3Path: '',
+          lrcPath: ''
+        }
+      }
       const engine = this.makeEngine(job.controller.signal)
-      const detail = await engine.getNeteaseDetail(input.neteaseId)
+      const detail = await engine.getNeteaseDetail(nid)
       const artist = (input.artist || detail.artist || '未知歌手').trim()
-      const song = (input.song || detail.name || input.neteaseId).trim()
+      const song = (input.song || detail.name || nid).trim()
       const filename = sanitizeName(`${artist} - ${song}`)
       const mp3Path = join(input.saveDir, `${filename}.mp3`)
       const lrcPath = join(input.saveDir, `${filename}.lrc`)
       emit('progress', 'netease', '尝试 网易云（按 ID 精确下载）…')
-      const ok = await engine.downloadNeteaseById(input.neteaseId, mp3Path, lrcPath, quality)
+      const ok = await engine.downloadNeteaseById(nid, mp3Path, lrcPath, quality)
       if (this.isCancelled(job) || !ok) {
         if (this.isCancelled(job)) {
           await unlink(mp3Path).catch(() => {})
@@ -281,13 +329,15 @@ export class MusicEngine {
         }
       }
       job.status = 'completed'
+      const final = await this.applyNaming(mp3Path, lrcPath, artist, song)
+      const finalBase = final.mp3.replace(/\\/g, '/').split('/').pop() ?? filename
       return {
         success: true,
         source: '网易云(按ID)',
-        message: `网易云: ${filename}`,
-        mp3Path,
-        lrcPath,
-        bytes: await stat(mp3Path).then((s) => s.size).catch(() => 0)
+        message: `网易云: ${finalBase.replace(/\.\w+$/, '')}`,
+        mp3Path: final.mp3,
+        lrcPath: final.lrc,
+        bytes: await stat(final.mp3).then((s) => s.size).catch(() => 0)
       }
     } catch (err) {
       if (job.controller.signal.aborted) return this.cancelledResult()
@@ -313,12 +363,27 @@ export class MusicEngine {
     return true
   }
 
-  /** F1 试听：网易云镜像直链（protocol 层流式代理给 <audio>） */
+  /** 应用退出：abort 全部在途下载（不留 .part 残留；事件监听器随进程销毁） */
+  shutdown(): void {
+    for (const job of this.jobs.values()) {
+      if (job.status === 'running') job.controller.abort()
+    }
+  }
+
+  /** F1 试听：网易云镜像直链（protocol 层流式代理给 <audio>）。
+   *  安全：sid 必须纯数字、quality 白名单、返回 URL 必须落在可信音频域内。 */
   async previewUrl(platform: string, sid: string, quality = 'standard'): Promise<string | null> {
-    if (platform !== 'netease' || !sid) return null
+    if (platform !== 'netease' || !/^\d{1,20}$/.test(sid)) return null
+    if (!(['standard', 'high', 'lossless'] as const).includes(quality as Quality)) return null
     const engine = this.makeEngine()
     const url = await engine.previewNetease(sid, quality)
-    return url && url.startsWith('http') ? url : null
+    if (!url || !url.startsWith('http')) return null
+    try {
+      if (!isTrustedAudioHost(new URL(url).hostname)) return null
+    } catch {
+      return null
+    }
+    return url
   }
 }
 

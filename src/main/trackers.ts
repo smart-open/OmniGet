@@ -56,11 +56,19 @@ export function listTrackers(): TrackerEntry[] {
 }
 
 export function addTracker(url: string): void {
+  const trimmed = url.trim()
+  // 校验：仅允许 tracker 协议，禁止逗号/空白（bt-tracker 为 CSV 注入 aria2 全局选项）
+  if (
+    !/^(https?|udp|wss?):\/\/[^\s,]+$/i.test(trimmed) ||
+    trimmed.length > 500
+  ) {
+    throw new Error('无效的 tracker 地址：需以 http(s):// udp:// ws(s):// 开头，且不含空格或逗号')
+  }
   getDb()
     .prepare(
       'INSERT INTO trackers (url, last_ok_at, source) VALUES (?, NULL, ?) ON CONFLICT(url) DO NOTHING'
     )
-    .run(url.trim(), 'manual')
+    .run(trimmed, 'manual')
 }
 
 export function removeTracker(url: string): void {

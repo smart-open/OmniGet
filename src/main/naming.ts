@@ -12,6 +12,8 @@ export function getNamingTemplate(): string {
 export interface NamingVars {
   title?: string
   uploader?: string
+  /** 音乐任务：歌手（与 uploader 语义并存，模板按场景使用） */
+  artist?: string
   /** 1-based 序号（合集/批量场景） */
   index?: number
 }
@@ -25,6 +27,8 @@ export function renderNamingTemplate(template: string, vars: NamingVars): string
         return vars.title ?? 'untitled'
       case 'uploader':
         return vars.uploader ?? 'unknown'
+      case 'artist':
+        return vars.artist ?? vars.uploader ?? 'unknown'
       case 'date':
         return date
       case 'index':
@@ -41,6 +45,8 @@ export function toYtDlpOutputTemplate(template: string): string {
     /\{\{\s*uploader\s*\}\}/g,
     '%(uploader)s'
   )
-  const rendered = renderNamingTemplate(mapped, {})
-  return `${rendered.replace(/[\\/]+$/, '')}.%(ext)s`
+  let rendered = renderNamingTemplate(mapped, {})
+  // 防穿越：模板存于 settings，`..` 可把 yt-dlp -o 输出逃出 saveDir
+  rendered = rendered.replace(/\.{2,}/g, '.').replace(/^[\\/]+/, '').replace(/[\\/]+$/, '')
+  return `${rendered || DEFAULT_TEMPLATE}.%(ext)s`
 }

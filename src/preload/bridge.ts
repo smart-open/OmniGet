@@ -29,8 +29,13 @@ const api: OmniGetBridge = {
   musicSearch: (input: MusicSearchInput) => ipcRenderer.invoke(IPC_CHANNELS.musicSearch, input),
   musicDownload: (input: MusicDownloadInput) =>
     ipcRenderer.invoke(IPC_CHANNELS.musicDownload, input),
-  musicPreview: (platform: string, id: string): string =>
-    ipcRenderer.sendSync('music:preview', platform, id) as string,
+  musicPreview: (platform: string, id: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.musicPreview, platform, id),
+  diagBtPort: () => ipcRenderer.invoke(IPC_CHANNELS.diagBtPort),
+  diagBtExternal: () => ipcRenderer.invoke(IPC_CHANNELS.diagBtExternal),
+  checkAppUpdate: () => ipcRenderer.invoke(IPC_CHANNELS.appCheckUpdate),
+  openReleases: () => ipcRenderer.invoke(IPC_CHANNELS.appOpenReleases),
+  platform: process.platform,
   onNotices: (listener: (notices: UiNotice[]) => void) => {
     const wrapped = (_e: unknown, notices: UiNotice[]): void => listener(notices)
     ipcRenderer.on(IPC_CHANNELS.eventNotices, wrapped)
@@ -56,7 +61,6 @@ const api: OmniGetBridge = {
     ipcRenderer.on('event:tools', wrapped)
     return () => ipcRenderer.removeListener('event:tools', wrapped)
   },
-  checkAppUpdate: () => ipcRenderer.invoke('app:update'),
   syncTheme: (theme: 'dark' | 'light'): void => ipcRenderer.send('ui:theme', theme),
   filePath: (file: File): string => webUtils.getPathForFile(file),
   defaultSaveDir: (): Promise<string> => ipcRenderer.invoke('app:defaultSaveDir'),

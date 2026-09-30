@@ -45,6 +45,7 @@ function rowToTask(r: TaskRow): Task {
     seedRatio: r.seed_ratio ?? 0,
     // engine_gid：WS 事件按 gid 匹配任务（缺失会导致音乐事件永不命中）
     engineGid: r.engine_gid ?? undefined,
+    quality: (r.quality as Task['quality']) ?? undefined,
     params: r.params ?? undefined,
     createdAt: r.created_at,
     error: r.error ?? undefined
@@ -70,7 +71,7 @@ export function insertTask(task: Task & { seedRatio?: number; infohash?: string;
       formatId: null,
       noWatermark: task.noWatermark === undefined ? null : task.noWatermark ? 1 : 0,
       wmLevel: null,
-      quality: null,
+      quality: task.quality ?? null,
       engineGid: null,
       error: task.error ?? null,
       createdAt: task.createdAt,
@@ -102,6 +103,7 @@ export function updateTaskFields(
     infohash: string | null
     formatId: string | null
     wmLevel: string | null
+    quality: string | null
     error: string | null
     completedAt: number | null
   }>
@@ -119,6 +121,7 @@ export function updateTaskFields(
     infohash: 'infohash',
     formatId: 'format_id',
     wmLevel: 'wm_level',
+    quality: 'quality',
     error: 'error',
     completedAt: 'completed_at'
   }

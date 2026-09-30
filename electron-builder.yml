@@ -62,6 +62,12 @@ mac:
         - arm64
   category: public.app-category.utilities
   darkModeSupport: true
+  # 签名/公证（遗留清单 #2）：接入 Apple 开发者证书后在 CI 环境注入以下变量并取消注释，
+  # 缺证书时保持注释（notarize: true 且无凭证会导致构建失败）：
+  # identity: null            # 使用 CI 钥匙串中的 "Developer ID Application" 证书
+  # notarize: true            # 依赖 env: APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID
+  # hardenedRuntime: true
+  # entitlements: build/entitlements.mac.plist
   extendInfo:
     CFBundleURLTypes:
       - CFBundleURLName: magnet

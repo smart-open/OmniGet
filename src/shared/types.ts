@@ -275,7 +275,13 @@ export interface CreateTaskResultFailed {
   error: string
 }
 
-export type CreateTaskResult = CreateTaskResultAwaiting | CreateTaskResultFailed
+/** 无解析/勾选阶段的任务（音乐查询）：创建即入队，前端直接关框 */
+export interface CreateTaskResultStarted {
+  kind: 'started'
+  taskId: string
+}
+
+export type CreateTaskResult = CreateTaskResultAwaiting | CreateTaskResultStarted | CreateTaskResultFailed
 
 /** 侧栏角标计数（SQL 全表口径，跨视图一致） */
 export interface TaskCounts {
@@ -283,6 +289,26 @@ export interface TaskCounts {
   queued: number
   completed: number
   trashed: number
+}
+
+/** BT 外网可达性探测结果（reachable=null = 探测服务不可用/超时） */
+export interface BtExternalResult {
+  reachable: boolean | null
+  /** 成功节点数 / 总节点数 */
+  ok: number
+  total: number
+  /** 本机公网 IP（探测依据，仅本地展示不入库） */
+  ip?: string
+  error?: string
+}
+
+/** 应用更新检查结果（Linux 手动通道口径） */
+export interface AppUpdateCheck {
+  hasUpdate: boolean
+  current: string
+  latest?: string
+  releaseUrl?: string
+  error?: string
 }
 
 /** M3-9：引擎热更结果（yt-dlp 热更器 UpdateResult 口径） */
@@ -308,12 +334,22 @@ export interface OmniGetBridge {
   // music
   musicSearch(input: MusicSearchInput): Promise<MusicSearchResult>
   musicDownload(input: MusicDownloadInput): Promise<{ taskId: string }>
-  /** F1 试听：返回服务端代理的预览流 URL（<audio> 播放，走 16801 符合 CSP） */
-  musicPreview(platform: string, id: string): string
+  /** F1 试听：返回主进程代理的预览流 URL（omniget-preview:// 协议，<audio> 播放） */
+  musicPreview(platform: string, id: string): Promise<string>
+  /** BT 端口自检：检测 aria2 listen-port 本地是否在监听（外网可达性需用户自行放行防火墙） */
+  diagBtPort(): Promise<{ listening: boolean; port: number }>
+  /** BT 外网可达性探测（opt-in：经第三方 check-host.net 发起 TCP 探测，会暴露公网 IP） */
+  diagBtExternal(): Promise<BtExternalResult>
+  /** 应用更新检查（Linux 手动通道 / 通用版本比对）：GitHub latest release 元数据 */
+  checkAppUpdate(): Promise<AppUpdateCheck>
+  /** 打开 Releases 下载页（仅允许发布仓库 https 地址） */
+  openReleases(): Promise<void>
+  /** 渲染层平台标识（托盘/更新 UI 分支用） */
+  readonly platform: NodeJS.Platform
   /** 降级黄条等通知（§4.4 降级告警） */
   onNotices(listener: (notices: UiNotice[]) => void): () => void
   // engine
-  engineUpdate(engine: 'ytdlp' | 'service'): Promise<EngineUpdateResult>
+  engineUpdate(engine: 'ytdlp'): Promise<EngineUpdateResult>
   // tool
   toolCreate(input: ToolCreateInput): Promise<{ taskId: string }>
   // settings
@@ -369,6 +405,11 @@ export const IPC_CHANNELS = {
   taskCounts: 'task:counts',
   musicSearch: 'music:search',
   musicDownload: 'music:download',
+  musicPreview: 'music:preview',
+  diagBtPort: 'diag:btPort',
+  diagBtExternal: 'diag:btExternal',
+  appCheckUpdate: 'app:checkUpdate',
+  appOpenReleases: 'app:openReleases',
   engineUpdate: 'engine:update',
   toolCreate: 'tool:create',
   settingsGet: 'settings:get',

@@ -18,14 +18,14 @@
 | 构建 | electron-vite 2 + Vite 5 | main/preload CJS 产物；renderer ESM |
 | UI | React 18 + TS 5.7 严格模式 + Tailwind 3 + zustand 5（**v5 必须用 `create<T>()(fn)` 柯里化**）+ framer-motion 11（M4 用）+ @tanstack/react-virtual + @phosphor-icons/react |
 | 持久化 | better-sqlite3 11（Electron ABI 预编译） | journal_mode=WAL, foreign_keys=ON, user_version 迁移框架 |
-| 引擎 | aria2c 1.37.0 / yt-dlp 2026.08.19 / ffmpeg 9.0.2（sidecar，`resources/engines/win32-x64/`）；omni-service（FastAPI，dev 走系统 Python 3.12 直跑 `service/main.py`，prod 走 sidecar exe） |
-| 测试 | node:test + tsx（`npm test` 经 `scripts/run-tests.js` Electron-as-Node）；e2e：`scripts/e2e-aria2.ts` / `scripts/e2e_music.py` / `scripts/e2e_ytdlp.ts` / `scripts/e2e_updater.ts` / `scripts/smoke_service.py` |
+| 引擎 | aria2c 1.37.0 / yt-dlp 2026.08.19 / ffmpeg 9.0.2（sidecar 二进制，`resources/engines/win32-x64/`）；音乐引擎已**内嵌主进程**（`src/main/music/`，原 Python omni-service sidecar 已于 2026-09-30 迁除） |
+| 测试 | node:test + tsx（`npm test` 经 `scripts/run-tests.js` Electron-as-Node）；e2e：`scripts/e2e-aria2.ts` / `scripts/e2e_ytdlp.ts` / `scripts/e2e_updater.ts` |
 
 ## 3. 目录结构（实际落位）
 
 ```
 src/main/          主进程：index.ts(单实例锁+编排) ipc.ts(§6.1白名单注册表) logger.ts
-  orchestrator/    ports.ts(16800/16801顺延至16810) binaries.ts(TOFU SHA256) aria2.ts(监督器+WS RPC客户端)
+  orchestrator/    ports.ts(aria2 RPC 端口分配) binaries.ts(TOFU SHA256+ensureVerified) aria2.ts(监督器+WS RPC客户端) proc.ts(跨平台进程树终止)
   task/            state-machine.ts(§4.1守卫) manager.ts(编排) store.ts(SQLite读写) events.ts(250ms合并) id.ts(uuidv7)
   adapters/        aria2.ts(parse/start/poll) types.ts(EngineAdapter接口)
   aria2/options.ts 参数作用域（全局 vs 每任务，§4.2边界表）

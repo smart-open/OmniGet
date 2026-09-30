@@ -3,6 +3,8 @@
 import { app, ipcMain, BrowserWindow, shell } from 'electron'
 import {
   IPC_CHANNELS,
+  type AppUpdateCheck,
+  type BtExternalResult,
   type ControlTaskInput,
   type CreateTaskInput,
   type ConfirmSelectionInput,
@@ -20,6 +22,32 @@ const log = createLogger('ipc')
 
 let taskManager: TaskManager | null = null
 let musicAdapter: MusicAdapter | null = null
+
+/** 发布仓库 slug（owner/name）：package.json repository 字段解析；未配置返回 null */
+function resolveRepoSlug(): string | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const pkg = require('../../package.json') as {
+      repository?: { url?: string } | string
+    }
+    const url = typeof pkg.repository === 'string' ? pkg.repository : pkg.repository?.url
+    const m = /github\.com[/:]([\w.-]+)\/([\w.-]+?)(\.git)?$/i.exec(url ?? '')
+    return m ? `${m[1]}/${m[2]}` : null
+  } catch {
+    return null
+  }
+}
+
+/** 语义化版本比较（x.y.z 逐段数值）：>0 表示 a 更新 */
+function compareVersions(a: string, b: string): number {
+  const pa = a.split(/[.-]/).map((x) => parseInt(x, 10) || 0)
+  const pb = b.split(/[.-]/).map((x) => parseInt(x, 10) || 0)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0)
+    if (d !== 0) return d
+  }
+  return 0
+}
 
 export function setTaskManager(m: TaskManager): void {
   taskManager = m
@@ -74,8 +102,19 @@ export function registerIpcHandlers(): void {
   })
 
   ipcMain.handle(IPC_CHANNELS.taskParseFile, async (_e, path: string) => {
-    // 本地 .torrent 解析：零引擎依赖即时出文件树（§4.2）
-    const info = parseTorrentFile(path)
+    // 本地 .torrent 解析：零引擎依赖即时出文件树（§4.2）。
+    // 收口：仅允许 .torrent 扩展 + 拒绝系统目录（防渲染层被攻破后的任意文件探测）
+    const p = String(path ?? '').trim()
+    if (!/\.torrent$/i.test(p)) throw new Error('仅支持解析 .torrent 文件')
+    const sysDirs = [process.env.SystemRoot ?? 'C:\\Windows', process.env.WINDIR ?? 'C:\\Windows']
+      .concat(['C:\\Windows', '/usr', '/etc', '/bin', '/sbin', '/boot'])
+      .filter(Boolean)
+      .map((d) => d.toLowerCase())
+    const norm = p.replace(/\\/g, '/').toLowerCase()
+    if (sysDirs.some((d) => norm.startsWith(d.replace(/\\/g, '/').toLowerCase() + '/'))) {
+      throw new Error('不允许解析系统目录中的文件')
+    }
+    const info = parseTorrentFile(p)
     return {
       kind: 'torrent',
       name: info.name,
@@ -152,7 +191,7 @@ export function registerIpcHandlers(): void {
   })
 
   // engine（M3-9：yt-dlp 热更器）
-  ipcMain.handle(IPC_CHANNELS.engineUpdate, async (_e, engine: 'ytdlp' | 'service') => {
+  ipcMain.handle(IPC_CHANNELS.engineUpdate, async (_e, engine: 'ytdlp') => {
     if (engine !== 'ytdlp') throw new Error('仅支持 yt-dlp 引擎更新')
     const { updateYtDlp } = await import('./updater/ytdlp')
     return updateYtDlp()
@@ -308,9 +347,153 @@ export function registerIpcHandlers(): void {
     return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
   })
 
-  // F1 试听：同步返回预览流 URL（服务端代理镜像音频，经 16801 符合 CSP）
-  ipcMain.on('music:preview', (e, platform: string, id: string) => {
-    e.returnValue = musicAdapter ? musicAdapter.previewUrl(platform, id) : ''
+  // F1 试听：返回预览流 URL（主进程经 omniget-preview:// 协议代理镜像音频）
+  ipcMain.handle(IPC_CHANNELS.musicPreview, (_e, platform: string, id: string) => {
+    return musicAdapter ? musicAdapter.previewUrl(platform, id) : ''
+  })
+
+  // BT 端口自检（#5）：探测 aria2 listen-port 本地 TCP 监听；外网可达性由用户防火墙决定
+  ipcMain.handle(IPC_CHANNELS.diagBtPort, async () => {
+    const { defaultGlobalOptions } = await import('./aria2/options')
+    const port = Number(defaultGlobalOptions()['listen-port'] ?? '6881')
+    const listening = await new Promise<boolean>((resolve) => {
+      const { createConnection } = require('net') as typeof import('net')
+      const sock = createConnection({ host: '127.0.0.1', port, timeout: 2000 })
+      sock.once('connect', () => {
+        sock.destroy()
+        resolve(true)
+      })
+      const fail = (): void => {
+        sock.destroy()
+        resolve(false)
+      }
+      sock.once('timeout', fail)
+      sock.once('error', fail)
+    })
+    return { listening, port }
+  })
+
+  // BT 外网可达性探测（#5 增强，opt-in）：经 check-host.net 免费节点对本机公网 IP:6881
+  // 发起多节点 TCP 探测——只能验证「外部能否主动连入」，是 BT 连通性的黄金判据。
+  ipcMain.handle(IPC_CHANNELS.diagBtExternal, async (): Promise<BtExternalResult> => {
+    const fail = (error: string): BtExternalResult => ({ reachable: null, ok: 0, total: 0, error })
+    try {
+      const { fetch: f } = await import('undici')
+      const jsonHeaders = { Accept: 'application/json' } as Record<string, string>
+
+      // 1. 本机公网 IP：多源兜底（部分网络环境会阻断单一服务，实测 ipify 国内常被重置）
+      let ip: string | undefined
+      for (const src of [
+        { url: 'https://api.ipify.org?format=json', parse: 'json' as const },
+        { url: 'https://api64.ipify.org?format=json', parse: 'json' as const },
+        { url: 'https://ifconfig.me/ip', parse: 'text' as const }
+      ]) {
+        try {
+          const r = await f(src.url, { signal: AbortSignal.timeout(5000) })
+          if (!r.ok) continue
+          const v =
+            src.parse === 'json'
+              ? ((await r.json()) as { ip?: string }).ip
+              : (await r.text()).trim()
+          if (v && /^[\d.:a-fA-F]+$/.test(v)) {
+            ip = v
+            break
+          }
+        } catch {
+          continue
+        }
+      }
+      if (!ip) return fail('获取公网 IP 失败：探测相关服务在当前网络不可达')
+
+      // 2. 发起多节点 TCP 探测
+      const { defaultGlobalOptions } = await import('./aria2/options')
+      const port = Number(defaultGlobalOptions()['listen-port'] ?? '6881')
+      let startRes
+      try {
+        startRes = await f(
+          `https://check-host.net/check-tcp?host=${encodeURIComponent(`${ip}:${port}`)}&max_nodes=3`,
+          { headers: jsonHeaders, signal: AbortSignal.timeout(10_000) }
+        )
+      } catch {
+        return fail(
+          '探测服务（check-host.net）在当前网络不可达——功能可用性依赖该服务，可稍后重试'
+        )
+      }
+      if (!startRes.ok) return fail('探测服务不可达（check-host.net）')
+      const { request_id: requestId } = (await startRes.json()) as { request_id?: string }
+      if (!requestId) return fail('探测任务创建失败')
+
+      // 3. 轮询结果（节点通常 3~8s 返回，最多 15s）
+      let ok = 0
+      let done = 0
+      let total = 0
+      for (let i = 0; i < 8; i++) {
+        await new Promise((r) => setTimeout(r, 2000))
+        const res = await f(`https://check-host.net/check-result/${requestId}`, {
+          headers: jsonHeaders,
+          signal: AbortSignal.timeout(8000)
+        })
+        if (!res.ok) continue
+        const nodes = (await res.json()) as Record<string, [unknown] | null>
+        total = Object.keys(nodes).length
+        done = 0
+        ok = 0
+        for (const v of Object.values(nodes)) {
+          if (v === null) continue // 该节点尚未返回
+          done++
+          const first = (v as Array<Record<string, unknown>>)[0]
+          // 成功节点：{ time: number }；失败：{ error: ... } 或 timeout
+          if (first && typeof first.time === 'number') ok++
+        }
+        if (done >= total && total > 0) break
+      }
+      if (total === 0) return fail('探测节点无响应，请稍后重试')
+      return { reachable: ok > 0, ok, total, ip }
+    } catch (err) {
+      log.warn('bt external probe failed:', String(err))
+      return fail('探测失败：网络不可达或服务超时')
+    }
+  })
+
+  // 应用更新检查（#4 Linux 手动通道 / 通用版本比对）：GitHub latest release
+  ipcMain.handle(IPC_CHANNELS.appCheckUpdate, async (): Promise<AppUpdateCheck> => {
+    const current = app.getVersion()
+    try {
+      const repo = resolveRepoSlug()
+      if (!repo) {
+        return { hasUpdate: false, current, error: '未配置发布仓库（package.json repository 字段）' }
+      }
+      const { fetch: f } = await import('undici')
+      const res = await f(`https://api.github.com/repos/${repo}/releases/latest`, {
+        headers: { Accept: 'application/vnd.github+json' },
+        signal: AbortSignal.timeout(10_000)
+      })
+      if (res.status === 404) return { hasUpdate: false, current, error: '发布仓库尚无正式 release' }
+      if (!res.ok) return { hasUpdate: false, current, error: `GitHub API HTTP ${res.status}` }
+      const rel = (await res.json()) as { tag_name?: string; html_url?: string }
+      const latest = rel.tag_name?.replace(/^v/i, '')
+      if (!latest) return { hasUpdate: false, current, error: 'release 元数据异常' }
+      return {
+        hasUpdate: compareVersions(latest, current) > 0,
+        current,
+        latest,
+        releaseUrl: rel.html_url ?? `https://github.com/${repo}/releases/latest`
+      }
+    } catch (err) {
+      log.warn('app update check failed:', String(err))
+      return { hasUpdate: false, current, error: '检查失败：网络不可达或 GitHub API 限流' }
+    }
+  })
+
+  // 打开 Releases 下载页（Linux 手动更新出口；仅允许 https 的 GitHub 发布地址）
+  ipcMain.handle(IPC_CHANNELS.appOpenReleases, async (): Promise<void> => {
+    const repo = resolveRepoSlug()
+    const url = repo
+      ? `https://github.com/${repo}/releases/latest`
+      : 'https://github.com/'
+    if (/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/releases/.test(url)) {
+      await shell.openExternal(url)
+    }
   })
 
   // DB 健康自检（T0-4 验收辅助）

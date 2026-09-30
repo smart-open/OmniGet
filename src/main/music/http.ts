@@ -29,6 +29,24 @@ export function isMirrorHost(host: string): boolean {
   return VERIFY_DISABLED_HOSTS.some((d) => h === d || h.endsWith('.' + d))
 }
 
+/**
+ * 试听/音频下载的目标域名白名单（SSRF 防线）：镜像 API 返回的直链
+ * 必须落在已知音乐 CDN/镜像域内才允许主进程拉取并回流渲染层。
+ */
+const AUDIO_CDN_SUFFIXES = [
+  '126.net', // 网易云 CDN（*.music.126.net 等）
+  'qq.com', // QQ 音乐 CDN（isure.stream.qqmusic.qq.com 等）
+  'kugou.com', // 酷狗
+  'migu.cn', // 咪咕
+  'douyin.com', // 汽水/抖音
+  ...VERIFY_DISABLED_HOSTS // 镜像自身（部分镜像直接代理音频）
+] as const
+
+export function isTrustedAudioHost(host: string): boolean {
+  const h = host.toLowerCase()
+  return AUDIO_CDN_SUFFIXES.some((d) => h === d || h.endsWith('.' + d))
+}
+
 const insecureAgent = new Agent({ connect: { rejectUnauthorized: false } })
 // 试听流专用：连接 10s 超时、body 不限时（对应 Python socket 超时口径，长歌曲不被掐断）
 const streamingAgent = new Agent({
@@ -74,7 +92,10 @@ function mergeSignal(signal: AbortSignal | undefined, timeoutMs: number): AbortS
   return signal ? AbortSignal.any([signal, t]) : t
 }
 
-/** JSON 请求（带简单重试，等价 urllib3 Retry 口径） */
+/** 不可重试错误（4xx 等）：立即上抛，避免对第三方 API 做无效重试 */
+class NonRetryableError extends Error {}
+
+/** JSON 请求（带简单重试，等价 urllib3 Retry 口径：仅 5xx 与网络错误重试） */
 export async function fetchJson<T = unknown>(
   url: string,
   init: FetchInit = {},
@@ -90,14 +111,14 @@ export async function fetchJson<T = unknown>(
         signal: merged,
         dispatcher: dispatcherFor(url)
       })
-      if (RETRY_STATUS.has(res.status) && attempt < RETRY_TOTAL) {
-        await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS * (attempt + 1)))
-        continue
-      }
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      return (await res.json()) as T
+      if (res.ok) return (await res.json()) as T
+      if (!RETRY_STATUS.has(res.status)) throw new NonRetryableError(`HTTP ${res.status}`)
+      // 5xx：消费掉旧响应体再重试（防 undici socket 挂起）
+      await res.body?.cancel().catch(() => {})
+      if (attempt >= RETRY_TOTAL) throw new Error(`HTTP ${res.status}`)
+      await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS * (attempt + 1)))
     } catch (err) {
-      if (signal?.aborted) throw err
+      if (signal?.aborted || err instanceof NonRetryableError) throw err
       lastErr = err
       if (attempt < RETRY_TOTAL) {
         await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS * (attempt + 1)))
@@ -187,6 +208,7 @@ export async function fetchToFile(
       dispatcher: streamingDispatcherFor(url)
     })
     for (let attempt = 0; RETRY_STATUS.has(res.status) && attempt < RETRY_TOTAL; attempt++) {
+      await res.body?.cancel().catch(() => {}) // 消费旧响应体，防 socket 挂起
       await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS * (attempt + 1)))
       res = await undiciFetch(url, {
         method: 'GET',
@@ -207,7 +229,8 @@ export async function fetchToFile(
         total += chunk.length
         if (!ws.write(chunk)) nodeStream.pause()
       })
-      nodeStream.on('drain', () => nodeStream.resume())
+      // drain 是可写流事件：写缓冲排空后恢复读取（挂在 nodeStream 上会永久挂起）
+      ws.on('drain', () => nodeStream.resume())
       ws.on('error', reject)
       nodeStream.on('error', reject)
       nodeStream.on('end', () => ws.end(() => resolve()))
@@ -243,12 +266,13 @@ export async function openStream(
   }
 }
 
-/** 整体下载（等价 _download_file）：<1KB 视为失败不落盘 */
+/** 整体下载（等价 _download_file）：<1KB 视为失败不落盘。
+ *  注：流式下载不设总超时（大文件慢镜像不被掐断），连接超时由 streamingAgent 承担 */
 export async function downloadFile(
   url: string,
   dest: string,
   opts: HttpOpts = {}
 ): Promise<boolean> {
-  const n = await fetchToFile(url, dest, { ...opts, minBytes: 1024, timeoutMs: opts.timeoutMs ?? 30_000 })
+  const n = await fetchToFile(url, dest, { ...opts, minBytes: 1024 })
   return n >= 1024
 }

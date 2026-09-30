@@ -152,7 +152,8 @@ function buildTrayMenu(): Electron.Menu {
       label: '开机自启',
       type: 'checkbox',
       checked: loginItem,
-      visible: process.platform !== 'linux',
+      // Linux：Electron 经 XDG autostart（~/.config/autostart/*.desktop）实现，主流桌面环境可用，放开供用户自选
+      visible: true,
       click: (item) => setLoginItemSettings(item.checked)
     },
     { type: 'separator' },
@@ -171,12 +172,16 @@ export function createTray(): Tray {
   tray = new Tray(buildTrayIcon())
   tray.setToolTip('OmniGet')
 
-  // 左键：切换主窗显隐（Windows 行为；macOS 用 right-click 打开菜单）
-  tray.on('click', () => toggleMainWindow())
-  // 右键：弹出菜单（每次现场构建，速度/勾选态始终最新）
-  tray.on('right-click', () => {
-    tray?.popUpContextMenu(buildTrayMenu())
-  })
+  if (process.platform === 'darwin') {
+    // macOS 惯例：单击弹菜单（左/右键同口径），无"左键切窗口"约定
+    tray.on('click', () => tray?.popUpContextMenu(buildTrayMenu()))
+    tray.on('right-click', () => tray?.popUpContextMenu(buildTrayMenu()))
+  } else {
+    // 左键：切换主窗显隐（Windows/Linux 行为）
+    tray.on('click', () => toggleMainWindow())
+    // 右键：弹出菜单（每次现场构建，速度/勾选态始终最新）
+    tray.on('right-click', () => tray?.popUpContextMenu(buildTrayMenu()))
+  }
 
   // tooltip 每 2s 刷新聚合速度
   const rebuild = (): void => {

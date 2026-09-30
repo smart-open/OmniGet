@@ -16,9 +16,12 @@ const URL =
   process.env.E2E_URL ?? 'https://registry.npmmirror.com/typescript/-/typescript-5.7.2.tgz'
 const SAVE_DIR = join(process.cwd(), '.e2e-tmp')
 
+// 自持实例：finally 按启动进程的 PID 树终止，不误杀机器上无关的 aria2c
+let supervisor: Aria2Supervisor | null = null
+
 async function main(): Promise<void> {
   console.log('[e2e] starting aria2c supervisor...')
-  const supervisor = new Aria2Supervisor(RPC_PORT)
+  supervisor = new Aria2Supervisor(RPC_PORT)
   await supervisor.start()
   console.log('[e2e] aria2 online')
 
@@ -109,12 +112,6 @@ main()
     process.exitCode = 1
   })
   .finally(() => {
-    // 清理残留 aria2c（跨平台：win taskkill / unix pkill，均仅限本进程树启动的实例）
-    const { execSync } = require('child_process') as typeof import('child_process')
-    try {
-      if (process.platform === 'win32') execSync('taskkill /IM aria2c.exe /F', { stdio: 'ignore' })
-      else execSync('pkill -x aria2c', { stdio: 'ignore' })
-    } catch {
-      // 已退出
-    }
+    // 按本脚本启动实例的 PID 树终止（跨平台），不误杀机器上无关的 aria2c
+    if (supervisor) void supervisor.shutdown()
   })

@@ -8,16 +8,11 @@ data/
 resources/engines/*
 !resources/engines/.gitkeep
 
-# Python
-__pycache__/
-*.pyc
-*.pyo
-
-# PyInstaller 构建工作目录（spec 与 icon 保留提交）
-build/pyinstaller/omni-service/
-
 # TypeScript 增量编译缓存
 *.tsbuildinfo
+
+# 历史构建工作目录残留（PyInstaller 已随 Python sidecar 移除）
+build/pyinstaller/omni-service/
 
 # aria2 运行时会话/控制文件
 *.aria2

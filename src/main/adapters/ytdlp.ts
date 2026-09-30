@@ -5,9 +5,12 @@
 // M3-2：ffmpeg 缺失时降级预合并格式（--ffmpeg-location 仅在存在时注入）
 
 import type { Task, TaskEvent, VideoFormat } from '@shared/types'
+import { join } from 'path'
+import { sanitizeFilename } from '@shared/sanitize'
 import { getSetting } from '../db'
 import { createLogger } from '../logger'
 import { getYtDlpSupervisor } from '../orchestrator/ytdlp'
+import { ensureVerified } from '../orchestrator/binaries'
 import type { EngineHealthInfo, ParseOutput } from './types'
 
 const log = createLogger('ytdlp-adapter')
@@ -151,6 +154,8 @@ export class YtDlpAdapter {
   // ── start / control（M3-1/M3-5/M3-6/M3-10）────────────────────────
 
   async start(task: Task, selection?: { indexes?: number[]; paths?: string[] }): Promise<string> {
+    // TOFU 强制校验（此前仅 aria2 有闸门，yt-dlp 被篡改仍可运行）
+    await ensureVerified('ytdlp')
     if (this.ffmpegOk === null) this.ffmpegOk = await this.supervisor.ffmpegAvailable()
     const opts = this.videoOpts.get(task.id) ?? {}
     const isPlaylist = (selection?.indexes?.length ?? 0) > 1
@@ -182,12 +187,12 @@ export class YtDlpAdapter {
     if (isPlaylist) {
       // M3-4/8：N–M 集选择 + 上传者分目录 + 元数据 JSON/封面落盘
       args.push('--playlist-items', dedupeRanges(selection?.indexes ?? []))
-      args.push('-o', join2(task.saveDir, '%(uploader)s/%(title)s.%(ext)s'))
+      args.push('-o', join(task.saveDir, '%(uploader)s/%(title)s.%(ext)s'))
       args.push('--write-info-json', '--write-thumbnail')
     } else {
       // M4-11：全局命名模板（{{title}}/{{uploader}}/{{date}}/{{index:N}}）
       const { toYtDlpOutputTemplate, getNamingTemplate } = await import('../naming')
-      args.push('-o', join2(task.saveDir, toYtDlpOutputTemplate(getNamingTemplate())))
+      args.push('-o', join(task.saveDir, toYtDlpOutputTemplate(getNamingTemplate())))
     }
 
     this.running.add(task.id)
@@ -254,6 +259,7 @@ export class YtDlpAdapter {
           this.emit({ taskId: task.id, status: 'completed', message: 'delogo 失败，保留原片' })
         }
       }
+      this.cleanupTaskState(task.id)
       return
     }
 
@@ -287,21 +293,29 @@ export class YtDlpAdapter {
         ? 'yt-dlp 参数错误（引擎版本不兼容？）。请尝试更新引擎。'
         : `${diagnosis.message}${lastLine ? `（${lastLine}）` : ''}`
     this.emit({ taskId: task.id, status: 'failed', error: msg })
+    this.cleanupTaskState(task.id)
+  }
+
+  /** 终态（completed/failed）清理：防长期运行 Map 只增不减（paused 保留参数供 resume） */
+  private cleanupTaskState(taskId: string): void {
+    this.argsByTask.delete(taskId)
+    this.videoOpts.delete(taskId)
+    this.shortVideo.delete(taskId)
+    this.userPaused.delete(taskId)
+    this.supervisor.dropTask(taskId)
   }
 
   /** M3-7 L3：对保存目录最新视频文件做 delogo（右上角 15%×8%），产出 _nowm 副本 */
   private async delogoLatest(task: Task): Promise<void> {
     const { readdir } = await import('fs/promises')
-    const { join } = await import('path')
     const { spawn } = await import('child_process')
     const { toolPath } = await import('../orchestrator/binaries')
 
     const entries = await readdir(task.saveDir)
-    const video = entries
-      .filter((f) => /\.(mp4|mkv|webm|mov)$/i.test(f) && !f.includes('_nowm'))
-      .map((f) => join(task.saveDir, f))
-      .sort()
-      .pop()
+    const video = await newestVideo(
+      entries.filter((f) => /\.(mp4|mkv|webm|mov)$/i.test(f) && !f.includes('_nowm')),
+      task.saveDir
+    )
     if (!video) return
     const out = video.replace(/(\.\w+)$/, '_nowm$1')
     await new Promise<void>((resolve, reject) => {
@@ -328,15 +342,13 @@ export class YtDlpAdapter {
   private async verifyIntegrity(task: Task): Promise<void> {
     try {
       const { readdir } = await import('fs/promises')
-      const { join } = await import('path')
       const { spawn } = await import('child_process')
       const { toolPath } = await import('../orchestrator/binaries')
       const entries = await readdir(task.saveDir)
-      const video = entries
-        .filter((f) => /\.(mp4|mkv|webm|mov)$/i.test(f))
-        .map((f) => join(task.saveDir, f))
-        .sort()
-        .pop()
+      const video = await newestVideo(
+        entries.filter((f) => /\.(mp4|mkv|webm|mov)$/i.test(f)),
+        task.saveDir
+      )
       if (!video) return
       const probe = toolPath('ffprobe')
       const out = await new Promise<string>((resolve) => {
@@ -384,6 +396,7 @@ export class YtDlpAdapter {
   remove(task: Task): void {
     this.userPaused.delete(task.id)
     this.supervisor.pause(task.id)
+    this.cleanupTaskState(task.id)
   }
 
   isRunning(taskId: string): boolean {
@@ -404,8 +417,22 @@ function pickSize(f?: VideoFormat): number {
   return f?.filesize ?? 0
 }
 
+/** 目录内最新的视频文件（按 mtime，字典序在时间戳命名之外不可靠） */
+async function newestVideo(names: string[], saveDir: string): Promise<string | null> {
+  const { stat } = await import('fs/promises')
+  const { join } = await import('path')
+  let best: { path: string; m: number } | null = null
+  for (const f of names) {
+    const p = join(saveDir, f)
+    const m = await stat(p).then((s) => s.mtimeMs).catch(() => 0)
+    if (!best || m > best.m) best = { path: p, m }
+  }
+  return best?.path ?? null
+}
+
 function sanitize(name: string): string {
-  return name.replace(/[<>:"|?*\x00-\x1f]/g, '_').trim() || 'untitled'
+  // 统一清洗（保留名/控制字符/尾点空格/超长），额外处理路径分隔符与 `/`
+  return sanitizeFilename(name.replace(/[\\/]/g, '_')) || 'untitled'
 }
 
 /** 索引数组 → yt-dlp --playlist-items 语法（1,3,5-10，§4.2） */
@@ -423,9 +450,4 @@ function dedupeRanges(indexes: number[]): string {
     prev = cur
   }
   return parts.join(',')
-}
-
-function join2(dir: string, tmpl: string): string {
-  const sep = dir.includes('\\') ? '\\' : '/'
-  return `${dir.replace(/[\\/]+$/, '')}${sep}${tmpl}`
 }

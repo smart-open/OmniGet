@@ -94,7 +94,8 @@ export async function updateYtDlp(): Promise<UpdateResult> {
 
     // 3. SHA256 校验（官方 SUMS 清单，TOFU 供应链口径 §9）
     const sumsBody = await import('fs/promises').then((m) => m.readFile(tmpSums, 'utf8'))
-    const expected = new RegExp(`^([a-f0-9]{64})\\s+\\*?${assetName}$`, 'mi').exec(sumsBody)?.[1]
+    // assetName 含 '.'（yt-dlp.exe），需转义防正则误匹配
+    const expected = new RegExp(`^([a-f0-9]{64})\\s+\\*?${assetName.replace(/\./g, '\\.')}$`, 'mi').exec(sumsBody)?.[1]
     if (!expected) throw new Error('校验清单中缺少对应条目')
     const actual = await import('fs/promises').then((m) =>
       m.readFile(tmpExe).then((buf) => createHash('sha256').update(buf).digest('hex'))

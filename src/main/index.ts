@@ -9,6 +9,7 @@ import { Aria2Supervisor } from './orchestrator/aria2'
 import { Aria2Adapter } from './adapters/aria2'
 import { LocalMusicAdapter } from './music/adapter'
 import { registerPreviewHandler, registerPreviewScheme } from './music/preview-protocol'
+import { getMusicEngine } from './music/engine'
 import { YtDlpAdapter } from './adapters/ytdlp'
 import { getYtDlpSupervisor } from './orchestrator/ytdlp'
 import { TaskManager } from './task/manager'
@@ -32,7 +33,7 @@ import {
   setSpeedProvider,
   startClipboardWatcher
 } from './integrations/tray'
-import { sniff } from './sniffer'
+import { sniff, DedupeWindow } from './sniffer'
 
 const log = createLogger('main')
 
@@ -44,15 +45,16 @@ const gotLock = app.requestSingleInstanceLock()
 if (!gotLock) {
   app.quit()
 } else {
+  const launchDedupe = new DedupeWindow(30_000)
   app.on('second-instance', (_e, argv) => {
-    // magnet: 协议唤起：从 argv 提取链接并转发到窗口（§4.6，30s 去重在嗅探侧）
+    // magnet: 协议唤起：从 argv 提取链接并转发到窗口（§4.6；30s 去重防止重复唤起开重复任务）
     const source = argv.find((a) => /^magnet:\?/i.test(a) || /^https?:\/\//i.test(a))
     const win = BrowserWindow.getAllWindows()[0]
     if (win) {
       if (win.isMinimized()) win.restore()
       win.show()
       win.focus()
-      if (source && sniff(source)) {
+      if (source && sniff(source) && launchDedupe.check(source.slice(0, 120))) {
         win.webContents.send('ui:action', { action: 'new-task', payload: source })
       }
     }
@@ -79,6 +81,14 @@ async function bootstrap(): Promise<void> {
     } catch (err) {
       log.error(`binary check failed: ${name}`, err)
     }
+  }
+  // ffprobe（可选工具，非 SidecarBinary）：缺失仅 warning——完整性探测会静默降级
+  try {
+    const { toolPath } = await import('./orchestrator/binaries')
+    const { access, constants } = await import('fs/promises')
+    await access(toolPath('ffprobe'), constants.X_OK)
+  } catch {
+    log.warn('ffprobe missing: 完整性探测（M4-12）将不可用，请将 ffprobe 放入引擎目录')
   }
 
   registerIpcHandlers()
@@ -141,6 +151,8 @@ async function bootstrap(): Promise<void> {
   manager.setMusicEngine(musicAdapter)
   setMusicAdapter(musicAdapter)
   musicAdapter.onEvent((ev) => manager.applyMusicEvent(ev))
+  // B1：恢复上次重启前遗留的 queued 音乐任务（recoverOnStartup 在此之前不泵音乐）
+  manager.resumeMusicQueue()
   log.info('music engine online (in-process)')
 
   // M1-12 系统集成：托盘 / 关窗最小化 / 剪贴板监听（按设置启停）
@@ -168,6 +180,8 @@ async function bootstrap(): Promise<void> {
     manager.stopPolling()
     stopStatsScheduler()
     getYtDlpSupervisor().killAll()
+    // 音乐任务 abort 全部网络请求，避免遗留 .part 文件
+    getMusicEngine().shutdown()
     closeDb()
   })
 
@@ -208,9 +222,9 @@ function createWindow(): void {
   win.on('maximize', () => win.webContents.send('win:state', true))
   win.on('unmaximize', () => win.webContents.send('win:state', false))
 
-  // 外链一律走系统浏览器（§9）
+  // 外链一律走系统浏览器（§9）；仅放行 web/mailto 协议（file:// 等本地协议不外抛）
   win.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url)
+    if (/^(https?|mailto):/i.test(url)) void shell.openExternal(url)
     return { action: 'deny' }
   })
 

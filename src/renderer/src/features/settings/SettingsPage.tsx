@@ -2,7 +2,7 @@
 // 模板 / 下载 / Tracker / 更新 / 说明
 import { useEffect, useState } from 'react'
 import { ArrowClockwise, CheckCircle, FolderOpen, Trash } from '@phosphor-icons/react'
-import type { ScheduleRule, TrackerEntry } from '@shared/types'
+import type { AppUpdateCheck, ScheduleRule, TrackerEntry } from '@shared/types'
 import { Button } from '../../components/ui'
 import { THEMES, applyTheme, parseStoredTheme, watchSystemTheme, type ThemeId } from '../../theme'
 import {
@@ -234,6 +234,17 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
   const [refreshing, setRefreshing] = useState(false)
   const [saved, setSaved] = useState('')
   const [engineUpdating, setEngineUpdating] = useState(false)
+  const [btDiag, setBtDiag] = useState<
+    'checking' | 'listening' | 'not-listening' | 'error' | null
+  >(null)
+  const [btExt, setBtExt] = useState<
+    | { state: 'checking' }
+    | { state: 'ok' | 'blocked'; ok: number; total: number; ip?: string }
+    | { state: 'unknown' | 'error'; message: string }
+    | null
+  >(null)
+  const [appUpdateChecking, setAppUpdateChecking] = useState(false)
+  const [appUpdate, setAppUpdate] = useState<AppUpdateCheck | null>(null)
 
   useEffect(() => {
     void (async () => {
@@ -486,15 +497,131 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
             <p className="mt-2 text-[10px] text-text-3">
               订阅源：ngosang/trackerslist 每日最佳；刷新失败自动降级使用本地缓存；手动条目随任务注入
             </p>
+
+            {/* BT 端口连通性自检（#5） */}
+            <div className="mt-4 border-t border-border pt-3">
+              <div className="flex items-center gap-2">
+                <Button
+                  size="xs"
+                  variant="outline"
+                  onClick={() => {
+                    setBtDiag('checking')
+                    void window.omniget
+                      .diagBtPort()
+                      .then((r) => setBtDiag(r.listening ? 'listening' : 'not-listening'))
+                      .catch(() => setBtDiag('error'))
+                  }}
+                >
+                  BT 端口自检
+                </Button>
+                <span className="text-[10px] text-text-3">
+                  {btDiag === 'listening' && '✓ 6881 端口监听正常'}
+                  {btDiag === 'not-listening' &&
+                    '✗ 6881 端口未监听——aria2 可能未就绪，请稍后重试'}
+                  {btDiag === 'error' && '自检失败'}
+                  {btDiag === 'checking' && '检测中…'}
+                  {btDiag === null && '检测 aria2 BT 端口监听状态'}
+                </span>
+              </div>
+              <p className="mt-1 text-[10px] text-text-3">
+                提示：本地监听正常 ≠ 外网可达。BT 提速请在路由器/防火墙放行 <span className="num">6881</span> 端口（TCP+UDP）。
+              </p>
+
+              {/* 外网可达性探测（#5 增强，opt-in：经第三方 check-host.net，会暴露公网 IP） */}
+              <div className="mt-3 flex items-center gap-2">
+                <Button
+                  size="xs"
+                  variant="outline"
+                  disabled={btExt?.state === 'checking'}
+                  onClick={() => {
+                    setBtExt({ state: 'checking' })
+                    void window.omniget
+                      .diagBtExternal()
+                      .then((r) => {
+                        if (r.reachable === true) setBtExt({ state: 'ok', ok: r.ok, total: r.total, ip: r.ip })
+                        else if (r.reachable === false) setBtExt({ state: 'blocked', ok: r.ok, total: r.total, ip: r.ip })
+                        else setBtExt({ state: 'unknown', message: r.error ?? '探测服务不可用' })
+                      })
+                      .catch(() => setBtExt({ state: 'error', message: '探测请求失败' }))
+                  }}
+                >
+                  {btExt?.state === 'checking' ? '探测中…' : '外网可达性检测'}
+                </Button>
+                <span className="text-[10px] text-text-3">
+                  {btExt?.state === 'ok' &&
+                    `✓ 外网可连入（${btExt.ok}/${btExt.total} 节点成功）——BT 可被其他 peer 主动连接`}
+                  {btExt?.state === 'blocked' &&
+                    `✗ 外网无法连入（${btExt.ok}/${btExt.total} 节点成功）——请检查路由器端口映射 / 防火墙入站规则（6881 TCP+UDP）`}
+                  {btExt?.state === 'unknown' && `探测未完成：${btExt.message}`}
+                  {btExt?.state === 'error' && btExt.message}
+                  {btExt === null && '从公网多节点验证 6881 能否被主动连入（仅本地监听无法证明）'}
+                </span>
+              </div>
+              {btExt && btExt.state !== 'checking' && (
+                <p className="mt-1 text-[10px] text-text-3">
+                  探测经第三方服务 check-host.net 发起{btExt.state === 'ok' || btExt.state === 'blocked' ? `（本机公网 IP ${'ip' in btExt ? btExt.ip : ''}，仅用于本次探测，不入库不上报）` : ''}。
+                </p>
+              )}
+            </div>
           </Section>
         )}
 
         {/* ── 更新 ─────────────────────────────────────────────────── */}
         {tab === 'update' && (
           <Section title="更新">
-            <p className="mb-2 text-xs leading-relaxed text-text-2">
-              应用更新：打包版本随 GitHub 发布通道自动检查（每 4 小时），下载完成后退出时自动安装。
-            </p>
+            {window.omniget.platform === 'linux' ? (
+              <>
+                {/* Linux 手动更新通道（遗留清单 #4：deb 无在线更新上游支持） */}
+                <p className="mb-2 text-xs leading-relaxed text-text-2">
+                  应用更新（Linux）：deb/AppImage 包不支持自动在线更新，请手动检查新版本并前往
+                  发布页下载安装包覆盖安装。
+                </p>
+                <div className="mb-3 flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    icon={<ArrowClockwise size={11} className={appUpdateChecking ? 'animate-spin' : ''} />}
+                    disabled={appUpdateChecking}
+                    onClick={() => {
+                      setAppUpdateChecking(true)
+                      void window.omniget
+                        .checkAppUpdate()
+                        .then((r) => {
+                          setAppUpdate(r)
+                          if (r.error) flash(r.error)
+                        })
+                        .catch(() => flash('检查失败：网络不可达'))
+                        .finally(() => setAppUpdateChecking(false))
+                    }}
+                  >
+                    {appUpdateChecking ? '检查中…' : '检查新版本'}
+                  </Button>
+                  {appUpdate && !appUpdate.error && (
+                    <span className="text-xs text-text-2">
+                      {appUpdate.hasUpdate
+                        ? `发现新版本 v${appUpdate.latest}（当前 v${appUpdate.current}）`
+                        : `已是最新版本（v${appUpdate.current}）`}
+                    </span>
+                  )}
+                  {appUpdate?.error && <span className="text-xs text-text-3">{appUpdate.error}</span>}
+                </div>
+                {appUpdate?.hasUpdate && (
+                  <div className="mb-3">
+                    <Button
+                      size="sm"
+                      onClick={() => void window.omniget.openReleases()}
+                      icon={<FolderOpen size={12} />}
+                    >
+                      前往下载 v{appUpdate.latest}
+                    </Button>
+                  </div>
+                )}
+              </>
+            ) : (
+              <p className="mb-2 text-xs leading-relaxed text-text-2">
+                应用更新：打包版本随 GitHub 发布通道自动检查（每 4 小时），下载完成后退出时自动安装。
+              </p>
+            )}
             <p className="mb-3 text-xs leading-relaxed text-text-2">
               引擎更新：yt-dlp 属高频失效资产，提取器失效时失败任务会提示「更新引擎」，校验
               SHA256 后原子替换（TOFU 指纹口径，指纹不符拒绝安装）。
@@ -550,11 +677,11 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
               </p>
               <p>
                 <span className="font-medium text-text-1">本地服务</span>
-                ：aria2 RPC 与音乐服务仅绑定 127.0.0.1 回环地址，调用方凭据经环境变量注入，不出现在进程参数中。
+                ：aria2 RPC 仅绑定 127.0.0.1 回环地址；引擎二进制经 TOFU 指纹校验，篡改即拒绝启动。
               </p>
               <p className="text-text-3">
                 <span className="num">v0.1.0</span> · Electron 33 · React 18 · aria2c 1.37 · yt-dlp
-                2026.08.19 · ffmpeg 9.0 · FastAPI
+                2026.08.19 · ffmpeg 9.0
               </p>
             </div>
           </Section>

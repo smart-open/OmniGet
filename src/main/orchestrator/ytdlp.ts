@@ -139,6 +139,11 @@ export class YtDlpSupervisor {
     return this.errTails.get(taskId) ?? ''
   }
 
+  /** 任务终态/删除时清理（防 errTails 只增不减） */
+  dropTask(taskId: string): void {
+    this.errTails.delete(taskId)
+  }
+
   /** 强杀（应用退出，§2.2）：进程树整体终止 */
   killAll(): void {
     for (const [, proc] of this.procs) {

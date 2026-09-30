@@ -120,6 +120,29 @@ export async function recordFingerprint(name: SidecarBinary, digest: string): Pr
   const store = await loadFingerprints()
   store[name] = digest
   await writeFile(fingerprintsFile(), JSON.stringify(store, null, 2), 'utf8')
+  verifiedCache.delete(name) // 热更换了新指纹，进程内缓存失效
+}
+
+// 进程内已校验缓存（mtime+size 命中即视为已过 TOFU，避免每次 spawn 重哈希十几 MB）
+const verifiedCache = new Map<SidecarBinary, { m: number; size: number }>()
+
+/**
+ * 强制 TOFU 校验（spawn 前必调）：缺失或指纹不符均抛错。
+ * 此前只有 aria2 真正执行了"指纹不符拒绝启动"，yt-dlp/ffmpeg 缺此闸门。
+ */
+export async function ensureVerified(name: SidecarBinary): Promise<void> {
+  const path = binaryPath(name)
+  const { stat } = await import('fs/promises')
+  const st = await stat(path).catch(() => null)
+  if (!st) {
+    throw makeError('ENGINE_BINARY_TAMPERED', {
+      message: `引擎 ${binaryName(name)} 缺失（${path}）。请在设置中更新或重新安装引擎。`
+    })
+  }
+  const cached = verifiedCache.get(name)
+  if (cached && cached.m === st.mtimeMs && cached.size === st.size) return
+  await checkBinary(name) // 指纹不符时内部抛 ENGINE_BINARY_TAMPERED
+  verifiedCache.set(name, { m: st.mtimeMs, size: st.size })
 }
 
 /** M3-9：热更器复用的单文件 SHA256 */
