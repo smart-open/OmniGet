@@ -151,15 +151,15 @@ export interface MusicSearchResult {
   degraded: string[]
 }
 
-/** omni-service WS 事件（§6.3） */
+/** 音乐引擎事件（§6.3；内嵌引擎直发，形状与原 omni-service WS 一致） */
 export interface ServiceEvent {
   type: 'music.progress' | 'music.done' | 'music.warning'
-  taskId: string // omni-service 任务 id
+  taskId: string // 音乐引擎任务 id
   platform?: string
   platformLabel?: string
   message?: string
   success?: boolean
-  /** music.done 取消标记（协作式取消完成，服务端已删产物） */
+  /** music.done 取消标记（真取消：AbortSignal 中断后产物已清理） */
   cancelled?: boolean
   source?: string
   mp3Path?: string

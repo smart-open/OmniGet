@@ -37,7 +37,7 @@ const fakeAdapter = {
   async getTask(): Promise<null> {
     return null
   }
-} as unknown as import('../adapters/music').MusicAdapter
+} as unknown as import('../music/adapter').MusicAdapter
 
 after(() => {
   const { closeDb } = require('../db') as typeof import('../db')
@@ -49,7 +49,6 @@ test('信号量：6 个任务最多 4 并发，done 释放后补位', async () =
   const aria2Stub = {} as import('../adapters/aria2').Aria2Adapter
   const mgr = new TaskManager(aria2Stub)
   mgr.setMusicEngine(fakeAdapter)
-  mgr.onMusicEngineOnline()
 
   const ids: string[] = []
   for (let i = 0; i < 6; i++) {
@@ -88,10 +87,4 @@ test('信号量：6 个任务最多 4 并发，done 释放后补位', async () =
   assert.equal(done.length, 4)
   const stillQueued = listTasks({ status: ['queued'] }).filter((t) => t.engine === 'music')
   assert.equal(stillQueued.length, 2)
-
-  // B1：服务下线清信号量，上线清 gid 重泵
-  mgr.onMusicEngineOffline()
-  mgr.onMusicEngineOnline()
-  await new Promise((r) => setTimeout(r, 50))
-  assert.equal(maxInflight, 4, '重泵后并发仍受 4 限制')
 })

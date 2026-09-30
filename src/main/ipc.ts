@@ -13,7 +13,7 @@ import {
 import { getDb, getSetting, setSetting } from './db'
 import { createLogger } from './logger'
 import type { TaskManager } from './task/manager'
-import type { MusicAdapter } from './adapters/music'
+import type { MusicAdapter } from './music/adapter'
 import { parseTorrentFile } from './torrent/parse'
 
 const log = createLogger('ipc')
@@ -141,7 +141,7 @@ export function registerIpcHandlers(): void {
     }
   })
 
-  // music（M2：代理 omni-service）
+  // music（M2：内嵌音乐引擎）
   ipcMain.handle(IPC_CHANNELS.musicSearch, async (_e, input: MusicSearchInput) => {
     if (!taskManager) throw new Error('任务系统尚未就绪，请稍候')
     return taskManager.musicSearch(input.q)

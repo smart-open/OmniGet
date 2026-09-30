@@ -1,0 +1,331 @@
+// 音乐引擎聚合层（engine.py 的等价 TS 移植，运行于 Electron 主进程内）
+// - 聚合搜索：五平台候选 + 原唱校验 + 原版度打分（口径与脚本同源）
+// - 下载：真取消（AbortSignal 贯穿所有网络请求），取消后清理产物
+// - 试听：网易云镜像直链（经 omniget-preview:// 协议流式代理）
+
+import { join } from 'path'
+import { stat, unlink } from 'fs/promises'
+import type { MusicSearchResult, ServiceEvent } from '@shared/types'
+import { HostGate } from './gate'
+import {
+  PlatformEngine,
+  PLATFORM_LABELS,
+  artistMatches,
+  sanitizeName,
+  scoreOriginality,
+  tryAllPlatforms,
+  type PlatformSong,
+  type Quality
+} from './platforms'
+
+/** 自然语言解析（与脚本解析器同源口径）：'陈奕迅的孤勇者' / '陈奕迅,孤勇者' / '陈奕迅 - 孤勇者' */
+export function parseQuery(q: string): { artist: string; song: string } {
+  const query = q.trim()
+  for (const sep of ['的', ' - ', '-', ',', '，', '、']) {
+    if (query.includes(sep)) {
+      const idx = query.indexOf(sep)
+      const artist = query.slice(0, idx).trim()
+      const song = query.slice(idx + sep.length).trim()
+      if (artist && song) return { artist, song }
+    }
+  }
+  const parts = query.split(/\s+/)
+  if (parts.length === 2 && parts[0] && parts[1]) {
+    return { artist: parts[0].trim(), song: parts[1].trim() }
+  }
+  return { artist: '', song: query }
+}
+
+export interface MusicJob {
+  id: string
+  status: 'running' | 'completed' | 'failed' | 'cancelling'
+  controller: AbortController
+  pipeline: string
+  warnings: string[]
+}
+
+export interface MusicDownloadResult {
+  success: boolean
+  source: string
+  message: string
+  mp3Path: string
+  lrcPath: string
+  bytes?: number
+}
+
+export class MusicEngine {
+  private gate = new HostGate(1000)
+  private jobs = new Map<string, MusicJob>()
+
+  getJob(id: string): MusicJob | undefined {
+    return this.jobs.get(id)
+  }
+
+  private makeEngine(signal?: AbortSignal): PlatformEngine {
+    return new PlatformEngine({
+      gate: this.gate,
+      signal,
+      log: (msg) => console.log(`[music-engine] ${msg}`)
+    })
+  }
+
+  /** 聚合搜索（§4.4）：五平台候选 + 原唱命中优先 + 原版度降序；60s 总 deadline */
+  async search(q: string, limit = 8): Promise<MusicSearchResult> {
+    const { artist, song } = parseQuery(q)
+    const keyword = `${artist} ${song}`.trim() || q
+    const controller = new AbortController()
+    const deadline = setTimeout(() => controller.abort(), 60_000)
+    try {
+      return await this.searchWith(q, keyword, artist, song, limit, controller.signal)
+    } finally {
+      clearTimeout(deadline)
+    }
+  }
+
+  private async searchWith(
+    originalQuery: string,
+    keyword: string,
+    artist: string,
+    song: string,
+    limit: number,
+    signal: AbortSignal
+  ): Promise<MusicSearchResult> {
+    const engine = this.makeEngine(signal)
+    const candidates: MusicSearchResult['candidates'] = []
+    const degraded: string[] = []
+
+    const plan: Array<['netease' | 'qq' | 'kugou' | 'migu' | 'soda', (kw: string, lim: number) => Promise<PlatformSong[]>]> = [
+      ['netease', (kw, lim) => engine.searchNetease(kw, lim)],
+      ['qq', (kw, lim) => engine.searchQq(kw, lim)],
+      ['kugou', (kw, lim) => engine.searchKugou(kw, lim)],
+      ['migu', (kw, lim) => engine.searchMigu(kw, lim)],
+      ['soda', (kw, lim) => engine.searchSoda(kw, lim)]
+    ]
+    for (const [platform, fn] of plan) {
+      let rows: PlatformSong[] = []
+      try {
+        rows = (await fn(keyword, limit)) ?? []
+      } catch {
+        rows = []
+      }
+      if (!rows.length) {
+        degraded.push(platform)
+        continue
+      }
+      for (const row of rows.slice(0, limit)) {
+        const name = row.name ?? ''
+        const rowArtist = row.artist ?? ''
+        candidates.push({
+          platform,
+          platformLabel: PLATFORM_LABELS[platform] ?? platform,
+          id: String(row.id ?? ''),
+          name,
+          artist: rowArtist,
+          artistMatch: artist ? artistMatches(rowArtist, artist) : true,
+          originality: scoreOriginality(name, song)
+        })
+      }
+    }
+    candidates.sort(
+      (a, b) => Number(a.artistMatch) - Number(b.artistMatch) || b.originality - a.originality
+    )
+    return {
+      query: originalQuery,
+      parsed: { artist, song },
+      candidates: candidates.slice(0, limit * 2),
+      degraded
+    }
+  }
+
+  private registerJob(jobId: string, pipeline = ''): MusicJob {
+    const job: MusicJob = {
+      id: jobId,
+      status: 'running',
+      controller: new AbortController(),
+      pipeline,
+      warnings: []
+    }
+    this.jobs.set(jobId, job)
+    return job
+  }
+
+  /** 下载（artist+song），进度/完成经 onEvent 推送（ServiceEvent 形状与原服务端一致） */
+  async download(
+    jobId: string,
+    input: { artist?: string; song?: string; q?: string; quality: string; saveDir: string },
+    onEvent: (ev: ServiceEvent) => void
+  ): Promise<MusicDownloadResult> {
+    const job = this.registerJob(jobId)
+    const emit = (kind: string, platform: string, message: string): void => {
+      onEvent({
+        type: kind === 'warning' ? 'music.warning' : 'music.progress',
+        taskId: jobId,
+        platform,
+        platformLabel: PLATFORM_LABELS[platform] ?? platform,
+        message
+      })
+    }
+    try {
+      let { artist, song } = input
+      // 口径对齐 Python engine.download：artist/song 缺一即从拼接串或 q 解析
+      //（覆盖 manager 传整行 song 的场景，如 '陈奕迅的孤勇者'）
+      if (!artist || !song) {
+        const source = input.q ?? `${artist ?? ''} ${song ?? ''}`.trim()
+        if (source) {
+          const parsed = parseQuery(source)
+          artist = artist || parsed.artist
+          song = song || parsed.song
+        }
+      }
+      const quality: Quality = (['standard', 'high', 'lossless'] as const).includes(
+        input.quality as Quality
+      )
+        ? (input.quality as Quality)
+        : 'high'
+
+      const result = await tryAllPlatforms(
+        this.makeEngine(job.controller.signal),
+        artist ?? '',
+        song ?? '',
+        input.saveDir,
+        quality,
+        (ev) => emit(ev.type, ev.platform, ev.message)
+      )
+      if (this.isCancelled(job)) {
+        await this.cleanupArtifacts(result)
+        return this.cancelledResult()
+      }
+      const out: MusicDownloadResult = {
+        success: result.success,
+        source: result.source,
+        message: result.message,
+        mp3Path: result.mp3Path,
+        lrcPath: result.lrcPath
+      }
+      if (out.success && out.mp3Path) {
+        out.bytes = await stat(out.mp3Path).then((s) => s.size).catch(() => 0)
+      }
+      job.status = out.success ? 'completed' : 'failed'
+      return out
+    } catch (err) {
+      if (job.controller.signal.aborted) return this.cancelledResult()
+      return {
+        success: false,
+        source: '',
+        message: err instanceof Error ? err.message : String(err),
+        mp3Path: '',
+        lrcPath: ''
+      }
+    } finally {
+      this.jobs.delete(jobId)
+    }
+  }
+
+  private isCancelled(job: MusicJob): boolean {
+    return job.controller.signal.aborted || job.status === 'cancelling'
+  }
+
+  private cancelledResult(): MusicDownloadResult {
+    return { success: false, source: '', message: '任务已取消', mp3Path: '', lrcPath: '' }
+  }
+
+  private async cleanupArtifacts(result: { mp3Path?: string; lrcPath?: string }): Promise<void> {
+    for (const p of [result.mp3Path, result.lrcPath]) {
+      if (p) await unlink(p).catch(() => {})
+    }
+  }
+
+  /** F1：按网易云 ID 精确下载（搜索降级时的可靠通道） */
+  async downloadById(
+    jobId: string,
+    input: { neteaseId: string; artist?: string; song?: string; quality: string; saveDir: string },
+    onEvent: (ev: ServiceEvent) => void
+  ): Promise<MusicDownloadResult> {
+    const job = this.registerJob(jobId, 'netease')
+    const emit = (kind: string, platform: string, message: string): void => {
+      onEvent({
+        type: kind === 'warning' ? 'music.warning' : 'music.progress',
+        taskId: jobId,
+        platform,
+        platformLabel: PLATFORM_LABELS[platform] ?? platform,
+        message
+      })
+    }
+    try {
+      const quality: Quality = (['standard', 'high', 'lossless'] as const).includes(
+        input.quality as Quality
+      )
+        ? (input.quality as Quality)
+        : 'high'
+      const engine = this.makeEngine(job.controller.signal)
+      const detail = await engine.getNeteaseDetail(input.neteaseId)
+      const artist = (input.artist || detail.artist || '未知歌手').trim()
+      const song = (input.song || detail.name || input.neteaseId).trim()
+      const filename = sanitizeName(`${artist} - ${song}`)
+      const mp3Path = join(input.saveDir, `${filename}.mp3`)
+      const lrcPath = join(input.saveDir, `${filename}.lrc`)
+      emit('progress', 'netease', '尝试 网易云（按 ID 精确下载）…')
+      const ok = await engine.downloadNeteaseById(input.neteaseId, mp3Path, lrcPath, quality)
+      if (this.isCancelled(job) || !ok) {
+        if (this.isCancelled(job)) {
+          await unlink(mp3Path).catch(() => {})
+          await unlink(lrcPath).catch(() => {})
+          return this.cancelledResult()
+        }
+        return {
+          success: false,
+          source: '',
+          message: `按ID下载音频失败: ${input.neteaseId}`,
+          mp3Path: '',
+          lrcPath: ''
+        }
+      }
+      job.status = 'completed'
+      return {
+        success: true,
+        source: '网易云(按ID)',
+        message: `网易云: ${filename}`,
+        mp3Path,
+        lrcPath,
+        bytes: await stat(mp3Path).then((s) => s.size).catch(() => 0)
+      }
+    } catch (err) {
+      if (job.controller.signal.aborted) return this.cancelledResult()
+      return {
+        success: false,
+        source: '',
+        message: err instanceof Error ? err.message : String(err),
+        mp3Path: '',
+        lrcPath: ''
+      }
+    } finally {
+      this.jobs.delete(jobId)
+    }
+  }
+
+  /** 真取消：AbortSignal 即刻中断网络请求；false = 任务已终结 */
+  cancel(jobId: string): boolean {
+    const job = this.jobs.get(jobId)
+    if (!job) return false
+    if (job.status === 'completed' || job.status === 'failed') return false
+    job.status = 'cancelling'
+    job.controller.abort()
+    return true
+  }
+
+  /** F1 试听：网易云镜像直链（protocol 层流式代理给 <audio>） */
+  async previewUrl(platform: string, sid: string, quality = 'standard'): Promise<string | null> {
+    if (platform !== 'netease' || !sid) return null
+    const engine = this.makeEngine()
+    const url = await engine.previewNetease(sid, quality)
+    return url && url.startsWith('http') ? url : null
+  }
+}
+
+let instance: MusicEngine | null = null
+
+/** 单例（预览协议与适配器共享 host 门控与任务注册表） */
+export function getMusicEngine(): MusicEngine {
+  if (!instance) instance = new MusicEngine()
+  return instance
+}

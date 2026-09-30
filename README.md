@@ -1,8 +1,8 @@
 # OmniGet
 
-一站式跨平台桌面下载器：BT/磁力（aria2c）、视频（yt-dlp）、音乐（omni-service）、HTTP 直链 + 本地工具箱（ffmpeg）。
+一站式跨平台桌面下载器：BT/磁力（aria2c）、视频（yt-dlp）、音乐（内嵌引擎）、HTTP 直链 + 本地工具箱（ffmpeg）。
 
-支持 **Windows / macOS / Linux** 三平台运行与打包（NSIS/MSI/ZIP、DMG、AppImage/DEB）。
+支持 **Windows / macOS / Linux** 三平台运行与打包（NSIS/MSI/ZIP、DMG、AppImage/DEB）。纯 Node/TS 单运行时，无 Python 依赖。
 
 技术栈：Electron 33 + Vite + React 18 + TS 严格模式 + Tailwind + better-sqlite3。
 
@@ -16,19 +16,16 @@ npm run build        # 生产构建（out/）
 npm run dist:win     # Windows NSIS/MSI/ZIP 打包（dist:mac / dist:linux 同理）
 ```
 
-> macOS/Linux 开发机注意：dev 模式下 omni-service 需要 `python3`（自动探测，无需名为 `python` 的解释器）。
-
 ## 目录
 
 ```
-src/main/        主进程：编排核心（orchestrator/ 引擎监督、task/ 状态机、db/、integrations/）
+src/main/        主进程：编排核心（orchestrator/ 引擎监督、music/ 内嵌音乐引擎、task/ 状态机、db/）
 src/preload/     contextBridge 白名单桥
 src/renderer/    React UI（app/ features/ components/ui stores/ styles/tokens.css）
 src/shared/      双端共享类型（任务模型、IPC 通道、错误码表）
-resources/engines/   sidecar 二进制（aria2c/yt-dlp/ffmpeg/omni-service，按平台目录）
-service/         omni-service Python 源码（FastAPI，经 PyInstaller 打包为 sidecar）
+resources/engines/   sidecar 二进制（aria2c/yt-dlp/ffmpeg，按平台目录）
 scripts/         e2e / 探测 / 图标 / 测试辅助脚本
-docs/            产品技术设计文档 + 开发任务计划
+docs/            产品技术设计文档 + 开发任务计划 + 遗留问题清单
 ```
 
 ## 跨平台约定
@@ -51,13 +48,7 @@ sidecar 引擎按 **`resources/engines/<platform>-<arch>/`** 目录分发，与�
 
 ### sidecar 三平台构建（发布前）
 
-PyInstaller 不支持交叉编译，各平台引擎需在对应宿主机/CI runner 上执行：
-
-```bash
-cd service && python build_service.py   # 产物复制到 resources/engines/<platform>-<arch>/
-```
-
-CI（`.github/workflows/build.yml`）三平台矩阵构建时会检查 sidecar 就位，缺失仅告警不阻断。
+音乐引擎已内嵌主进程，sidecar 仅剩 aria2c / yt-dlp / ffmpeg 三类预编译二进制——不支持交叉构建/下载的需在对应平台 runner 上获取并放入 `resources/engines/<platform>-<arch>/`。CI（`.github/workflows/build.yml`）三平台矩阵构建时会检查就位，缺失仅告警不阻断。
 
 ## Windows 无构建工具链时的原生依赖安装
 
@@ -74,9 +65,9 @@ $env:ELECTRON_MIRROR='https://npmmirror.com/mirrors/electron/'; node node_module
 
 - [x] T0 工程基建（T0-1 ~ T0-8）
 - [x] M1 骨架 + BT/磁力/HTTP（M1-1 ~ M1-12 全部）
-- [x] M2 音乐（M2-2 PyInstaller onefile 已验证 + Defender 无检出）
+- [x] M2 音乐（引擎已从 Python sidecar 迁移为主进程内嵌 TS 模块，真取消语义）
 - [x] M3 视频（M3-1 ~ M3-11 全部，yt-dlp/ffmpeg sidecar）
-- [x] M4 打磨发布（引擎热更三平台化 / 进程树终止 / tracker 多源订阅 + 镜像 / BT 加速调优）
+- [x] M4 打磨发布（引擎热更三平台化 / 进程树终止 / tracker 多源订阅 + 镜像 / BT 加速调优 / 去 Python 单运行时）
 
 ## 验证
 

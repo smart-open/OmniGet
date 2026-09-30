@@ -12,7 +12,7 @@ import { appRoot, userDataDir } from '../env'
 
 const log = createLogger('binaries')
 
-export type SidecarBinary = 'aria2c' | 'ytdlp' | 'ffmpeg' | 'omni-service'
+export type SidecarBinary = 'aria2c' | 'ytdlp' | 'ffmpeg'
 
 interface FingerprintStore {
   [binaryName: string]: string // sha256

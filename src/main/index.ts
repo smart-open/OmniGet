@@ -6,9 +6,9 @@ import { join } from 'path'
 import { allocatePorts } from './orchestrator/ports'
 import { checkBinary } from './orchestrator/binaries'
 import { Aria2Supervisor } from './orchestrator/aria2'
-import { ServiceSupervisor } from './orchestrator/service'
 import { Aria2Adapter } from './adapters/aria2'
-import { MusicAdapter, isServiceEvent } from './adapters/music'
+import { LocalMusicAdapter } from './music/adapter'
+import { registerPreviewHandler, registerPreviewScheme } from './music/preview-protocol'
 import { YtDlpAdapter } from './adapters/ytdlp'
 import { getYtDlpSupervisor } from './orchestrator/ytdlp'
 import { TaskManager } from './task/manager'
@@ -35,6 +35,9 @@ import {
 import { sniff } from './sniffer'
 
 const log = createLogger('main')
+
+// 特权 scheme 注册必须在 app ready 之前（omniget-preview: 试听流，F1）
+registerPreviewScheme()
 
 // ── 单实例锁（二次启动唤起已有实例）──────────────────────────────────
 const gotLock = app.requestSingleInstanceLock()
@@ -70,7 +73,7 @@ async function bootstrap(): Promise<void> {
 
   const ports = await allocatePorts()
   log.info('ports allocated', ports)
-  for (const name of ['aria2c', 'ytdlp', 'ffmpeg', 'omni-service'] as const) {
+  for (const name of ['aria2c', 'ytdlp', 'ffmpeg'] as const) {
     try {
       await checkBinary(name)
     } catch (err) {
@@ -80,6 +83,7 @@ async function bootstrap(): Promise<void> {
 
   registerIpcHandlers()
   registerProtocol() // magnet: 协议（M1-12）
+  registerPreviewHandler() // omniget-preview: 试听流协议（F1，主进程内引擎）
 
   // M1 编排：任务恢复 → aria2 监督器 → 适配器 → 管理器
   const supervisor = new Aria2Supervisor(ports.aria2RpcPort, undefined, {
@@ -132,28 +136,12 @@ async function bootstrap(): Promise<void> {
   // M4-16：Tracker 刷新（注入统一在 aria2 onOnline 后兜底执行，避免启动竞态告警）
   void refreshTrackers().catch((err) => log.warn('tracker refresh failed (使用缓存)', err))
 
-  // ── M2：omni-service 监督器（音乐线）─────────────────────────────
-  const musicSupervisor = new ServiceSupervisor({
-    port: ports.servicePort,
-    onOnline: (port) => {
-      log.info(`omni-service online at ${port}`)
-      manager.onMusicEngineOnline()
-      musicSupervisor.connectWs()
-    },
-    onOffline: (detail) => {
-      manager.onMusicEngineOffline(detail)
-    },
-    onEvent: (event) => {
-      if (isServiceEvent(event)) manager.applyMusicEvent(event)
-    }
-  })
-  const musicAdapter = new MusicAdapter(musicSupervisor)
+  // ── M2：音乐线（主进程内嵌引擎，无需 sidecar）────────────────────
+  const musicAdapter = new LocalMusicAdapter()
   manager.setMusicEngine(musicAdapter)
   setMusicAdapter(musicAdapter)
-  void musicSupervisor.start().catch((err) => {
-    log.error(`omni-service start failed: ${String(err)}`)
-    manager.onMusicEngineOffline('omni-service 启动失败')
-  })
+  musicAdapter.onEvent((ev) => manager.applyMusicEvent(ev))
+  log.info('music engine online (in-process)')
 
   // M1-12 系统集成：托盘 / 关窗最小化 / 剪贴板监听（按设置启停）
   setSpeedProvider(() => manager.getAggregateSpeeds())
@@ -177,7 +165,6 @@ async function bootstrap(): Promise<void> {
   app.on('before-quit', () => {
     markQuitting()
     void supervisor.shutdown()
-    void musicSupervisor.shutdown()
     manager.stopPolling()
     stopStatsScheduler()
     getYtDlpSupervisor().killAll()

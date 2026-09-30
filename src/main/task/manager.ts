@@ -17,7 +17,7 @@ import { createLogger } from '../logger'
 import { normalizeInfohash } from '../torrent/parse'
 import { sniff } from '../sniffer'
 import type { Aria2Adapter } from '../adapters/aria2'
-import type { MusicAdapter } from '../adapters/music'
+import type { MusicAdapter } from '../music/adapter'
 import type { YtDlpAdapter } from '../adapters/ytdlp'
 import type { ParseOutput } from '../adapters/types'
 import { notifyTaskEvent } from '../integrations/tray'
@@ -69,7 +69,7 @@ export class TaskManager {
     this.merger = new TaskEventMerger(250, (events) => this.applyEngineEvents(events))
   }
 
-  /** M2-6：注入音乐引擎（omni-service 上线后） */
+  /** M2-6：注入音乐引擎（主进程内嵌，启动即就绪） */
   setMusicEngine(adapter: MusicAdapter): void {
     this.music = adapter
   }
@@ -78,26 +78,6 @@ export class TaskManager {
   setYtdlpEngine(adapter: YtDlpAdapter): void {
     this.ytdlp = adapter
     adapter.setSink((e) => this.merger.push(e))
-  }
-
-  /**
-   * omni-service 上线回调（B1）：
-   * 清理 queued 音乐任务的失效 gid（旧 service 任务已随崩溃消失）→ 重泵信号量
-   */
-  onMusicEngineOnline(): void {
-    this.broadcastHealthMusic(true)
-    for (const t of listTasks({ status: ['queued'] })) {
-      if (t.engine === 'music' && t.engineGid) {
-        updateTaskFields(t.id, { engineGid: null })
-      }
-    }
-    this.pumpMusic()
-  }
-
-  /** B1：下线时重置信号量（在途 POST 的 done 永远不会来），queued 任务等上线重泵 */
-  onMusicEngineOffline(detail?: string): void {
-    this.activeMusic = 0
-    this.broadcastHealthMusic(false, detail)
   }
 
   // ── 生命周期 ────────────────────────────────────────────────────────
@@ -713,7 +693,7 @@ export class TaskManager {
   private healths: EngineHealth[] = [
     { name: 'aria2', online: false },
     { name: 'ytdlp', online: false, detail: 'M3 接入' },
-    { name: 'music', online: false, detail: 'omni-service 未启动' }
+    { name: 'music', online: true, detail: '内嵌引擎' }
   ]
 
   broadcastHealth(online: boolean, detail?: string): void {
@@ -723,16 +703,9 @@ export class TaskManager {
     broadcastEngineHealth(this.healths)
   }
 
-  private broadcastHealthMusic(online: boolean, detail?: string): void {
-    this.healths = this.healths.map((h) =>
-      h.name === 'music' ? { ...h, online, detail } : h
-    )
-    broadcastEngineHealth(this.healths)
-  }
-
   // ── 音乐任务（M2-6/M2-7，§4.4）────────────────────────────────────
 
-  /** 音乐工作台搜索：代理 omni-service（不创建任务） */
+  /** 音乐工作台搜索：内嵌引擎直跑（不创建任务） */
   async musicSearch(q: string) {
     if (!this.music || !this.music.isOnline) {
       throw new Error('音乐服务未就绪，请稍后重试或重启应用。')
@@ -791,7 +764,7 @@ export class TaskManager {
     return { taskId: task.id }
   }
 
-  /** M2-6 信号量泵：队列 FIFO 出队 → 占位 → POST omni-service */
+  /** M2-6 信号量泵：队列 FIFO 出队 → 占位 → 提交内嵌引擎 */
   private pumpMusic(): void {
     if (!this.music || !this.music.isOnline) return
     while (this.activeMusic < MAX_MUSIC_CONCURRENT) {
@@ -845,7 +818,7 @@ export class TaskManager {
     }
   }
 
-  /** omni-service WS 事件 → 任务流（§6.3 music.progress/done/warning） */
+  /** 音乐引擎事件 → 任务流（§6.3 music.progress/done/warning） */
   applyMusicEvent(ev: ServiceEvent): void {
     if (ev.type === 'music.warning') {
       const notice: UiNotice = {
@@ -857,7 +830,7 @@ export class TaskManager {
       return
     }
 
-    // engineGid = omni-service 任务 id
+    // engineGid = 音乐引擎任务 id
     const all = listTasks({ status: ['queued', 'running'] })
     const task = all.find((t) => t.engine === 'music' && t.engineGid === ev.taskId) as
       | TaskExt
