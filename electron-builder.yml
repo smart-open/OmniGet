@@ -1,0 +1,69 @@
+appId: com.omniget.app
+productName: OmniGet
+directories:
+  output: release
+files:
+  - out/**
+extraResources:
+  # sidecar 二进制按平台分发：resources/engines/<platform>/
+  - from: resources/engines/${os}-${arch}
+    to: engines
+    filter:
+      - '**/*'
+  - from: resources/engines/common
+    to: engines
+    filter:
+      - '**/*'
+  # 统一应用图标（托盘运行时加载）
+  - from: resources/icon.png
+    to: icon.png
+protocols:
+  - name: magnet
+    schemes:
+      - magnet
+win:
+  # CI 产物重命名为：x64-setup.exe / x64_portable.zip / x64_zh-CN.msi（见 workflows/build.yml）
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: zip
+      arch:
+        - x64
+    - target: msi
+      arch:
+        - x64
+  # 本机无符号链接特权时 winCodeSign 缓存解压失败（darwin dylib 软链）。
+  # 开启 Windows「开发者模式」或 CI（管理员特权）后可移除此开关，恢复 exe 图标/版本戳印。
+  signAndEditExecutable: false
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false
+  # NSIS 协议注册（magnet:）由 electron-builder 依据顶层 protocols 生成
+msi:
+  oneClick: false
+  perMachine: false
+  # MSI UI 语言跟随系统 locale；中文系统即显示 zh-CN 界面（WiX 由 electron-builder 自动下载）
+mac:
+  # 三种 dmg：Intel(x64) / Apple Silicon(arm64) / 通用双架构(universal)
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+        - universal
+  category: public.app-category.utilities
+  darkModeSupport: true
+  extendInfo:
+    CFBundleURLTypes:
+      - CFBundleURLName: magnet
+        CFBundleURLSchemes:
+          - magnet
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Network;FileTransfer
+  mimeTypes:
+    - x-scheme-handler/magnet

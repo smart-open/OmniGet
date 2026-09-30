@@ -1,0 +1,532 @@
+// 全局布局（§7.4 信息架构）：72px 侧边导航 + 玻璃顶栏 + 任务工作区 + 状态栏。
+// 图标一律 Phosphor（§7.2 禁 emoji）；主题切换持久化（settings）。
+
+import { useEffect, useMemo, useRef, useState } from 'react'
+import {
+  ArrowDown,
+  ArrowUp,
+  ChartBar,
+  CheckCircle,
+  DownloadSimple,
+  GearSix,
+  MagnifyingGlass,
+  Magnet,
+  Minus,
+  MonitorPlay,
+  MusicNote,
+  Palette,
+  Plus,
+  Square,
+  Trash,
+  Tray,
+  Wrench,
+  X
+} from '@phosphor-icons/react'
+import { useTasks, wireTaskEvents } from '../stores/tasks'
+import { THEMES, applyTheme, parseStoredTheme, watchSystemTheme, type ThemeId } from '../theme'
+import { TaskList } from '../features/tasks/TaskList'
+import { NewTaskDialog } from '../features/new-task/NewTaskDialog'
+import { MusicWorkbench } from '../features/music/MusicWorkbench'
+import { SettingsPage } from '../features/settings/SettingsPage'
+import { StatsPage } from '../features/stats/StatsPage'
+import { ToolboxPage } from '../features/toolbox/ToolboxPage'
+import { HelpOverlay } from '../features/help/HelpOverlay'
+import { Onboarding } from '../features/onboarding/Onboarding'
+import { SpeedSparkline, IconButton } from '../components/ui'
+import {
+  effectiveKeys,
+  eventToKey,
+  parseKeymap,
+  type Keymap,
+  type ShortcutAction
+} from '../shortcuts'
+import { Inspector } from '../features/inspector/Inspector'
+import { formatBytes } from '../features/new-task/fileTree'
+
+interface NavItem {
+  id: string
+  label: string
+  icon: typeof Tray
+  badge?: 'running' | 'trash'
+}
+
+const NAV_GROUPS: { title?: string; items: NavItem[] }[] = [
+  {
+    items: [
+      { id: 'all', label: '全部', icon: Tray },
+      { id: 'downloading', label: '下载中', icon: DownloadSimple, badge: 'running' },
+      { id: 'completed', label: '已完成', icon: CheckCircle }
+    ]
+  },
+  {
+    title: '分类',
+    items: [
+      { id: 'bt', label: '种子磁力', icon: Magnet },
+      { id: 'video', label: '视频', icon: MonitorPlay },
+      { id: 'music', label: '音乐', icon: MusicNote },
+      { id: 'toolbox', label: '工具箱', icon: Wrench }
+    ]
+  },
+  {
+    title: '库',
+    items: [{ id: 'trash', label: '回收站', icon: Trash, badge: 'trash' }]
+  }
+]
+
+function LogoMark() {
+  // 主题驱动的「聚合下载」标识（对齐 AI 图标形态）：六条来源支流汇入主箭头 → 托盘。
+  // 瓦片 = 主题渐变（surface-2 → bg，随主题换色）、图形 = var(--accent)
+  return (
+    <svg
+      width="28"
+      height="28"
+      viewBox="0 0 48 48"
+      fill="none"
+      aria-label="OmniGet"
+      className="shrink-0 select-none"
+    >
+      <defs>
+        <linearGradient id="og-tile" x1="12" y1="4" x2="36" y2="46" gradientUnits="userSpaceOnUse">
+          <stop stopColor="var(--surface-2)" />
+          <stop offset="1" stopColor="var(--bg)" />
+        </linearGradient>
+      </defs>
+      <rect x="1" y="1" width="46" height="46" rx="11" fill="url(#og-tile)" stroke="var(--border)" />
+      {/* 六条来源支流（远淡近浓，弧线汇聚） */}
+      <path d="M8 9 Q14 12 18.5 17.5" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" opacity="0.35" />
+      <path d="M40 9 Q34 12 29.5 17.5" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" opacity="0.35" />
+      <path d="M6.5 20 Q13 20.5 18.5 20.5" stroke="var(--accent)" strokeWidth="2.2" strokeLinecap="round" opacity="0.5" />
+      <path d="M41.5 20 Q35 20.5 29.5 20.5" stroke="var(--accent)" strokeWidth="2.2" strokeLinecap="round" opacity="0.5" />
+      <path d="M10.5 30 Q16 26.5 20 22.5" stroke="var(--accent)" strokeWidth="2.4" strokeLinecap="round" opacity="0.65" />
+      <path d="M37.5 30 Q32 26.5 28 22.5" stroke="var(--accent)" strokeWidth="2.4" strokeLinecap="round" opacity="0.65" />
+      {/* 中路竖杆 + 汇聚主箭杆 */}
+      <path d="M24 6.5 V15" stroke="var(--accent)" strokeWidth="2.8" strokeLinecap="round" opacity="0.8" />
+      <path d="M24 15 V26.5" stroke="var(--accent)" strokeWidth="4.2" strokeLinecap="round" />
+      {/* 箭头 + 托盘 */}
+      <path
+        d="M15.5 25 L24 35.5 L32.5 25"
+        stroke="var(--accent)"
+        strokeWidth="4.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path d="M13 41.5 H35" stroke="var(--accent)" strokeWidth="4.2" strokeLinecap="round" opacity="0.92" />
+    </svg>
+  )
+}
+
+export default function App() {
+  const [active, setActive] = useState('all')
+  const [dialogOpen, setDialogOpen] = useState(false)
+  const [dialogSource, setDialogSource] = useState<string | undefined>(undefined)
+  const [theme, setTheme] = useState<ThemeId>('system')
+  const [themeMenu, setThemeMenu] = useState(false)
+  const searchRef = useRef<HTMLInputElement>(null)
+
+  const engines = useTasks((s) => s.engines)
+  const globalSpeedBps = useTasks((s) => s.globalSpeedBps)
+  const speedHistory = useTasks((s) => s.speedHistory)
+  const tasks = useTasks((s) => s.tasks)
+  const reload = useTasks((s) => s.load)
+
+  useEffect(() => wireTaskEvents(), [])
+  useEffect(() => void reload(active), [active, reload])
+
+  // 主题：恢复 + 应用 + 跟随系统（多主题见 theme.ts）
+  useEffect(() => {
+    void window.omniget.settingsGet('ui.theme').then((v) => {
+      const id = parseStoredTheme(v)
+      setTheme(id)
+      applyTheme(id)
+    })
+  }, [])
+  useEffect(() => watchSystemTheme(theme, () => {}), [theme])
+  const changeTheme = (id: ThemeId): void => {
+    setTheme(id)
+    setThemeMenu(false)
+    applyTheme(id)
+    void window.omniget.settingsSet('ui.theme', id)
+  }
+
+  // 托盘/剪贴板/协议唤起 → 打开新建任务（M1-12）
+  useEffect(() => {
+    const off = window.omniget.onUiAction(({ action, payload }) => {
+      if (action === 'new-task') {
+        setDialogSource(payload)
+        setDialogOpen(true)
+      }
+    })
+    return off
+  }, [])
+
+  // 顶栏搜索 → 任务列表过滤（Ctrl+F 聚焦）
+  const [query, setQuery] = useState('')
+
+  // 全局 toast（onNotices：操作失败/降级告警的统一反馈，3.5s 自动消失）
+  const [toasts, setToasts] = useState<Array<{ id: number; level: 'warning' | 'info'; message: string }>>([])
+  useEffect(() => {
+    const off = window.omniget.onNotices((items) => {
+      if (!Array.isArray(items) || items.length === 0) return
+      setToasts((prev) => [
+        ...prev.slice(-4),
+        ...items.map((n, i) => ({ id: Date.now() + i, level: n.level, message: n.message }))
+      ])
+    })
+    return off
+  }, [])
+  useEffect(() => {
+    if (toasts.length === 0) return
+    const t = setTimeout(() => setToasts((prev) => prev.slice(1)), 3500)
+    return () => clearTimeout(t)
+  }, [toasts])
+
+  const [showHelp, setShowHelp] = useState(false)
+  const [onboarding, setOnboarding] = useState(false)
+  const selectedTaskId = useTasks((s) => s.selectedTaskId)
+  const select = useTasks((s) => s.select)
+
+  // M4-8 首次启动向导
+  useEffect(() => {
+    void window.omniget.settingsGet('onboarded').then((v) => {
+      if (!v) setOnboarding(true)
+    })
+  }, [])
+
+  // 快捷键（§7.9 可自定义）：默认表 + 用户覆盖（settings ui.keymap），设置页录制后经事件刷新
+  const [keymap, setKeymap] = useState<Keymap>({})
+  useEffect(() => {
+    void window.omniget.settingsGet('ui.keymap').then((v) => setKeymap(parseKeymap(v)))
+    const onChanged = (): void => {
+      void window.omniget.settingsGet('ui.keymap').then((v) => setKeymap(parseKeymap(v)))
+    }
+    window.addEventListener('keymap-changed', onChanged)
+    return () => window.removeEventListener('keymap-changed', onChanged)
+  }, [])
+
+  // 快捷键全集（§7.9）：新建/搜索/帮助/分组 1-6/Space 暂停/Delete 回收站（键位可自定义）
+  useEffect(() => {
+    const keys = effectiveKeys(keymap)
+    const onKey = (e: KeyboardEvent): void => {
+      const tag = (e.target as HTMLElement)?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+      const k = eventToKey(e)
+      if (!k) return
+      if (k === keys['new-task']) {
+        e.preventDefault()
+        setDialogSource(undefined)
+        setDialogOpen(true)
+      } else if (k === keys.search) {
+        e.preventDefault()
+        searchRef.current?.focus()
+      } else if (k === keys.help) {
+        e.preventDefault()
+        setShowHelp((v) => !v)
+      } else if (/^ctrl\+[1-6]$/.test(k) && k === keys[`group${k.slice(5)}` as ShortcutAction]) {
+        e.preventDefault()
+        const flat = NAV_GROUPS.flatMap((g) => g.items)
+        const idx = Number(k.slice(5)) - 1
+        if (flat[idx]) setActive(flat[idx].id)
+      } else if (k === keys['pause-toggle']) {
+        if (!selectedTaskId) return
+        e.preventDefault()
+        const t = tasks.get(selectedTaskId)
+        if (!t) return
+        const action = t.status === 'paused' ? 'resume' : 'pause'
+        void window.omniget.controlTask({ taskId: selectedTaskId, action })
+      } else if (k === keys.trash) {
+        const sel = selectedTaskId
+        if (!sel) return
+        e.preventDefault()
+        void window.omniget.controlTask({ taskId: sel, action: 'remove' }).then(() => reload('all'))
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [selectedTaskId, tasks, reload, keymap])
+
+  const counts = useMemo(() => {
+    let running = 0
+    let queued = 0
+    let trashed = 0
+    for (const t of tasks.values()) {
+      if (t.status === 'running') running++
+      else if (t.status === 'queued') queued++
+    }
+    return { running, queued, runningPlusQueued: running + queued, trashed }
+  }, [tasks])
+
+  const online = (n: string): boolean =>
+    engines.find((e) => e.name === n)?.online ?? false
+
+  const openDialog = (): void => {
+    setDialogSource(undefined)
+    setDialogOpen(true)
+  }
+
+  return (
+    /* 圆角窗口外壳：透明窗口 + 自绘圆角边框（全平台一致） */
+    <div className="fixed inset-0 grid grid-cols-[200px_1fr] overflow-hidden rounded-[10px] border border-border bg-[var(--bg)] shadow-[var(--shadow-float)]">
+      {/* ── 侧边导航 200px（宽松版）────────────────────────────────── */}
+      <aside className="flex flex-col border-r border-border bg-surface">
+        {/* Logo 行（自绘标题栏拖拽区） */}
+        <div className="titlebar-drag flex h-11 shrink-0 items-center gap-2.5 border-b border-border px-4">
+          <LogoMark />
+          <span className="text-sm font-semibold tracking-wide">OmniGet</span>
+        </div>
+
+        {/* 导航区（可滚动，不挤压底部） */}
+        <nav className="flex-1 overflow-y-auto px-2.5 py-3">
+          {NAV_GROUPS.map((g, gi) => (
+            <div key={gi} className="mb-2">
+              {g.title && (
+                <div className="mb-1 mt-2 px-2.5 text-[10px] uppercase tracking-[0.16em] text-text-3">
+                  {g.title}
+                </div>
+              )}
+              {g.items.map((item) => {
+                const isActive = active === item.id
+                const badge =
+                  item.badge === 'running' ? counts.runningPlusQueued : null
+                return (
+                  <button
+                    key={item.id}
+                    onClick={() => setActive(item.id)}
+                    className={`relative flex h-9 w-full items-center gap-3 rounded-ctl px-3 text-[13px] transition-colors ${
+                      isActive
+                        ? 'nav-rail bg-accent-soft font-medium text-accent'
+                        : 'text-text-2 hover:bg-surface-2 hover:text-text-1'
+                    }`}
+                  >
+                    <item.icon
+                      size={17}
+                      weight={isActive ? 'fill' : 'regular'}
+                      className="shrink-0"
+                    />
+                    <span className="flex-1 truncate text-left leading-none">{item.label}</span>
+                    {badge !== null && badge > 0 && (
+                      <span className="num flex h-4 min-w-4 items-center justify-center rounded-full bg-accent px-1 text-[9px] font-medium leading-none text-white">
+                        {badge}
+                      </span>
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+          ))}
+        </nav>
+
+        {/* 底部固定组（shrink-0：永不因导航挤压消失/抖动） */}
+        <div className="relative shrink-0 border-t border-border px-2.5 py-2">
+          {[
+            { id: 'stats', label: '统计', icon: ChartBar, onClick: () => setActive('stats') },
+            {
+              id: 'theme',
+              label: THEMES.find((t) => t.id === theme)?.label ?? '主题',
+              icon: Palette,
+              onClick: () => setThemeMenu((v) => !v)
+            },
+            {
+              id: 'settings',
+              label: '设置',
+              icon: GearSix,
+              onClick: () => setActive('settings')
+            }
+          ].map((b) => {
+            const isActive = active === b.id
+            return (
+              <button
+                key={b.id}
+                onClick={b.onClick}
+                className={`flex h-8 w-full items-center gap-3 rounded-ctl px-3 text-[12px] transition-colors ${
+                  isActive
+                    ? 'bg-accent-soft font-medium text-accent'
+                    : 'text-text-2 hover:bg-surface-2 hover:text-text-1'
+                }`}
+              >
+                <b.icon size={15} className="shrink-0" />
+                <span className="leading-none">{b.label}</span>
+              </button>
+            )
+          })}
+
+          {/* 主题选择弹层（向上展开） */}
+          {themeMenu && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setThemeMenu(false)} />
+              <div className="absolute bottom-12 left-2.5 z-50 w-44 overflow-hidden rounded-panel border border-border bg-surface shadow-[var(--shadow-pop)]">
+                {THEMES.map((t) => (
+                  <button
+                    key={t.id}
+                    onClick={() => changeTheme(t.id)}
+                    className={`flex h-9 w-full items-center gap-2.5 px-3 text-xs transition-colors ${
+                      theme === t.id
+                        ? 'bg-accent-soft font-medium text-accent'
+                        : 'text-text-2 hover:bg-surface-2 hover:text-text-1'
+                    }`}
+                  >
+                    {/* 色板：默认空心环，选中实心（均为主题色） */}
+                    <span
+                      className="inline-block h-4 w-4 shrink-0 rounded-full border-2 transition-colors"
+                      style={
+                        theme === t.id
+                          ? { background: t.accent, borderColor: t.accent }
+                          : { background: 'transparent', borderColor: t.accent }
+                      }
+                    />
+                    <span className="flex-1 truncate text-left">{t.label}</span>
+                    {theme === t.id && <CheckCircle size={13} weight="fill" className="text-accent" />}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      </aside>
+
+      {/* ── 工作区 ────────────────────────────────────────────────── */}
+      <div className="grid grid-rows-[44px_1fr_32px] overflow-hidden">
+        {/* 玻璃顶栏（整条可拖动；玻璃效果放装饰底层——backdrop-filter 会破坏 -webkit-app-region 拖拽） */}
+        <header className="titlebar-drag relative flex items-center gap-3 pl-4 pr-2">
+          <div aria-hidden className="glass-panel pointer-events-none absolute inset-0" />
+          <div className="relative min-w-0 flex-1">
+            <div className="titlebar-no-drag flex h-8 max-w-md items-center gap-2 rounded-ctl border border-transparent bg-surface-2/60 px-2.5 transition-colors focus-within:border-accent">
+              <MagnifyingGlass size={14} className="shrink-0 text-text-3" />
+              <input
+                ref={searchRef}
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                className="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-text-3"
+                placeholder="搜索任务…"
+              />
+              {query && (
+                <button
+                  onClick={() => setQuery('')}
+                  aria-label="清除搜索"
+                  className="press shrink-0 text-text-3 hover:text-text-1"
+                >
+                  <X size={12} weight="bold" />
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* 全局速度迷你图（§7.4）——可拖拽区的一部分 */}
+          <div className="relative hidden shrink-0 items-center gap-2 sm:flex" title="全局下载速度">
+            <SpeedSparkline history={speedHistory} />
+            <span className="num w-20 text-right text-xs text-text-2">
+              {formatBytes(globalSpeedBps)}/s
+            </span>
+          </div>
+
+          {/* 新建任务（主色胶囊：图标+名称，§7.2） */}
+          <div className="titlebar-no-drag relative z-10 shrink-0">
+            <button
+              onClick={openDialog}
+              className="press inline-flex h-8 items-center gap-1.5 rounded-full bg-accent px-3.5 text-xs font-medium text-white shadow-[0_2px_8px_var(--accent-soft)] transition-colors hover:bg-accent-press"
+            >
+              <Plus size={14} weight="bold" />
+              新建任务
+            </button>
+          </div>
+
+          {/* 自绘窗口控件（frameless 圆角窗口） */}
+          <div className="titlebar-no-drag relative z-10 flex shrink-0 items-center">
+            <IconButton tip="最小化" onClick={() => window.omniget.windowMinimize()}>
+              <Minus size={14} weight="bold" />
+            </IconButton>
+            <IconButton tip="最大化 / 还原" onClick={() => window.omniget.windowMaximize()}>
+              <Square size={11} weight="bold" />
+            </IconButton>
+            <IconButton
+              tip="关闭"
+              onClick={() => window.omniget.windowClose()}
+              className="hover:bg-danger/15 hover:text-danger"
+            >
+              <X size={15} weight="bold" />
+            </IconButton>
+          </div>
+        </header>
+
+        {/* 工作区路由 + Inspector 抽屉（M4-2） */}
+        <div className="flex min-h-0">
+          <div className="min-w-0 flex-1 overflow-hidden">
+            {active === 'music' ? (
+              <MusicWorkbench onOpenTasks={() => setActive('all')} />
+            ) : active === 'settings' ? (
+              <SettingsPage />
+            ) : active === 'stats' ? (
+              <StatsPage onNewTask={openDialog} />
+            ) : active === 'toolbox' ? (
+              <ToolboxPage />
+            ) : (
+              <TaskList active={active} onNewTask={openDialog} query={query} />
+            )}
+          </div>
+          {active !== 'music' && active !== 'settings' && (
+            <Inspector
+              task={selectedTaskId ? (tasks.get(selectedTaskId) ?? null) : null}
+              onClose={() => select(null)}
+              onChanged={() => void reload(active)}
+            />
+          )}
+        </div>
+
+        {/* 底部状态栏（§7.4） */}
+        <footer className="flex items-center gap-4 border-t border-border bg-surface px-4 text-[11px] text-text-2">
+          <span className="num inline-flex items-center gap-1">
+            <ArrowDown size={11} weight="bold" className="text-accent" />
+            {formatBytes(globalSpeedBps)}/s
+          </span>
+          <span className="num inline-flex items-center gap-1">
+            <ArrowUp size={11} weight="bold" className="text-text-3" />
+            0 B/s
+          </span>
+          <span className="num text-text-3">
+            运行 {counts.running} · 排队 {counts.queued}
+          </span>
+          <span className="ml-auto flex items-center gap-3">
+            {(['aria2', 'ytdlp', 'music'] as const).map((name) => (
+              <span key={name} className="inline-flex items-center gap-1 text-text-3">
+                {name}
+                {/* aria2 常驻引擎红/绿；ytdlp·music 按需拉起：离线=待机灰（非常驻，不算故障） */}
+                <span
+                  className={`inline-block h-1.5 w-1.5 rounded-full ${
+                    online(name)
+                      ? 'bg-success'
+                      : name === 'aria2'
+                        ? 'bg-danger'
+                        : 'bg-[var(--text-3)] opacity-60'
+                  }`}
+                />
+              </span>
+            ))}
+          </span>
+        </footer>
+      </div>
+
+      <NewTaskDialog
+        open={dialogOpen}
+        initialSource={dialogSource}
+        onClose={() => setDialogOpen(false)}
+      />
+      <HelpOverlay open={showHelp} onClose={() => setShowHelp(false)} />
+      <Onboarding open={onboarding} onClose={() => setOnboarding(false)} />
+
+      {/* 全局 toast（右下角，操作失败/降级告警统一反馈） */}
+      <div className="pointer-events-none fixed bottom-10 right-4 z-[60] flex flex-col gap-2">
+        {toasts.map((t) => (
+          <div
+            key={t.id}
+            className={`stagger-in rounded-ctl border px-3 py-2 text-xs shadow-[var(--shadow-pop)] ${
+              t.level === 'warning'
+                ? 'border-warning/40 bg-[var(--tooltip-bg)] text-warning'
+                : 'border-border bg-[var(--tooltip-bg)] text-text-1'
+            }`}
+          >
+            {t.message}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}

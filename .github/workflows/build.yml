@@ -1,0 +1,121 @@
+# T0-2 收口：三平台打包 CI
+#
+# 产物命名（CI 内重命名后上传，版本号取自 package.json）：
+#   windows: OmniGet_{version}_x64-setup.exe / OmniGet_{version}_x64_portable.zip / OmniGet_{version}_x64_zh-CN.msi
+#   macos:   OmniGet_{version}_x64.dmg / OmniGet_{version}_aarch64.dmg / OmniGet_{version}_universal.dmg
+#   linux:   OmniGet_{version}_x64.AppImage / OmniGet_{version}_x64.deb
+#
+# 注意：mac/linux 目标缺少对应 sidecar（engines/darwin-*、engines/linux-*）时
+# 仅产出告警——包可构建，但引擎缺失（应用会降级提示），发布前需在各平台准备 sidecar。
+
+name: build
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win
+          - os: macos-latest
+            platform: mac
+          - os: ubuntu-latest
+            platform: linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Typecheck & unit tests
+        run: |
+          npm run typecheck
+          npm test
+
+      - name: Build renderer & main
+        run: npm run build
+
+      # sidecar 就位检查：缺失时给出明确告警而非静默空包
+      - name: Verify sidecars
+        shell: bash
+        run: |
+          plat="${{ matrix.platform }}"
+          case "$plat" in
+            win) dir="resources/engines/win32-x64"; bin="aria2c.exe" ;;
+            mac) dir="resources/engines/darwin-arm64"; bin="aria2c" ;;
+            linux) dir="resources/engines/linux-x64"; bin="aria2c" ;;
+          esac
+          if [ ! -f "$dir/$bin" ]; then
+            echo "::warning::sidecar 缺失：$dir/$bin —— 发布前请在该平台构建并提交 sidecar"
+          fi
+
+      - name: Package (electron-builder)
+        run: |
+          case "${{ matrix.platform }}" in
+            win) npx electron-builder --win --publish never ;;
+            mac) npx electron-builder --mac --publish never ;;
+            linux) npx electron-builder --linux --publish never ;;
+          esac
+
+      # ── 产物重命名（统一命名口径）────────────────────────────────────
+      - name: Rename artifacts (windows)
+        if: matrix.platform == 'win'
+        shell: pwsh
+        run: |
+          $v = (Get-Content package.json -Raw -Encoding utf8 | ConvertFrom-Json).version
+          Set-Location release
+          $setup = "OmniGet_${v}_x64-setup.exe"
+          Get-ChildItem *.exe.blockmap -File -ErrorAction SilentlyContinue | Remove-Item -Force
+          Get-ChildItem *.exe -File |
+            Where-Object { $_.Name -ne $setup } |
+            Rename-Item -NewName $setup
+          Get-ChildItem *.zip -File | Rename-Item -NewName "OmniGet_${v}_x64_portable.zip"
+          Get-ChildItem *.msi -File | Rename-Item -NewName "OmniGet_${v}_x64_zh-CN.msi"
+          Get-ChildItem OmniGet_*
+
+      - name: Rename artifacts (macos)
+        if: matrix.platform == 'mac'
+        shell: bash
+        run: |
+          V=$(node -p "require('./package.json').version")
+          cd release
+          for f in *-x64.dmg;        do [ -e "$f" ] && mv "$f" "OmniGet_${V}_x64.dmg"; done
+          for f in *-arm64.dmg;      do [ -e "$f" ] && mv "$f" "OmniGet_${V}_aarch64.dmg"; done
+          for f in *-universal.dmg;  do [ -e "$f" ] && mv "$f" "OmniGet_${V}_universal.dmg"; done
+          ls OmniGet_*.dmg || true
+
+      - name: Rename artifacts (linux)
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          V=$(node -p "require('./package.json').version")
+          cd release
+          for f in *-x86_64.AppImage; do [ -e "$f" ] && mv "$f" "OmniGet_${V}_x64.AppImage"; done
+          for f in *-amd64.deb;       do [ -e "$f" ] && mv "$f" "OmniGet_${V}_x64.deb"; done
+          ls OmniGet_* || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: omniget-${{ matrix.platform }}
+          path: |
+            release/OmniGet*.exe
+            release/OmniGet*.zip
+            release/OmniGet*.msi
+            release/OmniGet*.dmg
+            release/OmniGet*.AppImage
+            release/OmniGet*.deb
+          if-no-files-found: warn
+          retention-days: 14

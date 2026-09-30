@@ -1,0 +1,197 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100dvh; /* 禁 h-screen；#root 显式等高，杜绝底部空白 */
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+  body {
+    @apply text-[color:var(--text-1)] antialiased;
+    font-family: var(--font-sans);
+    background-color: transparent; /* 圆角窗口外壳由 #root 自绘，body 透出系统 */
+    font-feature-settings: 'ss01', 'cv01';
+    ::selection {
+      background: color-mix(in srgb, var(--accent) 28%, transparent);
+    }
+  }
+  /* 自绘标题栏拖拽区（顶栏）；交互元素 no-drag */
+  .titlebar-drag {
+    -webkit-app-region: drag;
+  }
+  .titlebar-no-drag {
+    -webkit-app-region: no-drag;
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 5px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--text-3);
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+}
+
+@layer components {
+  /* 玻璃质感面板：1px 内描边 + 内阴影（禁霓虹外发光，§7.2） */
+  .glass-panel {
+    background: var(--glass);
+    backdrop-filter: blur(24px) saturate(1.4);
+    border-bottom: 1px solid var(--border);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  }
+  /* 数字等宽 */
+  .num {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
+  }
+  /* 行容器：线优先于盒子 */
+  .row-line {
+    border-bottom: 1px solid var(--border);
+  }
+  /* 键位提示 */
+  .kbd {
+    @apply inline-flex h-5 min-w-5 items-center justify-center rounded border border-border px-1.5 text-[10px] text-text-3;
+    font-family: var(--font-mono);
+    background: color-mix(in srgb, var(--surface-2) 70%, transparent);
+  }
+  /* 主操作按钮的物理按压（§7.1 触觉反馈） */
+  .press {
+    @apply transition-transform duration-150 active:scale-[0.98];
+  }
+  /* 侧边导航激活指示条 */
+  .nav-rail::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 8px;
+    bottom: 8px;
+    width: 2px;
+    border-radius: 1px;
+    background: var(--accent);
+  }
+  /* F3：细进度条容器 */
+  .meter {
+    @apply h-[3px] w-full overflow-hidden rounded-full;
+    background: color-mix(in srgb, var(--text-3) 18%, transparent);
+  }
+  /* 多线程滑杆（accent 化） */
+  input[type='range'] {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 4px;
+    border-radius: 2px;
+    background: linear-gradient(
+      to right,
+      var(--accent) var(--fill, 25%),
+      color-mix(in srgb, var(--text-3) 25%, transparent) var(--fill, 25%)
+    );
+    outline: none;
+  }
+  input[type='range']::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--surface);
+    border: 2px solid var(--accent);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+    transition: transform 0.15s var(--spring);
+  }
+  input[type='range']::-webkit-slider-thumb:hover {
+    transform: scale(1.15);
+  }
+  input[type='range']::-webkit-slider-thumb:active {
+    transform: scale(1.05);
+  }
+  /* 复选框 accent 化 */
+  input[type='checkbox'] {
+    @apply h-3.5 w-3.5 rounded accent-[var(--accent)];
+  }
+}
+
+@layer utilities {
+  /* §7.8 永续微动效之一：空态插画缓浮（±4px） */
+  @keyframes float {
+    0%,
+    100% {
+      transform: translateY(-4px);
+    }
+    50% {
+      transform: translateY(4px);
+    }
+  }
+  /* 列表首载 stagger（每行 40ms，仅首屏，§7.8） */
+  @keyframes rise-in {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  .stagger-in {
+    opacity: 0;
+    animation: rise-in 0.45s var(--spring) forwards;
+    animation-delay: calc(var(--i, 0) * 40ms);
+  }
+  /* 骨架 shimmer（ Skeleton 专用，隔离叶子组件） */
+  @keyframes shimmer {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: translateX(100%);
+    }
+  }
+  .skeleton-line {
+    position: relative;
+    overflow: hidden;
+    background: var(--surface-2);
+  }
+  .skeleton-line::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      color-mix(in srgb, var(--text-3) 14%, transparent),
+      transparent
+    );
+    animation: shimmer 1.6s infinite;
+  }
+  /* 磁力解析雷达（§7.8 之二） */
+  @keyframes radar {
+    from {
+      transform: rotate(0deg);
+    }
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  .radar-ring {
+    animation: radar 1.6s linear infinite;
+  }
+  /* 顶栏迷你速度曲线滚动（§7.8 之三）由 JS 数据驱动，无 CSS 循环 */
+  .will-transform {
+    will-change: transform;
+  }
+}

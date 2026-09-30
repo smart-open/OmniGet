@@ -1,0 +1,119 @@
+// better-sqlite3 封装 + 迁移框架（T0-4，§5 全表 DDL 一次建齐）
+// 迁移可重放：以 user_version 记录版本，按序执行未应用的迁移，全程事务。
+
+import Database from 'better-sqlite3'
+import { mkdirSync } from 'fs'
+import { join } from 'path'
+import { createLogger } from '../logger'
+import { userDataDir } from '../env'
+
+const log = createLogger('db')
+
+type Migration = { version: number; name: string; up: (db: Database.Database) => void }
+
+// ── §5 数据模型 ──────────────────────────────────────────────────────
+const MIGRATIONS: Migration[] = [
+  {
+    version: 1,
+    name: 'initial-schema',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE tasks (
+          id            TEXT PRIMARY KEY,
+          type          TEXT NOT NULL,
+          params        TEXT,
+          engine        TEXT NOT NULL,
+          source        TEXT NOT NULL,
+          name          TEXT,
+          status        TEXT NOT NULL DEFAULT 'parsing',
+          save_dir      TEXT NOT NULL,
+          total_bytes   INTEGER DEFAULT 0,
+          downloaded    INTEGER DEFAULT 0,
+          threads       INTEGER DEFAULT 16,
+          seed_ratio    REAL DEFAULT 0,
+          infohash      TEXT,
+          format_id     TEXT,
+          no_watermark  INTEGER,
+          wm_level      TEXT,
+          quality       TEXT,
+          engine_gid    TEXT,
+          error         TEXT,
+          created_at    INTEGER NOT NULL,
+          completed_at  INTEGER,
+          deleted_at    INTEGER
+        );
+        CREATE INDEX idx_tasks_status ON tasks(status, created_at DESC);
+        CREATE INDEX idx_tasks_infohash ON tasks(infohash) WHERE infohash IS NOT NULL;
+
+        CREATE TABLE task_files (
+          id         INTEGER PRIMARY KEY AUTOINCREMENT,
+          task_id    TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          path       TEXT NOT NULL,
+          size       INTEGER NOT NULL,
+          selected   INTEGER NOT NULL DEFAULT 1,
+          downloaded INTEGER DEFAULT 0,
+          UNIQUE(task_id, path)
+        );
+
+        CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+
+        CREATE TABLE trackers (url TEXT PRIMARY KEY, last_ok_at INTEGER, source TEXT);
+
+        CREATE TABLE daily_stats (
+          day             TEXT PRIMARY KEY,
+          completed_count INTEGER DEFAULT 0,
+          completed_bytes INTEGER DEFAULT 0,
+          peak_speed_bps  INTEGER DEFAULT 0
+        );
+      `)
+    }
+  }
+]
+
+let instance: Database.Database | null = null
+
+export function getDb(): Database.Database {
+  if (instance) return instance
+  const dir = userDataDir()
+  mkdirSync(dir, { recursive: true })
+  instance = new Database(join(dir, 'omniget.db'))
+  instance.pragma('journal_mode = WAL')
+  instance.pragma('foreign_keys = ON')
+  migrate(instance)
+  return instance
+}
+
+export function migrate(db: Database.Database): void {
+  const current = db.pragma('user_version', { simple: true }) as number
+  for (const m of MIGRATIONS) {
+    if (m.version <= current) continue
+    log.info(`applying migration ${m.version}: ${m.name}`)
+    const tx = db.transaction(() => {
+      m.up(db)
+      db.pragma(`user_version = ${m.version}`)
+    })
+    tx()
+  }
+}
+
+export function closeDb(): void {
+  instance?.close()
+  instance = null
+}
+
+// ── 常用封装 ─────────────────────────────────────────────────────────
+
+export function getSetting(key: string): string | null {
+  const row = getDb().prepare('SELECT value FROM settings WHERE key = ?').get(key) as
+    | { value: string }
+    | undefined
+  return row?.value ?? null
+}
+
+export function setSetting(key: string, value: string): void {
+  getDb()
+    .prepare(
+      'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+    )
+    .run(key, value)
+}

@@ -1,0 +1,159 @@
+/* 设计 Token（§7.3 双主题 + 阴影/软色扩展） */
+:root[data-theme='dark'] {
+  --bg: #0b0c0e; /* 应用底 */
+  --surface: #131518; /* 面板/悬浮层 */
+  --surface-2: #1a1d21; /* 行 hover */
+  --border: rgba(255, 255, 255, 0.08);
+  --text-1: #e6e8eb;
+  --text-2: #8b909a;
+  --text-3: #5c6370;
+  --accent: #5aa0ff; /* Electric Blue（深色提亮档） */
+  --accent-press: #3e8bff;
+  --success: #34d399;
+  --warning: #fbbf24;
+  --danger: #f87171;
+  --glass: rgba(19, 21, 24, 0.72); /* 顶栏/对话框 backdrop-blur-xl + 1px 内描边 */
+  /* 扩展：柔和强调底 / 悬浮阴影（色调随底色，禁纯黑投影） */
+  --accent-soft: rgba(90, 160, 255, 0.1);
+  --shadow-float: 0 24px 48px -16px rgba(11, 12, 14, 0.7);
+  --shadow-pop: 0 12px 32px -12px rgba(11, 12, 14, 0.8);
+  --tooltip-bg: #26292e;
+}
+
+/* OLED 纯黑（科技感第三主题）：极致对比 + 提亮电蓝 */
+:root[data-theme='oled'] {
+  --bg: #060708;
+  --surface: #0e1013;
+  --surface-2: #15181c;
+  --border: rgba(255, 255, 255, 0.1);
+  --text-1: #eceef2;
+  --text-2: #9aa1ac;
+  --text-3: #6b7280;
+  --accent: #6ab0ff;
+  --accent-press: #5aa0ff;
+  --success: #34d399;
+  --warning: #fbbf24;
+  --danger: #f87171;
+  --glass: rgba(14, 16, 19, 0.8);
+  --accent-soft: rgba(106, 176, 255, 0.12);
+  --shadow-float: 0 24px 48px -16px rgba(0, 0, 0, 0.9);
+  --shadow-pop: 0 12px 32px -12px rgba(0, 0, 0, 0.95);
+  --tooltip-bg: #1c1f24;
+}
+
+/* 暗夜紫 */
+:root[data-theme='violet'] {
+  --bg: #0f0c1a;
+  --surface: #161221;
+  --surface-2: #1d1830;
+  --border: rgba(255, 255, 255, 0.09);
+  --text-1: #eae7f4;
+  --text-2: #938da8;
+  --text-3: #635d7a;
+  --accent: #a78bfa;
+  --accent-press: #8b5cf6;
+  --success: #34d399;
+  --warning: #fbbf24;
+  --danger: #f87171;
+  --glass: rgba(22, 18, 33, 0.74);
+  --accent-soft: rgba(167, 139, 250, 0.12);
+  --shadow-float: 0 24px 48px -16px rgba(10, 8, 18, 0.7);
+  --shadow-pop: 0 12px 32px -12px rgba(10, 8, 18, 0.8);
+  --tooltip-bg: #241e38;
+}
+
+/* 墨绿 */
+:root[data-theme='green'] {
+  --bg: #0a100d;
+  --surface: #101914;
+  --surface-2: #16211a;
+  --border: rgba(255, 255, 255, 0.08);
+  --text-1: #e4ece7;
+  --text-2: #8a9a90;
+  --text-3: #5c6b62;
+  --accent: #34d399;
+  --accent-press: #10b981;
+  --success: #34d399;
+  --warning: #fbbf24;
+  --danger: #f87171;
+  --glass: rgba(16, 25, 20, 0.74);
+  --accent-soft: rgba(52, 211, 153, 0.1);
+  --shadow-float: 0 24px 48px -16px rgba(6, 12, 9, 0.7);
+  --shadow-pop: 0 12px 32px -12px rgba(6, 12, 9, 0.8);
+  --tooltip-bg: #1b2a21;
+}
+
+/* 琥珀暖夜 */
+:root[data-theme='amber'] {
+  --bg: #141008;
+  --surface: #1c160c;
+  --surface-2: #241d10;
+  --border: rgba(255, 255, 255, 0.08);
+  --text-1: #f0eadd;
+  --text-2: #a29882;
+  --text-3: #6f6753;
+  --accent: #fbbf24;
+  --accent-press: #f59e0b;
+  --success: #34d399;
+  --warning: #fbbf24;
+  --danger: #f87171;
+  --glass: rgba(28, 22, 12, 0.74);
+  --accent-soft: rgba(251, 191, 36, 0.1);
+  --shadow-float: 0 24px 48px -16px rgba(12, 9, 4, 0.7);
+  --shadow-pop: 0 12px 32px -12px rgba(12, 9, 4, 0.8);
+  --tooltip-bg: #2a2214;
+}
+
+/* 科技蓝 */
+:root[data-theme='blue'] {
+  --bg: #0a0f1c;
+  --surface: #101827;
+  --surface-2: #162032;
+  --border: rgba(255, 255, 255, 0.09);
+  --text-1: #e5eaf4;
+  --text-2: #8b95ab;
+  --text-3: #5d6780;
+  --accent: #3b82f6;
+  --accent-press: #2563eb;
+  --success: #34d399;
+  --warning: #fbbf24;
+  --danger: #f87171;
+  --glass: rgba(16, 24, 39, 0.74);
+  --accent-soft: rgba(59, 130, 246, 0.12);
+  --shadow-float: 0 24px 48px -16px rgba(5, 9, 18, 0.7);
+  --shadow-pop: 0 12px 32px -12px rgba(5, 9, 18, 0.8);
+  --tooltip-bg: #1a2436;
+}
+
+:root[data-theme='light'] {
+  --bg: #f7f8f9;
+  --surface: #ffffff;
+  --surface-2: #f0f2f4;
+  --border: rgba(15, 23, 42, 0.08);
+  --text-1: #17181a;
+  --text-2: #5c6370;
+  --text-3: #9aa1ac;
+  --accent: #2563eb;
+  --accent-press: #1d4ed8;
+  --success: #10b981;
+  --warning: #d97706;
+  --danger: #dc2626;
+  --glass: rgba(255, 255, 255, 0.72);
+  --accent-soft: rgba(37, 99, 235, 0.08);
+  --shadow-float: 0 24px 48px -16px rgba(15, 23, 42, 0.18);
+  --shadow-pop: 0 12px 32px -12px rgba(15, 23, 42, 0.22);
+  --tooltip-bg: #ffffff;
+}
+
+:root {
+  /* 字体：禁 Inter/Roboto/系统默认；数字等宽 */
+  --font-sans: 'Geist', 'MiSans SC', 'PingFang SC', 'Microsoft YaHei UI', sans-serif;
+  --font-mono: 'Geist Mono', 'JetBrains Mono', ui-monospace, monospace;
+  /* 圆角 / 间距：全站 4 的倍数栅格 */
+  --radius-ctl: 10px;
+  --radius-panel: 14px;
+  --radius-dialog: 18px;
+  --space-unit: 4px;
+  /* 动效：CSS 场景；Framer 场景统一 spring(stiffness:100, damping:20) */
+  --spring: cubic-bezier(0.16, 1, 0.3, 1);
+}
