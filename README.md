@@ -2,6 +2,8 @@
 
 一站式跨平台桌面下载器：BT/磁力（aria2c）、视频（yt-dlp）、音乐（omni-service）、HTTP 直链 + 本地工具箱（ffmpeg）。
 
+支持 **Windows / macOS / Linux** 三平台运行与打包（NSIS/MSI/ZIP、DMG、AppImage/DEB）。
+
 技术栈：Electron 33 + Vite + React 18 + TS 严格模式 + Tailwind + better-sqlite3。
 
 ## 开发
@@ -11,8 +13,10 @@ npm install          # 若 better-sqlite3/electron 原生二进制下载失败�
 npm run dev          # 三端（main/preload/renderer）开发模式
 npm run typecheck    # TS 严格模式类型检查
 npm run build        # 生产构建（out/）
-npm run dist:win     # Windows NSIS 打包（dist:mac / dist:linux 同理）
+npm run dist:win     # Windows NSIS/MSI/ZIP 打包（dist:mac / dist:linux 同理）
 ```
+
+> macOS/Linux 开发机注意：dev 模式下 omni-service 需要 `python3`（自动探测，无需名为 `python` 的解释器）。
 
 ## 目录
 
@@ -21,10 +25,39 @@ src/main/        主进程：编排核心（orchestrator/ 引擎监督、task/ �
 src/preload/     contextBridge 白名单桥
 src/renderer/    React UI（app/ features/ components/ui stores/ styles/tokens.css）
 src/shared/      双端共享类型（任务模型、IPC 通道、错误码表）
-resources/engines/   sidecar 二进制（aria2c/yt-dlp/ffmpeg/omni-service，按平台）
-service/         omni-service Python 源码（M2）
+resources/engines/   sidecar 二进制（aria2c/yt-dlp/ffmpeg/omni-service，按平台目录）
+service/         omni-service Python 源码（FastAPI，经 PyInstaller 打包为 sidecar）
+scripts/         e2e / 探测 / 图标 / 测试辅助脚本
 docs/            产品技术设计文档 + 开发任务计划
 ```
+
+## 跨平台约定
+
+sidecar 引擎按 **`resources/engines/<platform>-<arch>/`** 目录分发，与运行时 `process.platform-process.arch` 一致：
+
+| 平台 | 目录 | 说明 |
+|---|---|---|
+| Windows x64 | `win32-x64` | aria2c.exe / yt-dlp.exe / ffmpeg.exe / omni-service.exe |
+| macOS arm64 | `darwin-arm64` | 无后缀 |
+| macOS x64 | `darwin-x64` | 无后缀 |
+| Linux x64 | `linux-x64` | 无后缀 |
+| 跨平台公共 | `engines/common` | 平台无关资源 |
+
+- **打包**：electron-builder 按平台段注入对应引擎目录（mac 产出 x64/arm64 双 dmg，不产出无法捆绑 sidecar 的 universal）
+- **数据目录**：Windows 打包态便携口径（exe 同级 `data/`，不可写回退 userData）；macOS/Linux 直接使用系统 userData（规避 .app bundle 只读 / AppImage squashfs）
+- **进程管理**：`orchestrator/proc.ts` 统一进程树终止——Windows 用 `taskkill /T /F`（SIGTERM 在 Windows 退化为硬杀且不级联 ffmpeg 子进程），Unix 走 SIGTERM → 超时 SIGKILL
+- **引擎热更**：yt-dlp 热更按平台选择官方 release 资产（`yt-dlp.exe` / `yt-dlp_macos` / `yt-dlp_linux*`），SHA256 校验后原子替换，Unix 补可执行位
+- **file:// 与路径**：`fileURLToPath` 跨平台解析拖拽/协议路径；文件删除防御按文件系统大小写口径（Linux 敏感）
+
+### sidecar 三平台构建（发布前）
+
+PyInstaller 不支持交叉编译，各平台引擎需在对应宿主机/CI runner 上执行：
+
+```bash
+cd service && python build_service.py   # 产物复制到 resources/engines/<platform>-<arch>/
+```
+
+CI（`.github/workflows/build.yml`）三平台矩阵构建时会检查 sidecar 就位，缺失仅告警不阻断。
 
 ## Windows 无构建工具链时的原生依赖安装
 
@@ -41,13 +74,17 @@ $env:ELECTRON_MIRROR='https://npmmirror.com/mirrors/electron/'; node node_module
 
 - [x] T0 工程基建（T0-1 ~ T0-8）
 - [x] M1 骨架 + BT/磁力/HTTP（M1-1 ~ M1-12 全部）
-- [x] M2 音乐（M2-2 PyInstaller onefile 38.7MB 已验证 + Defender 无检出）
+- [x] M2 音乐（M2-2 PyInstaller onefile 已验证 + Defender 无检出）
 - [x] M3 视频（M3-1 ~ M3-11 全部，yt-dlp/ffmpeg sidecar）
-- [x] M4 打磨发布（13/17 完成；🔶 Inspector/更新通道/三平台出包；⏭ 可选悬浮窗暂缓）
+- [x] M4 打磨发布（引擎热更三平台化 / 进程树终止 / tracker 多源订阅 + 镜像 / BT 加速调优）
 
 ## 验证
 
 ```bash
-npm test                                    # 16 个单测（状态机/torrent/嗅探/事件合并）
+npm test                                    # 33 个单测（状态机/torrent/嗅探/事件合并等）
 npx tsx --tsconfig tsconfig.node.json scripts/e2e-aria2.ts   # aria2 端到端（真实 sidecar）
 ```
+
+## 隐私与合规
+
+全部数据（任务库、设置、指纹）仅存本地；遥测默认关闭。本工具不内置任何资源站，下载内容版权责任由使用者承担。

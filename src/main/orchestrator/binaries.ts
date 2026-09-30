@@ -47,6 +47,11 @@ export function binaryPath(name: SidecarBinary): string {
   return join(enginesDir(), binaryName(name))
 }
 
+/** 引擎目录内工具二进制的跨平台路径（ffmpeg/ffprobe 等，复用 binaryName 平台逻辑，防止手写漂移） */
+export function toolPath(name: string): string {
+  return join(enginesDir(), process.platform === 'win32' ? `${name}.exe` : name)
+}
+
 function fingerprintsFile(): string {
   return join(userDataDir(), 'fingerprints.json')
 }

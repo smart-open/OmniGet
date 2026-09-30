@@ -1,7 +1,7 @@
 // 任务 store（M1-10，§3.1 Zustand 切片订阅：10k+ 行高频更新场景）
 
 import { create } from 'zustand'
-import type { EngineHealth, Task, TaskEvent } from '@shared/types'
+import type { EngineHealth, Task, TaskCounts, TaskEvent } from '@shared/types'
 
 const SPEED_HISTORY_MAX = 40
 
@@ -17,11 +17,14 @@ interface TasksState {
   selectedTaskId: string | null
   /** 置顶任务（settings ui.pinnedTasks 持久化，列表排序置顶优先） */
   pinned: string[]
+  /** 侧栏角标计数（主进程 SQL 全表口径，跨视图一致） */
+  counts: TaskCounts
   togglePin: (id: string) => void
   loading: boolean
   /** 当前 tasks map 对应的加载过滤器（回收站视图据此校验，防止把全部任务当回收站） */
   loadedFilter: string
   load: (filter: string) => Promise<void>
+  refreshCounts: () => Promise<void>
   select: (id: string | null) => void
   applyEvents: (events: TaskEvent[]) => void
   setEngines: (engines: EngineHealth[]) => void
@@ -35,6 +38,7 @@ export const useTasks = create<TasksState>()((set, get) => ({
   stageById: {},
   selectedTaskId: null,
   pinned: [],
+  counts: { running: 0, queued: 0, completed: 0, trashed: 0 },
   loadedFilter: 'all',
   loading: true,
 
@@ -52,6 +56,16 @@ export const useTasks = create<TasksState>()((set, get) => ({
       pinned: Array.isArray(rawPinned) ? rawPinned.filter((id) => map.has(id)) : [],
       loading: false
     })
+    void get().refreshCounts()
+  },
+
+  refreshCounts: async () => {
+    try {
+      const counts = await window.omniget.taskCounts()
+      useTasks.setState({ counts })
+    } catch {
+      // 引擎未就绪等场景：保留上次计数
+    }
   },
 
   togglePin: (id) => {
@@ -94,6 +108,8 @@ export const useTasks = create<TasksState>()((set, get) => ({
 export function wireTaskEvents(): () => void {
   const offTasks = window.omniget.onTaskEvents((events) => {
     useTasks.getState().applyEvents(events)
+    // 状态变化影响跨视图计数（完成/失败等）→ 随事件流刷新角标
+    if (events.some((e) => e.status !== undefined)) void useTasks.getState().refreshCounts()
   })
   const offEngines = window.omniget.onEngineHealth((health) => {
     useTasks.getState().setEngines(health)

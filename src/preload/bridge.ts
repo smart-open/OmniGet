@@ -25,6 +25,7 @@ const api: OmniGetBridge = {
   retryTask: (taskId: string) => ipcRenderer.invoke(IPC_CHANNELS.taskRetry, taskId),
   openFolder: (taskId: string) => ipcRenderer.invoke(IPC_CHANNELS.taskOpenFolder, taskId),
   listTasks: (filter: string) => ipcRenderer.invoke(IPC_CHANNELS.taskList, filter),
+  taskCounts: () => ipcRenderer.invoke(IPC_CHANNELS.taskCounts),
   musicSearch: (input: MusicSearchInput) => ipcRenderer.invoke(IPC_CHANNELS.musicSearch, input),
   musicDownload: (input: MusicDownloadInput) =>
     ipcRenderer.invoke(IPC_CHANNELS.musicDownload, input),

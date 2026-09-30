@@ -53,13 +53,15 @@ jobs:
         run: |
           plat="${{ matrix.platform }}"
           case "$plat" in
-            win) dir="resources/engines/win32-x64"; bin="aria2c.exe" ;;
-            mac) dir="resources/engines/darwin-arm64"; bin="aria2c" ;;
-            linux) dir="resources/engines/linux-x64"; bin="aria2c" ;;
+            win) dirs="resources/engines/win32-x64"; bin="aria2c.exe" ;;
+            mac) dirs="resources/engines/darwin-arm64 resources/engines/darwin-x64"; bin="aria2c" ;;
+            linux) dirs="resources/engines/linux-x64"; bin="aria2c" ;;
           esac
-          if [ ! -f "$dir/$bin" ]; then
-            echo "::warning::sidecar 缺失：$dir/$bin —— 发布前请在该平台构建并提交 sidecar"
-          fi
+          for dir in $dirs; do
+            if [ ! -f "$dir/$bin" ]; then
+              echo "::warning::sidecar 缺失：$dir/$bin —— 发布前请在该平台构建并提交 sidecar"
+            fi
+          done
 
       - name: Package (electron-builder)
         run: |

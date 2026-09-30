@@ -7,7 +7,7 @@ import { mkdir, stat } from 'fs/promises'
 import { basename, join } from 'path'
 import type { ToolCreateInput, ToolEvent } from '@shared/types'
 import { createLogger } from './logger'
-import { enginesDir } from './orchestrator/binaries'
+import { toolPath } from './orchestrator/binaries'
 
 const log = createLogger('toolbox')
 
@@ -233,7 +233,7 @@ export class ToolboxRunner {
   }
 
   private runFfmpeg(args: string[], output: string, taskId: string): Promise<void> {
-    const ffmpeg = join(enginesDir(), process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg')
+    const ffmpeg = toolPath('ffmpeg')
     return new Promise((resolve, reject) => {
       const proc = spawn(ffmpeg, args, { windowsHide: true })
       this.procs.set(taskId, { proc, output })

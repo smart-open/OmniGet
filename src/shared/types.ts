@@ -277,6 +277,21 @@ export interface CreateTaskResultFailed {
 
 export type CreateTaskResult = CreateTaskResultAwaiting | CreateTaskResultFailed
 
+/** 侧栏角标计数（SQL 全表口径，跨视图一致） */
+export interface TaskCounts {
+  running: number
+  queued: number
+  completed: number
+  trashed: number
+}
+
+/** M3-9：引擎热更结果（yt-dlp 热更器 UpdateResult 口径） */
+export interface EngineUpdateResult {
+  ok: boolean
+  version?: string
+  error?: string
+}
+
 export interface OmniGetBridge {
   // task
   createTask(input: CreateTaskInput): Promise<CreateTaskResult>
@@ -286,6 +301,8 @@ export interface OmniGetBridge {
   retryTask(taskId: string): Promise<void>
   openFolder(taskId: string): Promise<void>
   listTasks(filter: string): Promise<Task[]>
+  /** 侧栏角标计数（跨视图口径：含回收站，与当前过滤无关） */
+  taskCounts(): Promise<TaskCounts>
   /** M4-2 Inspector：任务详情 + 文件清单 */
   getTaskDetail(taskId: string): Promise<{ task: Task; files: TaskFile[] } | null>
   // music
@@ -296,7 +313,7 @@ export interface OmniGetBridge {
   /** 降级黄条等通知（§4.4 降级告警） */
   onNotices(listener: (notices: UiNotice[]) => void): () => void
   // engine
-  engineUpdate(engine: 'ytdlp' | 'service'): Promise<void>
+  engineUpdate(engine: 'ytdlp' | 'service'): Promise<EngineUpdateResult>
   // tool
   toolCreate(input: ToolCreateInput): Promise<{ taskId: string }>
   // settings
@@ -349,6 +366,7 @@ export const IPC_CHANNELS = {
   taskRetry: 'task:retry',
   taskOpenFolder: 'task:openFolder',
   taskList: 'task:list',
+  taskCounts: 'task:counts',
   musicSearch: 'music:search',
   musicDownload: 'music:download',
   engineUpdate: 'engine:update',

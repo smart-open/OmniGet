@@ -21,3 +21,8 @@ build/pyinstaller/omni-service/
 
 # aria2 运行时会话/控制文件
 *.aria2
+
+# 本地下载测试产物
+KJHDSUI21/
+*.torrent
+

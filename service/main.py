@@ -334,7 +334,7 @@ def music_preview(platform: str = "netease", id: str = "", quality: str = "stand
             host_m = _re.match(r"[a-z]+://([^/]+)/", url)
             verify = False if (host_m and _mirror_like(host_m.group(1).lower())) else True
             with engine._make_downloader(
-                os.environ.get("TEMP", tempfile.gettempdir())
+                tempfile.gettempdir()  # 跨平台临时目录（TEMP 仅 Windows 惯例，WSL 透传场景会指错位置）
             ).session.get(url, stream=True, timeout=30, verify=verify) as r:
                 r.raise_for_status()
                 for chunk in r.iter_content(65536):

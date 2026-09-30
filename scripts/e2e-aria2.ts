@@ -109,10 +109,11 @@ main()
     process.exitCode = 1
   })
   .finally(() => {
-    // 清理残留 aria2c
+    // 清理残留 aria2c（跨平台：win taskkill / unix pkill，均仅限本进程树启动的实例）
     const { execSync } = require('child_process') as typeof import('child_process')
     try {
-      execSync('taskkill /IM aria2c.exe /F', { stdio: 'ignore' })
+      if (process.platform === 'win32') execSync('taskkill /IM aria2c.exe /F', { stdio: 'ignore' })
+      else execSync('pkill -x aria2c', { stdio: 'ignore' })
     } catch {
       // 已退出
     }

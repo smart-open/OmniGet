@@ -2,6 +2,7 @@
 // magnet/.torrent/视频 URL/音乐名/HTTP 分型路由 + 30s 去重窗口
 // （剪贴板·协议·拖拽三入口共用，同一链接只触发一次新建流程，§4.6）。
 
+import { fileURLToPath } from 'url'
 import type { TaskType } from '@shared/types'
 
 export interface SniffResult {
@@ -10,6 +11,16 @@ export interface SniffResult {
   /** 短视频平台（抖音/快手等）→ noWatermark 默认 true */
   noWatermark?: boolean
   platform?: string
+}
+
+/** file:// → 本地路径（跨平台：Windows 盘符、%20 转义、file://localhost 形态）；非 file: 输入原样返回 */
+export function stripFileProtocol(raw: string): string {
+  if (!/^file:\/\//i.test(raw)) return raw
+  try {
+    return fileURLToPath(raw)
+  } catch {
+    return decodeURIComponent(raw.replace(/^file:\/\/(localhost)?/i, ''))
+  }
 }
 
 const VIDEO_DOMAINS: { pattern: RegExp; platform: string }[] = [
@@ -35,7 +46,7 @@ export function sniff(input: string): SniffResult | null {
 
   // 2. .torrent 文件路径（拖拽/文件选择器）
   if (/\.torrent$/i.test(raw) && !/^https?:/i.test(raw)) {
-    return { type: 'bt', source: raw.replace(/^file:\/\//, ''), platform: 'torrent' }
+    return { type: 'bt', source: stripFileProtocol(raw), platform: 'torrent' }
   }
 
   // 3. URL（视频平台 / HTTP 直链）

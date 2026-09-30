@@ -6,6 +6,7 @@
 import { spawn, type ChildProcess } from 'child_process'
 import { createLogger } from '../logger'
 import { binaryPath, checkBinary } from './binaries'
+import { terminateTree } from './proc'
 
 const log = createLogger('ytdlp')
 
@@ -126,11 +127,11 @@ export class YtDlpSupervisor {
     }
   }
 
-  /** pause：SIGTERM 优雅退出（.part 保留，§4.1） */
+  /** pause：优雅退出（.part 保留，§4.1）；进程树终止防 ffmpeg 孤儿（Windows 上 SIGTERM 本就是硬杀） */
   pause(taskId: string): boolean {
     const proc = this.procs.get(taskId)
     if (!proc || proc.exitCode !== null) return false
-    proc.kill('SIGTERM')
+    terminateTree(proc, 8000)
     return true
   }
 
@@ -138,16 +139,11 @@ export class YtDlpSupervisor {
     return this.errTails.get(taskId) ?? ''
   }
 
-  /** 强杀（应用退出，§2.2） */
+  /** 强杀（应用退出，§2.2）：进程树整体终止 */
   killAll(): void {
     for (const [, proc] of this.procs) {
-      if (proc.exitCode === null) proc.kill('SIGTERM')
+      if (proc.exitCode === null) terminateTree(proc, 10_000)
     }
-    setTimeout(() => {
-      for (const [, proc] of this.procs) {
-        if (proc.exitCode === null) proc.kill('SIGKILL')
-      }
-    }, 10_000)
   }
 }
 

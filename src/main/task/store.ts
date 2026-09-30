@@ -169,8 +169,23 @@ export function listTasks(filter: {
   return rows.map(rowToTask)
 }
 
+/** 侧栏角标计数（单条 SQL 全表口径，跨视图一致；10k 行内亚毫秒） */
+export function taskCounts(): { running: number; queued: number; completed: number; trashed: number } {
+  const row = getDb()
+    .prepare(
+      `SELECT
+        COALESCE(SUM(CASE WHEN deleted_at IS NULL AND status = 'running' THEN 1 ELSE 0 END), 0) AS running,
+        COALESCE(SUM(CASE WHEN deleted_at IS NULL AND status = 'queued' THEN 1 ELSE 0 END), 0) AS queued,
+        COALESCE(SUM(CASE WHEN deleted_at IS NULL AND status = 'completed' THEN 1 ELSE 0 END), 0) AS completed,
+        COALESCE(SUM(CASE WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS trashed
+      FROM tasks`
+    )
+    .get() as { running: number; queued: number; completed: number; trashed: number }
+  return row
+}
+
+// B7：排除回收站任务（deleted_at 非 NULL 不可作为查重/补选目标）
 export function findTaskByInfohash(infohash: string): Task | null {
-  // B7：排除回收站任务（deleted_at 非 NULL 不可作为查重/补选目标）
   const row = getDb()
     .prepare(
       'SELECT * FROM tasks WHERE infohash = ? COLLATE NOCASE AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1'

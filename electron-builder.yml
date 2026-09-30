@@ -5,11 +5,7 @@ directories:
 files:
   - out/**
 extraResources:
-  # sidecar 二进制按平台分发：resources/engines/<platform>/
-  - from: resources/engines/${os}-${arch}
-    to: engines
-    filter:
-      - '**/*'
+  # 公共资源（跨平台一致内容）；平台化二进制见下方各平台段
   - from: resources/engines/common
     to: engines
     filter:
@@ -22,6 +18,12 @@ protocols:
     schemes:
       - magnet
 win:
+  extraResources:
+    # 运行时目录约定 = process.platform-arch（win32-x64），与 dev/CI 一致
+    - from: resources/engines/win32-${arch}
+      to: engines
+      filter:
+        - '**/*'
   # CI 产物重命名为：x64-setup.exe / x64_portable.zip / x64_zh-CN.msi（见 workflows/build.yml）
   target:
     - target: nsis
@@ -46,13 +48,18 @@ msi:
   perMachine: false
   # MSI UI 语言跟随系统 locale；中文系统即显示 zh-CN 界面（WiX 由 electron-builder 自动下载）
 mac:
-  # 三种 dmg：Intel(x64) / Apple Silicon(arm64) / 通用双架构(universal)
+  extraResources:
+    # 运行时目录约定 = darwin-arch（darwin-arm64 / darwin-x64）
+    - from: resources/engines/darwin-${arch}
+      to: engines
+      filter:
+        - '**/*'
+  # 两种 dmg：Intel(x64) / Apple Silicon(arm64)。universal 无法捆绑平台化 sidecar，不产出
   target:
     - target: dmg
       arch:
         - x64
         - arm64
-        - universal
   category: public.app-category.utilities
   darkModeSupport: true
   extendInfo:
@@ -61,9 +68,18 @@ mac:
         CFBundleURLSchemes:
           - magnet
 linux:
+  extraResources:
+    # 运行时目录约定 = linux-arch（linux-x64）
+    - from: resources/engines/linux-${arch}
+      to: engines
+      filter:
+        - '**/*'
   target:
     - AppImage
     - deb
   category: Network;FileTransfer
   mimeTypes:
     - x-scheme-handler/magnet
+# 自动更新通道（electron-updater：win nsis / mac dmg 支持；linux deb 不支持在线更新属上游限制）
+publish:
+  provider: github

@@ -10,6 +10,7 @@ const log = createLogger('trackers')
 
 /** 订阅源清单：多源合并提高 peer 发现能力（加速 BT/磁力下载） */
 const SUBSCRIPTIONS: Array<{ url: string; source: string }> = [
+  // GitHub Raw 原源
   {
     url: 'https://raw.githubusercontent.com/XIU2/TrackersListCollection/master/best.txt',
     source: 'xiu2'
@@ -24,6 +25,23 @@ const SUBSCRIPTIONS: Array<{ url: string; source: string }> = [
   },
   {
     url: 'https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all.txt',
+    source: 'ngosang'
+  },
+  // jsDelivr CDN 镜像：raw.githubusercontent.com 不可达时的兜底（同一份数据，DB 按主键去重）
+  {
+    url: 'https://fastly.jsdelivr.net/gh/XIU2/TrackersListCollection@master/best.txt',
+    source: 'xiu2'
+  },
+  {
+    url: 'https://fastly.jsdelivr.net/gh/ngosang/trackerslist@master/trackers_best.txt',
+    source: 'ngosang'
+  },
+  {
+    url: 'https://fastly.jsdelivr.net/gh/XIU2/TrackersListCollection@master/all.txt',
+    source: 'xiu2'
+  },
+  {
+    url: 'https://fastly.jsdelivr.net/gh/ngosang/trackerslist@master/trackers_all.txt',
     source: 'ngosang'
   }
 ]

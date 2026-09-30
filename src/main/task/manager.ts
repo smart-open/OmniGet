@@ -375,7 +375,11 @@ export class TaskManager {
         if (task.status === 'running' || task.status === 'queued') {
           // M3-1：yt-dlp pause = SIGTERM（.part 保留）；aria2 = RPC pause
           if (task.engine === 'ytdlp') this.ytdlp?.pause(task)
-          else await this.aria2.pause(task)
+          else
+            await this.aria2.pause(task).catch(() => {
+              // 极端竞态：forcePause 仍被拒（如刚重启 aria2 会话丢失）→ 不转状态，抛友好提示
+              throw new Error('任务正忙，无法立即暂停，请稍候重试')
+            })
           this.transition(task, 'paused')
           this.pushEvent({ taskId: task.id, status: 'paused' })
         }
@@ -430,10 +434,12 @@ export class TaskManager {
     const files = getTaskFiles(task.id)
     const saveDir = task.saveDir.replace(/\\/g, '/').replace(/\/+$/, '')
     const dirs = new Set<string>()
+    // 大小写口径跟文件系统走：win32/macOS 不敏感，Linux 敏感（防止 /data/Foo 被误判为 saveDir 内）
+    const caseFold = (p: string): string => (process.platform === 'linux' ? p : p.toLowerCase())
     for (const f of files) {
       const abs = join(task.saveDir, f.path)
       // 防御：确保解析出的绝对路径确实位于 saveDir 之内
-      if (!abs.replace(/\\/g, '/').toLowerCase().startsWith(saveDir.toLowerCase() + '/')) {
+      if (!caseFold(abs.replace(/\\/g, '/')).startsWith(caseFold(saveDir) + '/')) {
         log.warn(`skip file outside saveDir: ${abs}`)
         continue
       }
@@ -444,7 +450,7 @@ export class TaskManager {
     const sorted = [...dirs].sort((a, b) => b.length - a.length)
     for (const d of sorted) {
       const norm = d.replace(/\\/g, '/')
-      if (!norm.toLowerCase().startsWith(saveDir.toLowerCase() + '/')) continue
+      if (!caseFold(norm).startsWith(caseFold(saveDir) + '/')) continue
       try {
         const entries = await readdir(norm)
         if (entries.length === 0) await rm(norm, { recursive: true })

@@ -110,7 +110,8 @@ export class Aria2Adapter implements EngineAdapter {
 
   /** .torrent：本地解析零引擎依赖（§4.2） */
   private async parseTorrent(task: Task): Promise<ParseOutput> {
-    const torrentPath = task.source.replace(/^file:\/\//, '')
+    const { stripFileProtocol } = await import('../sniffer')
+    const torrentPath = stripFileProtocol(task.source)
     const info = parseTorrentFile(torrentPath)
     return {
       name: info.name,
@@ -185,7 +186,8 @@ export class Aria2Adapter implements EngineAdapter {
     })
 
     if (task.type === 'bt') {
-      const base64 = readFileSync(task.source.replace(/^file:\/\//, '')).toString('base64')
+      const { stripFileProtocol } = await import('../sniffer')
+      const base64 = readFileSync(stripFileProtocol(task.source)).toString('base64')
       if (selection?.indexes?.length) {
         opts['select-file'] = selection.indexes.join(',')
       }
@@ -259,7 +261,25 @@ export class Aria2Adapter implements EngineAdapter {
 
   async pause(task: Task): Promise<void> {
     if (!task.engineGid) return
-    await this.rpc().call('pause', task.engineGid)
+    try {
+      await this.rpc().call('pause', task.engineGid)
+    } catch {
+      // aria2 在文件预分配、BT 初始化等关键段会拒绝暂停（GID#xxx cannot be paused now）
+      // → 降级 forcePause（跳过 Tracker 注销等耗时动作，立即置为暂停态）
+      try {
+        await this.rpc().call('forcePause', task.engineGid)
+      } catch (err2) {
+        // gid 已终结（complete/error/removed）→ 视为已暂停，真实状态由轮询对齐
+        const st = (await this.rpc()
+          .call('tellStatus', task.engineGid)
+          .catch(() => null)) as Aria2Status | null
+        if (st && ['complete', 'error', 'removed'].includes(st.status)) {
+          log.warn(`pause skipped, gid already ${st.status}: ${task.engineGid}`)
+          return
+        }
+        throw err2
+      }
+    }
   }
 
   async resume(task: Task): Promise<void> {

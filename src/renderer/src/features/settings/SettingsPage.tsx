@@ -233,6 +233,7 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
   const [newTracker, setNewTracker] = useState('')
   const [refreshing, setRefreshing] = useState(false)
   const [saved, setSaved] = useState('')
+  const [engineUpdating, setEngineUpdating] = useState(false)
 
   useEffect(() => {
     void (async () => {
@@ -275,7 +276,13 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
         </div>
 
         {saved && (
-          <div className="mb-4 rounded-ctl border border-success/40 bg-success/10 px-3 py-2 text-xs text-success">
+          <div
+            className={
+              saved.startsWith('更新失败')
+                ? 'mb-4 rounded-ctl border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger'
+                : 'mb-4 rounded-ctl border border-success/40 bg-success/10 px-3 py-2 text-xs text-success'
+            }
+          >
             {saved}
           </div>
         )}
@@ -495,14 +502,30 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
             <Button
               size="sm"
               variant="outline"
-              icon={<ArrowClockwise size={11} />}
+              icon={
+                <ArrowClockwise
+                  size={11}
+                  className={engineUpdating ? 'animate-spin' : ''}
+                />
+              }
+              disabled={engineUpdating}
               onClick={() => {
-                void window.omniget.checkAppUpdate().then((r) =>
-                  flash(r?.ok ? `引擎已更新至 ${r.version}` : '引擎已是最新或更新失败，详情见日志')
-                )
+                setEngineUpdating(true)
+                flash('正在检查 yt-dlp 更新…')
+                void window.omniget
+                  .engineUpdate('ytdlp')
+                  .then((r) =>
+                    flash(
+                      r?.ok
+                        ? `yt-dlp 已更新至 ${r.version ?? '最新版'}`
+                        : `更新失败：${r?.error ?? '未知错误'}`
+                    )
+                  )
+                  .catch(() => flash('更新失败：无法连接更新服务，请检查网络'))
+                  .finally(() => setEngineUpdating(false))
               }}
             >
-              立即检查引擎更新（yt-dlp）
+              {engineUpdating ? '正在更新…' : '立即检查引擎更新（yt-dlp）'}
             </Button>
           </Section>
         )}

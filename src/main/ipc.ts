@@ -121,6 +121,11 @@ export function registerIpcHandlers(): void {
     if (task) void shell.openPath(task.saveDir)
   })
 
+  ipcMain.handle(IPC_CHANNELS.taskCounts, async () => {
+    const { taskCounts } = await import('./task/store')
+    return taskCounts()
+  })
+
   ipcMain.handle(IPC_CHANNELS.taskList, async (_e, filter: string) => {
     const { listTasks } = await import('./task/store')
     // filter: 'all' | 'downloading' | 'completed' | 'trash' | 类型分组

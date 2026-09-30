@@ -1,19 +1,12 @@
 // 系统集成包（M1-12，§4.6）：托盘、系统通知、剪贴板监听、magnet: 协议注册、开机自启。
-// 托盘：程序化绘制的模板图标（自动适配深浅色任务栏）、左键切换主窗、右键丰富菜单
+// 托盘：品牌 icon.png（自带底色适配深浅色任务栏）、左键切换主窗、右键丰富菜单
 //（速度表头 / 显示主窗 / 新建任务 / 全部暂停·继续 / 剪贴板监听 / 开机自启 / 退出）。
 
-import {
-  app,
-  Menu,
-  Tray,
-  nativeImage,
-  nativeTheme,
-  BrowserWindow,
-  clipboard,
-  Notification
-} from 'electron'
+import { app, Menu, Tray, nativeImage, BrowserWindow, clipboard, Notification } from 'electron'
+import { join } from 'path'
 import { sniff, DedupeWindow } from '../sniffer'
 import { createLogger } from '../logger'
+import { runtimeBase } from '../env'
 import { getSetting, setSetting } from '../db'
 import type { TaskEvent } from '@shared/types'
 
@@ -51,78 +44,25 @@ export function setBulkControlHandlers(
   resumeAllHandler = resumeAll
 }
 
-// ── 托盘图标：程序化绘制「聚合下载」单色字形（透明底，随系统深浅色换色）──
-// Windows 不反色模板图 → 监听 nativeTheme 重绘：深色任务栏用白色字形，浅色用近黑。
-
-function segCoverage(
-  dx: number,
-  dy: number,
-  x1: number,
-  y1: number,
-  x2: number,
-  y2: number,
-  hw: number
-): number {
-  const vx = x2 - x1
-  const vy = y2 - y1
-  const wx = dx - x1
-  const wy = dy - y1
-  const t = Math.max(0, Math.min(1, (wx * vx + wy * vy) / (vx * vx + vy * vy || 1)))
-  return Math.max(0, Math.min(1, hw - Math.hypot(wx - vx * t, wy - vy * t) + 0.5))
-}
-
-function boxCoverage(dx: number, dy: number, cx: number, cy: number, hx: number, hy: number): number {
-  return Math.max(0, Math.min(1, Math.min(hx - Math.abs(dx - cx), hy - Math.abs(dy - cy)) + 0.5))
-}
-
-function triCoverage(dx: number, dy: number, cx: number, y0: number, apexY: number, hw0: number, hw1: number): number {
-  if (dy < y0 || dy > apexY) return 0
-  const t = (dy - y0) / (apexY - y0)
-  const hw = hw0 + (hw1 - hw0) * t
-  return Math.max(0, Math.min(1, hw - Math.abs(dx - cx) + 0.5))
-}
-
-/** 「聚合下载」字形：三支流汇入主箭头 → 托盘底线。512 设计空间渲染后平滑缩放。 */
-function drawGlyphImage(r: number, g: number, b: number): Electron.NativeImage {
-  const S = 512
-  const buf = Buffer.alloc(S * S * 4, 0)
-  const K = S / 16 // 16 网格设计空间
-  for (let y = 0; y < S; y++) {
-    for (let x = 0; x < S; x++) {
-      const dx = x / K
-      const dy = y / K
-      const a = Math.max(
-        segCoverage(dx, dy, 2.6, 2.4, 7.1, 7.4, 0.85), // 左支流
-        segCoverage(dx, dy, 13.4, 2.4, 8.9, 7.4, 0.85), // 右支流
-        boxCoverage(dx, dy, 8, 4.4, 1.0, 3.1), // 中路竖杆（y1.3..7.5）
-        boxCoverage(dx, dy, 8, 8.3, 1.0, 0.9), // 主箭杆（y7.4..9.2）
-        triCoverage(dx, dy, 8, 9.2, 12.4, 1.6, 4.9), // 箭头
-        boxCoverage(dx, dy, 8, 14.2, 4.6, 0.9) // 托盘底线
-      )
-      if (a <= 0) continue
-      const i = (y * S + x) * 4
-      buf[i] = b
-      buf[i + 1] = g
-      buf[i + 2] = r
-      buf[i + 3] = Math.round(a * 255)
-    }
-  }
-  return nativeImage.createFromBitmap(buf, { width: S, height: S })
-}
-
-function themedTrayIcon(): Electron.NativeImage {
-  // 系统深色任务栏（深色模式）→ 白色字形；浅色 → 近黑（§7.2 禁纯黑）
-  const dark = nativeTheme.shouldUseDarkColors
-  const [r, g, b] = dark ? [255, 255, 255] : [23, 24, 26]
-  const glyph = drawGlyphImage(r, g, b)
-  const icon = glyph.resize({ width: 16, height: 16, quality: 'best' })
-  const big = glyph.resize({ width: 32, height: 32, quality: 'best' })
-  icon.addRepresentation({ scaleFactor: 2, width: 32, height: 32, buffer: big.toBitmap() })
-  return icon
-}
+// ── 托盘图标：品牌 icon.png（深色圆角底 + 蓝色聚合下载箭头）──────────
+// 自带底色，深浅色任务栏均可辨识，无需模板图/主题重绘。
 
 function buildTrayIcon(): Electron.NativeImage {
-  return themedTrayIcon()
+  const candidates = [
+    join(runtimeBase(), 'resources', 'icon.png'), // dev 与 Windows 打包态
+    join(process.resourcesPath ?? runtimeBase(), 'icon.png') // electron-builder extraResources
+  ]
+  for (const p of candidates) {
+    const img = nativeImage.createFromPath(p)
+    if (!img.isEmpty()) {
+      const icon = img.resize({ width: 16, height: 16, quality: 'best' })
+      const big = img.resize({ width: 32, height: 32, quality: 'best' })
+      icon.addRepresentation({ scaleFactor: 2, width: 32, height: 32, buffer: big.toPNG() })
+      return icon
+    }
+  }
+  log.warn('tray icon: resources/icon.png not found, using empty image')
+  return nativeImage.createEmpty()
 }
 
 // ── 主窗口切换（左键单击）────────────────────────────────────────────
@@ -230,10 +170,6 @@ function buildTrayMenu(): Electron.Menu {
 export function createTray(): Tray {
   tray = new Tray(buildTrayIcon())
   tray.setToolTip('OmniGet')
-  // 系统深浅色切换 → 重绘托盘字形（Windows 不自动反色）
-  nativeTheme.on('updated', () => {
-    tray?.setImage(themedTrayIcon())
-  })
 
   // 左键：切换主窗显隐（Windows 行为；macOS 用 right-click 打开菜单）
   tray.on('click', () => toggleMainWindow())

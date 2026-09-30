@@ -8,6 +8,7 @@ import WebSocket from 'ws'
 import { createLogger } from '../logger'
 import { binaryPath, checkBinary, type SidecarBinary } from './binaries'
 import { defaultGlobalOptions, toSpawnArgs } from '../aria2/options'
+import { terminateTree } from './proc'
 
 const log = createLogger('aria2')
 
@@ -154,7 +155,10 @@ export class Aria2Supervisor {
     this.restarting = true
     try {
       const args = toSpawnArgs(this.globalOptions, this.secret, this.rpcPort)
-      this.proc = spawn(binaryPath('aria2c'), args, { stdio: ['ignore', 'ignore', 'pipe'] })
+      this.proc = spawn(binaryPath('aria2c'), args, {
+        stdio: ['ignore', 'ignore', 'pipe'],
+        windowsHide: true
+      })
       this.proc.stderr?.on('data', (d: Buffer) => log.debug(`[aria2c] ${String(d).trim()}`))
       this.proc.on('exit', (code) => {
         log.warn(`aria2c exited (code=${code})`)
@@ -239,7 +243,7 @@ export class Aria2Supervisor {
       }
       // 先终止残留进程（B5：WS 断开但进程存活时，必须释放端口再重生）
       if (this.proc && this.proc.exitCode === null) {
-        this.proc.kill('SIGTERM')
+        terminateTree(this.proc, 3000)
         this.proc = null
       }
       const delay = this.backoffMs
@@ -267,11 +271,8 @@ export class Aria2Supervisor {
     }
     this.client?.close()
     if (this.proc && this.proc.exitCode === null) {
-      this.proc.kill('SIGTERM')
-      // 10s 超时强杀（§2.2）
-      setTimeout(() => {
-        if (this.proc && this.proc.exitCode === null) this.proc.kill('SIGKILL')
-      }, 10_000)
+      // 10s 超时强杀（§2.2）；Windows 上由 taskkill /T 保证进程树整体退出
+      terminateTree(this.proc, 10_000)
     }
   }
 }

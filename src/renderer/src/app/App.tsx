@@ -1,7 +1,7 @@
 // 全局布局（§7.4 信息架构）：72px 侧边导航 + 玻璃顶栏 + 任务工作区 + 状态栏。
 // 图标一律 Phosphor（§7.2 禁 emoji）；主题切换持久化（settings）。
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   ArrowDown,
   ArrowUp,
@@ -23,6 +23,7 @@ import {
   X
 } from '@phosphor-icons/react'
 import { useTasks, wireTaskEvents } from '../stores/tasks'
+import logoUrl from '../assets/logo.png'
 import { THEMES, applyTheme, parseStoredTheme, watchSystemTheme, type ThemeId } from '../theme'
 import { TaskList } from '../features/tasks/TaskList'
 import { NewTaskDialog } from '../features/new-task/NewTaskDialog'
@@ -47,7 +48,7 @@ interface NavItem {
   id: string
   label: string
   icon: typeof Tray
-  badge?: 'running' | 'trash'
+  badge?: 'running' | 'completed' | 'trash'
 }
 
 const NAV_GROUPS: { title?: string; items: NavItem[] }[] = [
@@ -55,7 +56,7 @@ const NAV_GROUPS: { title?: string; items: NavItem[] }[] = [
     items: [
       { id: 'all', label: '全部', icon: Tray },
       { id: 'downloading', label: '下载中', icon: DownloadSimple, badge: 'running' },
-      { id: 'completed', label: '已完成', icon: CheckCircle }
+      { id: 'completed', label: '已完成', icon: CheckCircle, badge: 'completed' }
     ]
   },
   {
@@ -74,44 +75,16 @@ const NAV_GROUPS: { title?: string; items: NavItem[] }[] = [
 ]
 
 function LogoMark() {
-  // 主题驱动的「聚合下载」标识（对齐 AI 图标形态）：六条来源支流汇入主箭头 → 托盘。
-  // 瓦片 = 主题渐变（surface-2 → bg，随主题换色）、图形 = var(--accent)
+  // 左上角品牌标识：直接使用设计稿 logo.png（深色圆角底 + 蓝色聚合下载箭头）
   return (
-    <svg
+    <img
+      src={logoUrl}
       width="28"
       height="28"
-      viewBox="0 0 48 48"
-      fill="none"
-      aria-label="OmniGet"
-      className="shrink-0 select-none"
-    >
-      <defs>
-        <linearGradient id="og-tile" x1="12" y1="4" x2="36" y2="46" gradientUnits="userSpaceOnUse">
-          <stop stopColor="var(--surface-2)" />
-          <stop offset="1" stopColor="var(--bg)" />
-        </linearGradient>
-      </defs>
-      <rect x="1" y="1" width="46" height="46" rx="11" fill="url(#og-tile)" stroke="var(--border)" />
-      {/* 六条来源支流（远淡近浓，弧线汇聚） */}
-      <path d="M8 9 Q14 12 18.5 17.5" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" opacity="0.35" />
-      <path d="M40 9 Q34 12 29.5 17.5" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" opacity="0.35" />
-      <path d="M6.5 20 Q13 20.5 18.5 20.5" stroke="var(--accent)" strokeWidth="2.2" strokeLinecap="round" opacity="0.5" />
-      <path d="M41.5 20 Q35 20.5 29.5 20.5" stroke="var(--accent)" strokeWidth="2.2" strokeLinecap="round" opacity="0.5" />
-      <path d="M10.5 30 Q16 26.5 20 22.5" stroke="var(--accent)" strokeWidth="2.4" strokeLinecap="round" opacity="0.65" />
-      <path d="M37.5 30 Q32 26.5 28 22.5" stroke="var(--accent)" strokeWidth="2.4" strokeLinecap="round" opacity="0.65" />
-      {/* 中路竖杆 + 汇聚主箭杆 */}
-      <path d="M24 6.5 V15" stroke="var(--accent)" strokeWidth="2.8" strokeLinecap="round" opacity="0.8" />
-      <path d="M24 15 V26.5" stroke="var(--accent)" strokeWidth="4.2" strokeLinecap="round" />
-      {/* 箭头 + 托盘 */}
-      <path
-        d="M15.5 25 L24 35.5 L32.5 25"
-        stroke="var(--accent)"
-        strokeWidth="4.2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <path d="M13 41.5 H35" stroke="var(--accent)" strokeWidth="4.2" strokeLinecap="round" opacity="0.92" />
-    </svg>
+      alt="OmniGet"
+      className="shrink-0 select-none rounded-[7px]"
+      draggable={false}
+    />
   )
 }
 
@@ -244,16 +217,9 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [selectedTaskId, tasks, reload, keymap])
 
-  const counts = useMemo(() => {
-    let running = 0
-    let queued = 0
-    let trashed = 0
-    for (const t of tasks.values()) {
-      if (t.status === 'running') running++
-      else if (t.status === 'queued') queued++
-    }
-    return { running, queued, runningPlusQueued: running + queued, trashed }
-  }, [tasks])
+  // 侧栏角标计数：主进程 SQL 全表口径（跨视图一致，含回收站）
+  const counts = useTasks((s) => s.counts)
+  const runningPlusQueued = counts.running + counts.queued
 
   const online = (n: string): boolean =>
     engines.find((e) => e.name === n)?.online ?? false
@@ -286,7 +252,13 @@ export default function App() {
               {g.items.map((item) => {
                 const isActive = active === item.id
                 const badge =
-                  item.badge === 'running' ? counts.runningPlusQueued : null
+                  item.badge === 'running'
+                    ? runningPlusQueued
+                    : item.badge === 'completed'
+                      ? counts.completed
+                      : item.badge === 'trash'
+                        ? counts.trashed
+                        : null
                 return (
                   <button
                     key={item.id}

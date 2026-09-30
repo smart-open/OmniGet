@@ -83,7 +83,8 @@ export class YtDlpAdapter {
 
   async parse(task: Task): Promise<ParseOutput> {
     if (this.ffmpegOk === null) this.ffmpegOk = await this.supervisor.ffmpegAvailable()
-    const url = task.source.replace(/^file:\/\//, '')
+    const { stripFileProtocol } = await import('../sniffer')
+    const url = stripFileProtocol(task.source)
     const out = await this.supervisor.execJson(['-J', '--no-playlist', url])
     const json = JSON.parse(out) as YtDlpJson
 
@@ -293,7 +294,7 @@ export class YtDlpAdapter {
     const { readdir } = await import('fs/promises')
     const { join } = await import('path')
     const { spawn } = await import('child_process')
-    const { enginesDir } = await import('../orchestrator/binaries')
+    const { toolPath } = await import('../orchestrator/binaries')
 
     const entries = await readdir(task.saveDir)
     const video = entries
@@ -305,7 +306,7 @@ export class YtDlpAdapter {
     const out = video.replace(/(\.\w+)$/, '_nowm$1')
     await new Promise<void>((resolve, reject) => {
       const proc = spawn(
-        join(enginesDir(), process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'),
+        toolPath('ffmpeg'),
         [
           '-y',
           '-i',
@@ -329,7 +330,7 @@ export class YtDlpAdapter {
       const { readdir } = await import('fs/promises')
       const { join } = await import('path')
       const { spawn } = await import('child_process')
-      const { enginesDir } = await import('../orchestrator/binaries')
+      const { toolPath } = await import('../orchestrator/binaries')
       const entries = await readdir(task.saveDir)
       const video = entries
         .filter((f) => /\.(mp4|mkv|webm|mov)$/i.test(f))
@@ -337,7 +338,7 @@ export class YtDlpAdapter {
         .sort()
         .pop()
       if (!video) return
-      const probe = join(enginesDir(), process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe')
+      const probe = toolPath('ffprobe')
       const out = await new Promise<string>((resolve) => {
         const proc = spawn(probe, [
           '-v', 'error', '-show_entries', 'format=duration', '-of', 'json', video

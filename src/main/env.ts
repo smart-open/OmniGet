@@ -27,11 +27,21 @@ function electronApp(): ElectronApp | null {
 
 let cachedDataDir: string | null = null
 
-/** 运行基目录：打包态 = exe 所在目录；dev = 项目根；纯 Node = cwd */
+/** 运行基目录：Windows 打包态 = exe 所在目录（便携口径）；dev = 项目根；纯 Node = cwd */
 export function runtimeBase(): string {
   const app = electronApp()
   if (app) {
-    if (app.isPackaged) return dirname(process.execPath)
+    if (app.isPackaged) {
+      // 仅 Windows 便携口径数据随 exe 目录；macOS（.app bundle 内不可靠/破坏签名）与
+      // Linux（AppImage 为 squashfs 只读挂载）必须走系统 userData
+      if (process.platform === 'win32') return dirname(process.execPath)
+      try {
+        if (app.getPath) return app.getPath('userData')
+      } catch {
+        // ignore，落到下方 cwd
+      }
+      return dirname(process.execPath)
+    }
     if (app.getAppPath) return app.getAppPath()
   }
   return process.cwd()

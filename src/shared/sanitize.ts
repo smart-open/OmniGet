@@ -30,10 +30,11 @@ export function sanitizeFilename(name: string): string {
 
 /**
  * 清洗相对路径（分段清洗，保留 `/` 分层；不改变路径结构）。
+ * 分段同时接受 `\`（Windows 上游/BT 元数据边缘输入），防止整段逃过 `..` 穿越过滤。
  */
 export function sanitizeRelativePath(path: string): string {
   return path
-    .split('/')
+    .split(/[\\/]/)
     .map((seg) => (seg === '.' || seg === '..' ? '_' : sanitizeFilename(seg)))
     .join('/')
 }

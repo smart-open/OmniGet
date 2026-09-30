@@ -1,6 +1,7 @@
 // 主进程入口（T0-1）：单实例锁、窗口、生命周期编排。
 
 import { app, BrowserWindow, Menu, shell } from 'electron'
+import { existsSync } from 'fs'
 import { join } from 'path'
 import { allocatePorts } from './orchestrator/ports'
 import { checkBinary } from './orchestrator/binaries'
@@ -200,8 +201,11 @@ function createWindow(): void {
     frame: false,
     backgroundColor: '#0B0C0E',
     hasShadow: true,
-    // 任务栏/Alt-Tab 图标：dev 用 resources/icon.png；打包态由 exe 内嵌图标接管
-    icon: join(runtimeBase(), 'resources', 'icon.png'),
+    // 任务栏/Alt-Tab 图标：dev 用 resources/icon.png；Windows 打包态由 exe 内嵌图标接管，
+    // macOS 由 bundle icns 接管；Linux 打包态从 electron-builder extraResources 取 icon.png
+    icon: existsSync(join(runtimeBase(), 'resources', 'icon.png'))
+      ? join(runtimeBase(), 'resources', 'icon.png')
+      : join(process.resourcesPath ?? runtimeBase(), 'icon.png'),
     webPreferences: {
       preload: join(__dirname, '../preload/bridge.js'),
       contextIsolation: true, // §9

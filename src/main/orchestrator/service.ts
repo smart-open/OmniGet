@@ -3,13 +3,29 @@
 // 端口/token 经环境变量注入（§9：token 不出现在进程参数）
 // /health 心跳 10s；连续 3 次失败 → 退避重启（1s→30s，连续 5 次 → offline）
 
-import { spawn, type ChildProcess } from 'child_process'
+import { spawn, spawnSync, type ChildProcess } from 'child_process'
 import { randomBytes } from 'crypto'
 import WebSocket from 'ws'
 import { createLogger } from '../logger'
 import { appRoot } from '../env'
+import { terminateTree } from './proc'
 
 const log = createLogger('omni-service')
+
+/** 跨平台探测可用 Python 解释器：win32 依次 python/py/python3，其余 python3/python（各探测一次 --version） */
+function resolvePythonCommand(): string {
+  const candidates =
+    process.platform === 'win32' ? ['python', 'py', 'python3'] : ['python3', 'python']
+  for (const cmd of candidates) {
+    try {
+      const r = spawnSync(cmd, ['--version'], { timeout: 5000, windowsHide: true })
+      if (r.status === 0) return cmd
+    } catch {
+      // 下一个候选
+    }
+  }
+  return candidates[0] ?? 'python3' // 全部探测失败时返回平台惯用名，spawn 报错信息更明确
+}
 
 export interface ServiceSupervisorOptions {
   port: number
@@ -64,8 +80,8 @@ export class ServiceSupervisor {
       }
 
       if (process.env.NODE_ENV === 'development' || !app.isPackagedEnv()) {
-        // dev：系统 Python 直跑源码
-        this.proc = spawn('python', ['service/main.py'], {
+        // dev：系统 Python 直跑源码（macOS/Linux 通常只有 python3，需探测）
+        this.proc = spawn(resolvePythonCommand(), ['service/main.py'], {
           cwd: appRoot(),
           env,
           stdio: ['ignore', 'pipe', 'pipe'],
@@ -158,7 +174,7 @@ export class ServiceSupervisor {
         this.opts.onOffline('omni-service 连续重启失败')
       }
       if (this.proc && this.proc.exitCode === null) {
-        this.proc.kill('SIGTERM')
+        terminateTree(this.proc, 3000)
         this.proc = null
       }
       const delay = this.backoffMs
@@ -231,10 +247,7 @@ export class ServiceSupervisor {
     this.stopHealthPoll()
     this.closeWs()
     if (this.proc && this.proc.exitCode === null) {
-      this.proc.kill('SIGTERM')
-      setTimeout(() => {
-        if (this.proc && this.proc.exitCode === null) this.proc.kill('SIGKILL')
-      }, 10_000)
+      terminateTree(this.proc, 10_000)
     }
   }
 }

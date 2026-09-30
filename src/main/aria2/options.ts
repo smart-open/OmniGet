@@ -13,6 +13,7 @@ export type Aria2GlobalOptions = {
   'max-concurrent-downloads'?: string
   'file-allocation'?: string
   'max-overall-download-limit'?: string
+  'max-overall-upload-limit'?: string
   'bt-tracker'?: string
   'bt-max-peers'?: string
   'bt-request-peer-speed-limit'?: string
@@ -21,6 +22,8 @@ export type Aria2GlobalOptions = {
   'min-split-size'?: string
   'dht-file-path'?: string
   'dht-file-path6'?: string
+  'dht-entry-point'?: string
+  'dht-entry-point6'?: string
   'rpc-listen-port'?: string // 仅启动参数
 }
 
@@ -47,6 +50,9 @@ export function defaultGlobalOptions(): Aria2GlobalOptions {
     'max-concurrent-downloads': '8',
     'file-allocation': 'none',
     'max-overall-download-limit': '0',
+    // 加速：BT 上传限速 1M——seed-ratio=0 无限做种 + 上传不限速会打满上行，
+    // TCP ACK 挤占导致下载掉速（家用非对称带宽最常见瓶颈）
+    'max-overall-upload-limit': '1M',
     'bt-max-peers': '200',
     // 加速：整体速度低于 10M 时 aria2 主动提高 peer 连接换手积极性
     'bt-request-peer-speed-limit': '10M',
@@ -56,7 +62,10 @@ export function defaultGlobalOptions(): Aria2GlobalOptions {
     'min-split-size': '1M',
     // DHT 路由表持久化：冷启动直接复用上次节点，无需重新引导发现
     'dht-file-path': join(userDataDir(), 'dht.dat'),
-    'dht-file-path6': join(userDataDir(), 'dht6.dat')
+    'dht-file-path6': join(userDataDir(), 'dht6.dat'),
+    // 加速：DHT 入口节点引导——dht.dat 缺失/失效时立即入网，避免数分钟空转找 peer
+    'dht-entry-point': 'router.bittorrent.com:6881',
+    'dht-entry-point6': 'dht.transmissionbt.com:6881'
   }
 }
 
