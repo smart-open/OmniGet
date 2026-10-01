@@ -1,5 +1,7 @@
 appId: com.omniget.app
 productName: OmniGet
+# R6：安装包瘦身——app.asar 与 NSIS 压缩档用最高压缩级别（构建耗时略增）
+compression: maximum
 directories:
   output: release
 files:

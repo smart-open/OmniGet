@@ -23,6 +23,13 @@ const log = createLogger('aria2-adapter')
 const METADATA_TIMEOUT_MS = 90_000 // 磁力元数据超时（§11 风险 #5）
 const HTTP_PROBE_TIMEOUT_MS = 10_000
 
+/** P3 修复：磁力元数据临时目录统一清理（%TEMP%/omniget-metadata/<taskId> 此前从不删除） */
+function cleanupMetadataDir(metaDir: string): void {
+  void import('fs/promises').then(({ rm }) =>
+    rm(metaDir, { recursive: true, force: true }).catch(() => {})
+  )
+}
+
 interface Aria2Status {
   gid: string
   status: string
@@ -42,6 +49,8 @@ interface Aria2Status {
 export interface SelectionHint {
   indexes?: number[]
   paths?: string[]
+  /** P1 加固：增量补下（re-add 凭已存在文件秒校验）显式放行覆盖；新任务默认拒绝 */
+  allowOverwrite?: boolean
 }
 
 export class Aria2Adapter implements EngineAdapter {
@@ -49,6 +58,13 @@ export class Aria2Adapter implements EngineAdapter {
 
   private rpc() {
     return this.supervisor.getClient()
+  }
+
+  /** getGlobalStat 缓存（pollEvents 每 1s 顺带刷新；托盘/状态栏上传速度数据源） */
+  private lastGlobalStat = { down: 0, up: 0 }
+
+  globalStat(): { down: number; up: number } {
+    return this.lastGlobalStat
   }
 
   async health(): Promise<EngineHealthInfo> {
@@ -91,6 +107,7 @@ export class Aria2Adapter implements EngineAdapter {
       if (st.status === 'complete' && files.length > 0) {
         const name = st.bittorrent?.info?.name ?? files[0]?.path.split('/')[0] ?? task.source
         const ih = normalizeInfohash(st.infoHash ?? infohash ?? '')
+        cleanupMetadataDir(metaDir) // P3：元数据已解析入任务树，临时目录即弃
         return {
           name,
           files,
@@ -101,12 +118,19 @@ export class Aria2Adapter implements EngineAdapter {
         }
       }
       if (st.status === 'error' || st.status === 'removed') {
-        throw makeError('METADATA_TIMEOUT', { cause: st.errorMessage })
+        // P3 修复：error/removed ≠ 超时——此前一律抛 METADATA_TIMEOUT，
+        // "链接无效/无种"也被文案包装成"超时（90s）"，出口动作误导
+        cleanupMetadataDir(metaDir)
+        await this.rpc().call('remove', gid).catch(() => {})
+        throw makeError('METADATA_TIMEOUT', {
+          message: `磁力元数据获取失败${st.errorMessage ? `（${st.errorMessage}）` : ''}。请确认链接有效或有可用节点，或改用 .torrent 文件创建任务`
+        })
       }
       await sleep(1000)
     }
     // 超时：移除暂停态任务
     await this.rpc().call('remove', gid).catch(() => {})
+    cleanupMetadataDir(metaDir)
     throw makeError('METADATA_TIMEOUT')
   }
 
@@ -184,37 +208,50 @@ export class Aria2Adapter implements EngineAdapter {
       type: task.type === 'bt' || task.type === 'magnet' ? 'bt' : 'http',
       threads: task.threads,
       saveDir: task.saveDir,
-      seedRatio: task.seedRatio ?? 0
+      seedRatio: task.seedRatio ?? 0,
+      allowOverwrite: selection?.allowOverwrite === true
     })
 
-    if (task.type === 'bt') {
-      const { stripFileProtocol } = await import('../sniffer')
-      const base64 = readFileSync(stripFileProtocol(task.source)).toString('base64')
-      if (selection?.indexes?.length) {
-        opts['select-file'] = selection.indexes.join(',')
+    try {
+      if (task.type === 'bt') {
+        const { stripFileProtocol } = await import('../sniffer')
+        const base64 = readFileSync(stripFileProtocol(task.source)).toString('base64')
+        if (selection?.indexes?.length) {
+          opts['select-file'] = selection.indexes.join(',')
+        }
+        return (await this.rpc().call('addTorrent', base64, [], opts)) as string
       }
-      return (await this.rpc().call('addTorrent', base64, [], opts)) as string
-    }
 
-    if (task.type === 'magnet') {
-      const gid = (await this.rpc().call('addUri', [task.source], {
-        dir: task.saveDir,
-        'bt-save-metadata': 'true',
-        pause: 'true'
-      })) as string
-      const ready = await this.waitMagnetMetadata(gid)
-      if (!ready) {
-        await this.rpc().call('remove', gid).catch(() => {})
-        throw makeError('METADATA_TIMEOUT')
+      if (task.type === 'magnet') {
+        const gid = (await this.rpc().call('addUri', [task.source], {
+          dir: task.saveDir,
+          'bt-save-metadata': 'true',
+          pause: 'true'
+        })) as string
+        const ready = await this.waitMagnetMetadata(gid)
+        if (!ready) {
+          await this.rpc().call('remove', gid).catch(() => {})
+          throw makeError('METADATA_TIMEOUT')
+        }
+        if (selection?.paths?.length) {
+          await this.applySelectionByPath(gid, selection.paths, task.threads, task.saveDir, task.seedRatio ?? 0)
+        }
+        await this.rpc().call('unpause', gid)
+        return gid
       }
-      if (selection?.paths?.length) {
-        await this.applySelectionByPath(gid, selection.paths, task.threads, task.saveDir, task.seedRatio ?? 0)
-      }
-      await this.rpc().call('unpause', gid)
-      return gid
-    }
 
-    return (await this.rpc().call('addUri', [task.source], opts)) as string
+      return (await this.rpc().call('addUri', [task.source], opts)) as string
+    } catch (err) {
+      // P1 加固：allow-overwrite 默认关闭后，同名文件直接报 aria2 原生英文错误——
+      // 归一为带出口动作的中文提示
+      const raw = err instanceof Error ? err.message : String(err)
+      if (/File already exists/i.test(raw)) {
+        throw new Error(
+          '保存目录已存在同名文件，为防覆盖已停止下载。请更换保存目录，或先删除旧任务/旧文件后重试'
+        )
+      }
+      throw err
+    }
   }
 
   private async waitMagnetMetadata(gid: string): Promise<boolean> {
@@ -347,6 +384,17 @@ export class Aria2Adapter implements EngineAdapter {
 
   async pollEvents(tasks: Task[]): Promise<TaskEvent[]> {
     if (!this.supervisor.isOnline) return []
+    // 顺带刷新全局速度缓存（含上传；失败静默，保留上次值）
+    void this.rpc()
+      .call('getGlobalStat')
+      .then((s) => {
+        const g = s as { downloadSpeed?: string; uploadSpeed?: string }
+        this.lastGlobalStat = {
+          down: Number(g.downloadSpeed) || 0,
+          up: Number(g.uploadSpeed) || 0
+        }
+      })
+      .catch(() => {})
     const events: TaskEvent[] = []
     for (const task of tasks) {
       if (task.engine !== 'aria2' || !task.engineGid) continue

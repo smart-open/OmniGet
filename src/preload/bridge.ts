@@ -43,6 +43,7 @@ const api: OmniGetBridge = {
   },
   engineUpdate: (engine) => ipcRenderer.invoke(IPC_CHANNELS.engineUpdate, engine),
   toolCreate: (input: ToolCreateInput) => ipcRenderer.invoke(IPC_CHANNELS.toolCreate, input),
+  revealToolOutput: (output: string) => ipcRenderer.invoke(IPC_CHANNELS.toolReveal, output),
   settingsGet: (key: string) => ipcRenderer.invoke(IPC_CHANNELS.settingsGet, key),
   settingsSet: (key: string, value: unknown) =>
     ipcRenderer.invoke(IPC_CHANNELS.settingsSet, key, value),
@@ -62,6 +63,11 @@ const api: OmniGetBridge = {
   reloadAdapterScripts: () => ipcRenderer.invoke(IPC_CHANNELS.scriptsReload),
   toggleAdapterScript: (id: string, enabled: boolean) =>
     ipcRenderer.invoke(IPC_CHANNELS.scriptsToggle, id, enabled),
+  // R1+R5：本地桥接信息
+  getBridgeInfo: () => ipcRenderer.invoke(IPC_CHANNELS.bridgeInfo),
+  // R6：引擎按需下载
+  getEngineStatus: () => ipcRenderer.invoke(IPC_CHANNELS.enginesStatus),
+  fetchEngines: () => ipcRenderer.invoke(IPC_CHANNELS.enginesFetch),
   onToolEvents: (listener: (e: import('@shared/types').ToolEvent) => void) => {
     const wrapped = (_e: unknown, ev: import('@shared/types').ToolEvent): void => listener(ev)
     ipcRenderer.on('event:tools', wrapped)

@@ -38,6 +38,9 @@ export type Aria2TaskOptions = {
   continue?: string
   'bt-save-metadata'?: string
   pause?: string
+  // P1 加固：allow-overwrite 从全局启动参数收窄为每任务——仅增量补下（re-add 凭
+  // 已存在文件做秒校验）显式开启；新任务默认拒绝覆盖已存在的同名文件
+  'allow-overwrite'?: string
 }
 
 /** 全局选项默认值（继承 torrent_dl.py 推荐值，§附录 A；含下载加速调优） */
@@ -69,17 +72,21 @@ export function defaultGlobalOptions(): Aria2GlobalOptions {
   }
 }
 
-/** 生成 aria2c 启动参数（全局选项仅能经启动参数注入的部分） */
-export function toSpawnArgs(globalOpts: Aria2GlobalOptions, rpcSecret: string, rpcPort: number): string[] {
+/** 生成 aria2c 启动参数（全局选项仅能经启动参数注入的部分）。
+ * P3 加固：RPC secret 经文件注入（--rpc-secret-file）——原 --rpc-secret 会出现在
+ * 进程命令行，本机其他进程经 wmic/任务管理器可直接读取 */
+export function toSpawnArgs(globalOpts: Aria2GlobalOptions, rpcSecretFile: string, rpcPort: number): string[] {
   return [
     '--enable-rpc',
-    `--rpc-secret=${rpcSecret}`,
+    `--rpc-secret-file=${rpcSecretFile}`,
     `--rpc-listen-port=${String(rpcPort)}`,
     '--rpc-listen-all=false',
     '--continue=true',
     '--check-integrity=false',
     '--auto-file-renaming=false',
-    '--allow-overwrite=true',
+    // P1 加固：默认拒绝覆盖（此前 true 会静默覆盖用户同名文件且不产生副本；
+    // 增量补下任务经每任务选项显式放行）
+    '--allow-overwrite=false',
     '--summary-interval=0',
     ...Object.entries(globalOpts)
       .filter(([k, v]) => v !== undefined && k !== 'rpc-listen-port')
@@ -99,12 +106,16 @@ export function buildTaskOptions(input: {
   selectedFileIndexes?: number[]
   seedRatio?: number
   checkIntegrity?: boolean
+  allowOverwrite?: boolean
 }): Aria2TaskOptions {
   const opts: Aria2TaskOptions = {
     dir: input.saveDir,
     // aria2 硬限制 1–16（超限直接拒绝任务）；split 上限另行 64
     'max-connection-per-server': String(Math.min(16, Math.max(1, input.threads))),
     'check-integrity': input.checkIntegrity ? 'true' : 'false'
+  }
+  if (input.allowOverwrite) {
+    opts['allow-overwrite'] = 'true'
   }
   if (input.type === 'http') {
     opts.split = String(Math.min(64, Math.max(1, input.threads)))

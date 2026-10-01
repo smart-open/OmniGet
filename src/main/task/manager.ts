@@ -1,10 +1,11 @@
 // 任务管理器（M1-1/M1-11，§4.5）：编排、状态机驱动、持久化恢复、事件广播。
 
 import { app } from 'electron'
-import { basename, dirname } from 'path'
+import { basename, dirname, join } from 'path'
 import type {
   Task,
   TaskEvent,
+  TaskFile,
   TaskStatus,
   ServiceEvent,
   UiNotice,
@@ -25,6 +26,7 @@ import { notifyTaskEvent } from '../integrations/tray'
 import { toolbox } from '../toolbox'
 import { samplePeakSpeed, recordCompletion } from '../stats'
 import { recordPlatformOk, recordPlatformDegraded, recordPlatformFailure } from '../health'
+import { getSettingParsed } from '../db'
 import { assertTransition, IllegalTransitionError } from './state-machine'
 import { uuidv7 } from './id'
 import { TaskEventMerger } from './events'
@@ -33,6 +35,7 @@ import {
   getTask,
   getTaskFiles,
   insertTask,
+  isTrashed,
   listTasks,
   purgeTask,
   restoreTask,
@@ -61,6 +64,10 @@ export class TaskManager {
   private merger: TaskEventMerger
   private pollTimer: NodeJS.Timeout | null = null
   private currentEvents = new Map<string, TaskEvent>()
+  /** R2：并发上限闸门的待启动队列（FIFO 闭包，run 内部自检任务状态） */
+  private startQueue: Array<() => void> = []
+  /** P2 加固：正在启动（引擎调用在途）的任务——DB 状态仍为 queued，但槽位已被真实占用 */
+  private launching = new Set<string>()
   /** M2-6 信号量：进行中的音乐下载数 */
   private activeMusic = 0
   /** 正在 POST 中的音乐任务（防 pump 重入） */
@@ -115,16 +122,18 @@ export class TaskManager {
     const out: TaskEvent[] = []
     for (const e of events) {
       const task = getTask(e.taskId) as TaskExt | null
-      if (!task) continue
+      // P2 加固：回收站/已删除任务的事件不得复活广播（remove 后轮询仍会回一帧 removed→failed）
+      if (!task || isTrashed(task.id)) continue
       if (e.status && e.status !== task.status) {
         try {
           this.transition(task, e.status)
         } catch (err) {
           if (err instanceof IllegalTransitionError) {
             log.debug(`skip illegal engine transition ${err.from} -> ${err.to} for ${task.id}`)
-            continue
+            // P3 加固：状态转移非法只跳过转移，本窗口的字节进度照常落库
+          } else {
+            throw err
           }
-          throw err
         }
       }
       updateTaskFields(e.taskId, {
@@ -133,6 +142,11 @@ export class TaskManager {
         // M3-6：wm_level 回填（direct|fallback|post）
         ...(e.wmLevel ? { wmLevel: e.wmLevel } : {})
       })
+      // P1 加固：yt-dlp 单视频完成时产物落 task_files（此前 video/music 无 task_files，
+      // 回收站「删除（含文件）」对这两类任务一个文件都不删）
+      if (e.status === 'completed' && task.engine === 'ytdlp') {
+        this.persistYtdlpProduct(task, e)
+      }
       this.currentEvents.set(e.taskId, e)
       // P2 加固：终态事件后聚合速度表不再需要该条目，删除防 Map 无界增长
       if (e.status === 'completed' || e.status === 'failed') {
@@ -142,6 +156,106 @@ export class TaskManager {
       out.push({ ...e, status: e.status ?? task.status })
     }
     if (out.length) broadcastTasks(out)
+    // R2：槽位释放（completed/failed/paused）后派发排队任务
+    if (this.startQueue.length > 0) this.pumpStarts()
+  }
+
+  /** yt-dlp 单视频产物落 task_files（合集任务解析期已有文件树，跳过） */
+  private persistYtdlpProduct(task: TaskExt, e: TaskEvent): void {
+    if (getTaskFiles(task.id).length > 0) return
+    void (async () => {
+      const { readdir } = await import('fs/promises')
+      const entries = await readdir(task.saveDir).catch(() => [] as string[])
+      const videos = entries.filter((f) => /\.(mp4|mkv|webm|mov|flv|ts)$/i.test(f) && !f.endsWith('.part'))
+      if (videos.length === 0) return
+      const { stat } = await import('fs/promises')
+      let best: { path: string; m: number } | null = null
+      for (const f of videos) {
+        const m = await stat(`${task.saveDir}/${f}`).then((s) => s.mtimeMs).catch(() => 0)
+        if (!best || m > best.m) best = { path: f, m }
+      }
+      if (!best) return
+      const size = e.totalBytes ?? task.totalBytes ?? 0
+      saveTaskFiles(task.id, [
+        { path: best.path, size, selected: true, downloaded: size }
+      ])
+    })()
+  }
+
+  // ── R2：全局并发上限（download.maxConcurrent，0=不限）───────────────
+
+  private maxConcurrent(): number {
+    const v = getSettingParsed<number>('download.maxConcurrent')
+    return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0
+  }
+
+  /** 占用全局并发槽的引擎（music/tool 有各自独立信号量，不计入）。
+   * P2 加固：启动在途（launching）的任务 DB 状态仍是 queued，但槽位已被真实占用，
+   * 必须计入，否则轮询窗口内 pumpStarts 会突破 maxConcurrent。 */
+  private runningDownloads(): number {
+    const dbRunning = listTasks({ status: ['running', 'verifying'] }).filter(
+      (t) => t.engine === 'aria2' || t.engine === 'ytdlp'
+    ).length
+    return dbRunning + this.launching.size
+  }
+
+  /** 闸门：有空位（或不限）立即执行；否则入 FIFO 队列，槽位释放后由 pumpStarts 派发 */
+  private gateStart(run: () => void): void {
+    const max = this.maxConcurrent()
+    if (max <= 0 || this.runningDownloads() + this.startQueue.length < max) {
+      run()
+      return
+    }
+    this.startQueue.push(run)
+  }
+
+  /** 槽位释放后派发排队任务；run 自检任务状态（已删除/取消则放弃） */
+  private pumpStarts(): void {
+    if (this.startQueue.length === 0) return
+    const max = this.maxConcurrent()
+    if (max <= 0) {
+      const q = this.startQueue
+      this.startQueue = []
+      for (const run of q) run()
+      return
+    }
+    let running = this.runningDownloads()
+    while (this.startQueue.length > 0 && running < max) {
+      const run = this.startQueue.shift()!
+      running++ // 本批预占，防同批超发；任务被删/失败由后续 pump 修正
+      run()
+    }
+  }
+
+  /** 排队启动包装：执行时重读任务并校验仍为 queued（过期/删除即放弃）。
+   * P2 加固：launching 集合防同一任务并发 re-add 两次（磁力 waitMagnetMetadata
+   * 最长 90s 期间 DB 一直是 queued，第二个入队的同任务 job 会穿透状态检查）。 */
+  private runWhenQueued(taskId: string, job: (t: TaskExt) => Promise<void>): () => void {
+    return () => {
+      void (async () => {
+        if (this.launching.has(taskId)) return
+        this.launching.add(taskId)
+        try {
+          const cur = getTask(taskId) as TaskExt | null
+          if (!cur || cur.status !== 'queued') return
+          await job(cur)
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          // P3 加固：await 期间状态可能已被轮询改写（如用户刚暂停）——重读复核再转移
+          const fresh = getTask(taskId) as TaskExt | null
+          if (!fresh) return
+          try {
+            this.transition(fresh, 'failed')
+          } catch {
+            // 已是 failed
+          }
+          updateTaskFields(taskId, { error: message })
+          this.pushEvent({ taskId, status: 'failed', error: message })
+        } finally {
+          this.launching.delete(taskId)
+        }
+      })()
+    }
   }
 
   // ── 新建任务（§7.5 流程状态机）─────────────────────────────────────
@@ -168,9 +282,17 @@ export class TaskManager {
     }
 
     // 入参校验（防止空目录/越界线程落库后在引擎侧报晦涩错误）
-    const saveDir = input.saveDir?.trim() ?? ''
+    let saveDir = input.saveDir?.trim() ?? ''
     if (!saveDir) {
       return { kind: 'failed', error: '请先设置保存目录（设置 → 下载，或对话框内选择）' }
+    }
+    // R7：按类型自动归档（opt-in，设置 download.autoArchive）——创建时路由到分类子目录
+    if (getSettingParsed<boolean>('download.autoArchive') === true) {
+      const mediaExt = /\.(mp4|mkv|webm|avi|mov|flv|ts|mp3|flac|m4a|wav|ogg|opus|aac)(\?|#|$)/i
+      if (s.type === 'video') saveDir = join(saveDir, '视频')
+      else if (s.type === 'http' && /\.(mp3|flac|m4a|wav|ogg|opus|aac)(\?|#|$)/i.test(input.source))
+        saveDir = join(saveDir, '音乐')
+      else if (s.type === 'http' && mediaExt.test(input.source)) saveDir = join(saveDir, '视频')
     }
     const threads = Math.round(Math.min(64, Math.max(1, input.threads || 8)))
 
@@ -258,8 +380,13 @@ export class TaskManager {
       const skipAwaiting = s.type === 'http'
       this.transition(task, skipAwaiting ? 'queued' : 'awaiting')
       if (skipAwaiting) {
-        const gid = await this.aria2.start({ ...task, status: 'queued' })
-        updateTaskFields(task.id, { engineGid: gid })
+        // R2：过并发闸门（排队时任务保持 queued，槽位释放后由 pumpStarts 启动）
+        this.gateStart(
+          this.runWhenQueued(task.id, async (cur) => {
+            const gid = await this.aria2.start(cur)
+            updateTaskFields(cur.id, { engineGid: gid })
+          })
+        )
       }
       return { kind: 'awaiting', taskId: task.id, parsed, sniff: s }
     } catch (err) {
@@ -292,23 +419,37 @@ export class TaskManager {
     const task = getTask(input.taskId) as TaskExt | null
     if (!task) throw new Error('任务不存在或已删除')
 
+    // P2 加固：全不选的提交此前会走"未传 select-file"分支 → aria2 静默全量下载。
+    // 主进程兜底拦截（渲染层按钮已禁用，此处防其他调用方）
+    if (input.selectedPaths && input.selectedPaths.length === 0) {
+      throw new Error('请至少勾选一个文件再开始下载')
+    }
     if (input.selectedPaths) {
       setTaskFileSelection(task.id, input.selectedPaths)
     }
-    const selection = { paths: input.selectedPaths ?? [] }
 
     if (task.status === 'completed' && task.engine === 'aria2') {
-      // 增量补下：re-add + 新 select-file（§4.5）
+      // 增量补下：re-add + 新 select-file（§4.5）；过 R2 并发闸门。
+      // P1 修复：selection 必须经 selectionFor() 取（indexes+paths 双通道）——
+      // 此前只传 paths，.torrent 任务的 select-file 永不注入 → aria2 全量重下。
       log.info(`re-add completed task ${task.id} for incremental download`)
-      const gid = await this.aria2.start(task, selection)
       updateTaskFields(task.id, {
         status: 'queued',
-        engineGid: gid,
         threads: input.threads,
         error: null,
         completedAt: null
       })
       this.pushEvent({ taskId: task.id, status: 'queued' })
+      this.gateStart(
+        this.runWhenQueued(task.id, async (cur) => {
+          // 增量补下：显式放行覆盖（凭已存在文件做秒校验跳过，§4.5）
+          const gid = await this.aria2.start(cur, {
+            ...this.selectionFor(cur),
+            allowOverwrite: true
+          })
+          updateTaskFields(cur.id, { engineGid: gid })
+        })
+      )
       return
     }
 
@@ -317,43 +458,41 @@ export class TaskManager {
     }
 
     this.transition(task, 'queued')
-    try {
-      if (task.engine === 'ytdlp') {
-        // M3：格式选择 → spawn 下载（合集按 --playlist-items 回放）
-        if (input.video) this.ytdlp?.setVideoOptions(task.id, input.video)
-        const gid = await this.ytdlp!.start(
-          task,
-          this.isPlaylistTask(task) ? this.selectionFor(task) : undefined
-        )
-        updateTaskFields(task.id, { engineGid: gid, threads: input.threads })
-      } else if (task.pendingGid) {
-        // 磁力暂停态：changeOption(select-file/dir/seed-ratio) + unpause（§4.2 Step3）
-        await this.aria2.confirmSelection(
-          task.pendingGid,
-          input.selectedPaths ?? [],
-          input.threads,
-          task.saveDir,
-          task.seedRatio ?? 0
-        )
-        updateTaskFields(task.id, { engineGid: task.pendingGid, threads: input.threads })
-        await this.aria2.resume({ ...task, engineGid: task.pendingGid })
-      } else {
-        // .torrent：addTorrent 注入 select-file（按 task_files 顺序映射索引）+ dir
-        const gid = await this.aria2.start(task, this.selectionFor(task))
-        updateTaskFields(task.id, { engineGid: gid, threads: input.threads })
-      }
-      this.pushEvent({ taskId: task.id, status: 'queued' })
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      try {
-        this.transition(task, 'failed')
-      } catch (txErr) {
-        log.warn(`transition to failed failed for ${task.id}`, txErr)
-      }
-      updateTaskFields(task.id, { error: message })
-      this.pushEvent({ taskId: task.id, status: 'failed', error: message })
-      throw err
+    // R2：过并发闸门（排队时任务停在 queued；启动逻辑抽取到 startConfirmed，
+    // 槽位释放后由 pumpStarts 派发执行）
+    this.gateStart(this.runWhenQueued(task.id, (cur) => this.startConfirmed(cur, input)))
+  }
+
+  /** awaiting→queued 后的引擎启动（磁力 changeOption+unpause / .torrent addTorrent / ytdlp spawn） */
+  private async startConfirmed(
+    task: TaskExt,
+    input: { selectedPaths?: string[]; threads: number; video?: ConfirmSelectionInput['video'] }
+  ): Promise<void> {
+    if (task.engine === 'ytdlp') {
+      // M3：格式选择 → spawn 下载（合集按 --playlist-items 回放）
+      if (input.video) this.ytdlp?.setVideoOptions(task.id, input.video)
+      const gid = await this.ytdlp!.start(
+        task,
+        this.isPlaylistTask(task) ? this.selectionFor(task) : undefined
+      )
+      updateTaskFields(task.id, { engineGid: gid, threads: input.threads })
+    } else if (task.pendingGid) {
+      // 磁力暂停态：changeOption(select-file/dir/seed-ratio) + unpause（§4.2 Step3）
+      await this.aria2.confirmSelection(
+        task.pendingGid,
+        input.selectedPaths ?? [],
+        input.threads,
+        task.saveDir,
+        task.seedRatio ?? 0
+      )
+      updateTaskFields(task.id, { engineGid: task.pendingGid, threads: input.threads })
+      await this.aria2.resume({ ...task, engineGid: task.pendingGid })
+    } else {
+      // .torrent：addTorrent 注入 select-file（按 task_files 顺序映射索引）+ dir
+      const gid = await this.aria2.start(task, this.selectionFor(task))
+      updateTaskFields(task.id, { engineGid: gid, threads: input.threads })
     }
+    this.pushEvent({ taskId: task.id, status: 'queued' })
   }
 
   // ── 控制（§6.1 task:control）───────────────────────────────────────
@@ -387,6 +526,8 @@ export class TaskManager {
           if (!fresh || (fresh.status !== 'running' && fresh.status !== 'queued')) return
           this.transition(fresh, 'paused')
           this.pushEvent({ taskId: fresh.id, status: 'paused' })
+          // R2：暂停释放并发槽
+          this.pumpStarts()
         }
         break
       case 'resume':
@@ -434,6 +575,8 @@ export class TaskManager {
         } else {
           softDeleteTask(task.id) // 回收站：默认保留文件（§4.5）
         }
+        // R2：移除释放并发槽
+        this.pumpStarts()
         break
       }
       case 'top':
@@ -444,7 +587,7 @@ export class TaskManager {
 
   /** B6：按 task_files 精确删除任务文件；目录内无其他文件时顺带清理空目录 */
   private async deleteTaskFiles(task: Task): Promise<void> {
-    const { rm, stat, readdir } = await import('fs/promises')
+    const { rm, readdir } = await import('fs/promises')
     const { join, dirname } = await import('path')
     const files = getTaskFiles(task.id)
     const saveDir = task.saveDir.replace(/\\/g, '/').replace(/\/+$/, '')
@@ -459,7 +602,10 @@ export class TaskManager {
         continue
       }
       dirs.add(dirname(abs.replace(/\\/g, '/')))
-      await rm(abs, { force: true }).catch(() => {})
+      // 终态删除用户文件：失败必须留痕（记录已删但文件残留会让用户困惑）
+      await rm(abs, { force: true }).catch((err) =>
+        log.warn(`删除任务文件失败（残留磁盘）: ${abs}`, { error: String(err) })
+      )
     }
     // 自底向上清理空目录（限 saveDir 内）
     const sorted = [...dirs].sort((a, b) => b.length - a.length)
@@ -469,7 +615,6 @@ export class TaskManager {
       try {
         const entries = await readdir(norm)
         if (entries.length === 0) await rm(norm, { recursive: true })
-        void stat
       } catch {
         // 目录不存在或非空，忽略
       }
@@ -531,26 +676,31 @@ export class TaskManager {
   async recoverEngineTasks(): Promise<void> {
     const queued = listTasks({ status: ['queued'] })
     for (const t of queued) {
-      try {
-        if (t.engine === 'aria2') {
-          const gid = await this.aria2.start(t, this.selectionFor(t))
-          updateTaskFields(t.id, { engineGid: gid })
-        } else if (t.engine === 'ytdlp' && this.ytdlp) {
-          // M3-1：resume = 同参数重 spawn（合集带 --playlist-items 回放）
-          const gid = await this.ytdlp.start(
-            t,
-            this.isPlaylistTask(t) ? this.selectionFor(t) : undefined
-          )
-          updateTaskFields(t.id, { engineGid: gid })
-        } else {
-          continue
-        }
-        this.transition(t, 'running')
-        this.pushEvent({ taskId: t.id, status: 'running' })
-        log.info(`re-added task ${t.id}`)
-      } catch (err) {
-        log.warn(`re-add task ${t.id} failed`, err)
-      }
+      // R2：过并发闸门（超出上限的排队任务停在 queued，槽位释放后由 pumpStarts 派发）
+      this.gateStart(
+        this.runWhenQueued(t.id, async (cur) => {
+          let gid: string
+          if (cur.engine === 'aria2') {
+            gid = await this.aria2.start(cur, this.selectionFor(cur))
+          } else if (cur.engine === 'ytdlp' && this.ytdlp) {
+            // M3-1：resume = 同参数重 spawn（合集带 --playlist-items 回放）
+            gid = await this.ytdlp.start(
+              cur,
+              this.isPlaylistTask(cur) ? this.selectionFor(cur) : undefined
+            )
+          } else {
+            return
+          }
+          updateTaskFields(cur.id, { engineGid: gid })
+          // P3 加固：await 后重读复核，防旧快照覆盖轮询已写入的状态
+          const fresh = getTask(cur.id) as TaskExt | null
+          if (fresh && fresh.status === 'queued') {
+            this.transition(fresh, 'running')
+            this.pushEvent({ taskId: cur.id, status: 'running' })
+          }
+          log.info(`re-added task ${cur.id}`)
+        })
+      )
     }
   }
 
@@ -565,29 +715,27 @@ export class TaskManager {
       if (task.engine === 'music') this.pumpMusic()
       return
     }
-    try {
-      let gid: string
-      if (task.engine === 'ytdlp') {
-        gid = await this.ytdlp!.start(
-          task,
-          this.isPlaylistTask(task) ? this.selectionFor(task) : undefined
-        )
-      } else {
-        gid = await this.aria2.start(task, this.selectionFor(task))
-      }
-      updateTaskFields(taskId, { engineGid: gid, error: null })
-      this.transition(task, 'running')
-      this.pushEvent({ taskId, status: 'running' })
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      try {
-        this.transition(task, 'failed')
-      } catch {
-        // 已是 failed
-      }
-      updateTaskFields(taskId, { error: message })
-      this.pushEvent({ taskId, status: 'failed', error: message })
-    }
+    // R2：过并发闸门（排队时任务停在 queued，槽位释放后自动启动）
+    this.gateStart(
+      this.runWhenQueued(taskId, async (cur) => {
+        let gid: string
+        if (cur.engine === 'ytdlp') {
+          gid = await this.ytdlp!.start(
+            cur,
+            this.isPlaylistTask(cur) ? this.selectionFor(cur) : undefined
+          )
+        } else {
+          gid = await this.aria2.start(cur, this.selectionFor(cur))
+        }
+        updateTaskFields(cur.id, { engineGid: gid, error: null })
+        // P3 加固：await 后重读复核，防旧快照覆盖轮询已写入的状态
+        const fresh = getTask(taskId) as TaskExt | null
+        if (fresh && fresh.status === 'queued') {
+          this.transition(fresh, 'running')
+          this.pushEvent({ taskId: cur.id, status: 'running' })
+        }
+      })
+    )
   }
 
   /** M3-4：合集任务判定（params JSON 持久化，重启恢复可用） */
@@ -656,7 +804,12 @@ export class TaskManager {
           task.id
         )
         this.transition(task, 'completed')
-        updateTaskFields(task.id, { name: `工具箱：${input.tool} → ${output}`, error: null })
+        // saveDir 归位产物所在目录：任务列表「打开目录」直达工具产物（此前指向源文件/下载目录）
+        updateTaskFields(task.id, {
+          name: `工具箱：${input.tool} → ${output}`,
+          saveDir: dirname(output),
+          error: null
+        })
         this.pushEvent({ taskId: task.id, status: 'completed' })
         log.info(`tool task ${task.id} completed → ${output}`)
       } catch (err) {
@@ -688,11 +841,15 @@ export class TaskManager {
   }
 
   private pushEvent(e: TaskEvent): void {
-    this.currentEvents.set(e.taskId, e)
+    // P2 加固：终态事件不进入速度快照表——music/tool 直推路径此前只增不减，
+    // 长驻会话 Map 无界增长（违背本表"防无界增长"的设计初衷）
+    if (e.status !== 'completed' && e.status !== 'failed') {
+      this.currentEvents.set(e.taskId, e)
+    }
     broadcastTasks([e])
   }
 
-  /** 托盘聚合速度（§4.6）：基于最近一次引擎事件快照 */
+  /** 托盘聚合速度（§4.6）：基于最近一次引擎事件快照 + aria2 全局上传速度 */
   getAggregateSpeeds(): { down: number; up: number; running: number; queued: number } {
     let down = 0
     let running = 0
@@ -705,7 +862,9 @@ export class TaskManager {
         queued++
       }
     }
-    return { down, up: 0, running, queued }
+    // P3 修复：上传速度此前硬编码 0——读 aria2 getGlobalStat 缓存值
+    const g = this.aria2.globalStat()
+    return { down, up: g.up, running, queued }
   }
 
   /** 加速：把最新 tracker 列表即时注入运行中/排队的 aria2 任务（per-download changeOption） */
@@ -852,6 +1011,13 @@ export class TaskManager {
       }
       const serviceTaskId = await this.music.download(req)
       updateTaskFields(task.id, { engineGid: serviceTaskId })
+      // P2 加固：POST 在途期间用户可能已暂停/删除任务（此前 pause 只对已有 gid
+      // 调 cancel，此窗口内取消失效 → 引擎照常下载落盘"已取消"的完整音频）。
+      // 返回后补偿检查：任务已离开排队/运行态则立即取消引擎侧任务。
+      const fresh = getTask(task.id) as TaskExt | null
+      if (!fresh || (fresh.status !== 'queued' && fresh.status !== 'running')) {
+        void this.music.cancel(serviceTaskId).catch(() => {})
+      }
     } catch (err) {
       // POST 失败：释放占位并标记失败
       this.activeMusic = Math.max(0, this.activeMusic - 1)
@@ -863,6 +1029,8 @@ export class TaskManager {
       }
       updateTaskFields(task.id, { error: message })
       this.pushEvent({ taskId: task.id, status: 'failed', error: message })
+      // 失败必须留痕（引擎层已有日志，此处任务级归档一条）
+      log.error(`音乐任务失败 ${task.id}: ${message}`)
       this.pumpMusic()
     }
   }
@@ -949,6 +1117,16 @@ export class TaskManager {
         error: null,
         name
       })
+      // P1 加固：音乐产物落 task_files（此前 music 任务无 task_files，
+      // 回收站「删除（含文件）」承诺落空，mp3/lrc 残留磁盘）
+      const productFiles: TaskFile[] = []
+      if (ev.mp3Path) {
+        productFiles.push({ path: basename(ev.mp3Path), size: bytes, selected: true, downloaded: bytes })
+      }
+      if (ev.lrcPath) {
+        productFiles.push({ path: basename(ev.lrcPath), size: 0, selected: true, downloaded: 0 })
+      }
+      if (productFiles.length > 0) saveTaskFiles(task.id, productFiles)
       this.pushEvent({
         taskId: task.id,
         status: 'completed',

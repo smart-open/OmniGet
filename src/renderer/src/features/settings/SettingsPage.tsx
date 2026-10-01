@@ -65,13 +65,24 @@ function KeysSection({ onOpenHelp }: { onOpenHelp?: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recording, overrides])
 
-  const resetAll = (): void => {
+  const resetAll = async (): Promise<void> => {
+    // UX 硬性标准：重置全部自定义键位属破坏性操作——二次确认
+    const ok = await confirmAction({
+      title: '恢复默认快捷键',
+      message: '将清除全部自定义键位并恢复默认设置，此操作不可恢复。',
+      confirmLabel: '恢复默认'
+    })
+    if (!ok) return
     setOverrides({})
-    window.omniget
-      .settingsSet('ui.keymap', {})
-      .then(() => flashToast('快捷键已恢复默认'))
-      .catch((err) => toastError('恢复默认键位', err))
-    window.dispatchEvent(new Event('keymap-changed'))
+    try {
+      await window.omniget.settingsSet('ui.keymap', {})
+      // P2 修复：先落盘成功再广播事件——此前先 dispatch 后 await，
+      // App 立即回读可能拿到旧值，且回显 stale 键位
+      window.dispatchEvent(new Event('keymap-changed'))
+      flashToast('快捷键已恢复默认')
+    } catch (err) {
+      toastError('恢复默认键位', err)
+    }
   }
 
   const actions = Object.keys(DEFAULT_KEYS) as ShortcutAction[]
@@ -111,7 +122,12 @@ function KeysSection({ onOpenHelp }: { onOpenHelp?: () => void }) {
       </div>
       {tip && <p className="mt-2 text-[11px] text-danger">{tip}</p>}
       <div className="mt-3 flex items-center gap-2">
-        <Button size="xs" variant="outline" icon={<ArrowClockwise size={12} />} onClick={resetAll}>
+        <Button
+          size="xs"
+          variant="outline"
+          icon={<ArrowClockwise size={12} />}
+          onClick={() => void resetAll()}
+        >
           恢复默认
         </Button>
         {onOpenHelp && (
@@ -146,6 +162,8 @@ function AppearanceSection() {
     setTheme(id)
     applyTheme(id)
     void window.omniget.settingsSet('ui.theme', id)
+    // P2 修复：App 侧栏主题菜单是另一份本地 state——广播事件保持双端同步
+    window.dispatchEvent(new CustomEvent('app:theme-changed', { detail: id }))
   }
 
   return (
@@ -202,13 +220,23 @@ function AppearanceSection() {
   )
 }
 
-type Tab = 'appearance' | 'keys' | 'template' | 'download' | 'tracker' | 'scripts' | 'update' | 'about'
+type Tab =
+  | 'appearance'
+  | 'keys'
+  | 'template'
+  | 'download'
+  | 'remote'
+  | 'tracker'
+  | 'scripts'
+  | 'update'
+  | 'about'
 
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: 'appearance', label: '外观' },
   { id: 'keys', label: '快捷键' },
   { id: 'template', label: '命名模板' },
   { id: 'download', label: '下载' },
+  { id: 'remote', label: '远程/扩展' },
   { id: 'tracker', label: 'Tracker' },
   { id: 'scripts', label: '适配脚本' },
   { id: 'update', label: '更新' },
@@ -257,6 +285,9 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
   const [template, setTemplate] = useState('')
   const [cookieFile, setCookieFile] = useState('')
   const [saveDir, setSaveDir] = useState('')
+  // R2/R7：并发上限与自动归档
+  const [maxConcurrent, setMaxConcurrent] = useState('0')
+  const [autoArchive, setAutoArchive] = useState(false)
   const [rules, setRules] = useState<ScheduleRule[]>([])
   const [trackers, setTrackers] = useState<TrackerEntry[]>([])
   const [newTracker, setNewTracker] = useState('')
@@ -276,6 +307,18 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
   const [appUpdate, setAppUpdate] = useState<AppUpdateCheck | null>(null)
   // Backlog：适配脚本注册表（内置自维护 + userData 热更目录）
   const [scripts, setScripts] = useState<AdapterScriptInfo[]>([])
+  // R1+R5：本地桥接信息
+  const [bridgeInfo, setBridgeInfo] = useState<{
+    port: number
+    token: string
+    running: boolean
+  } | null>(null)
+  // R6：引擎按需下载
+  const [engineList, setEngineList] = useState<
+    Array<{ name: string; file: string; installed: boolean; size?: number }>
+  >([])
+  const [engineFetching, setEngineFetching] = useState(false)
+  const [engineMirror, setEngineMirror] = useState('')
   const t = useI18n((s) => s.t)
 
   useEffect(() => {
@@ -283,11 +326,46 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
       setTemplate(String((await window.omniget.settingsGet('naming.template')) ?? '{{title}}'))
       setCookieFile(String((await window.omniget.settingsGet('ytdlp.cookieFile')) ?? ''))
       setSaveDir(String((await window.omniget.settingsGet('download.saveDir')) ?? ''))
+      setMaxConcurrent(String((await window.omniget.settingsGet('download.maxConcurrent')) ?? 0))
+      setAutoArchive((await window.omniget.settingsGet('download.autoArchive')) === true)
       setRules((await window.omniget.getScheduleRules()) ?? [])
       setTrackers(await window.omniget.listTrackers())
       setScripts(await window.omniget.listAdapterScripts())
-    })()
+      setBridgeInfo(await window.omniget.getBridgeInfo())
+      setEngineList(await window.omniget.getEngineStatus())
+      setEngineMirror(String((await window.omniget.settingsGet('engines.mirror')) ?? ''))
+    })().catch((err) => {
+      // P2 修复：任一 await 失败不得静默中断后续初始化（页面停留默认值且无提示）
+      toastError('加载设置', err)
+    })
   }, [])
+
+  /** R6：手动补齐缺失引擎并刷新状态 */
+  function fetchEnginesNow(): void {
+    setEngineFetching(true)
+    flash('正在补齐缺失引擎…')
+    window.omniget
+      .fetchEngines()
+      .then((r) => {
+        window.omniget
+          .getEngineStatus()
+          .then(setEngineList)
+          .catch(() => {})
+        if (r.installed.length > 0) flash(`已安装：${r.installed.join('、')}`)
+        else if (r.failed.length > 0)
+          flash(`更新失败：${r.failed.map((f) => `${f.name}（${f.error}）`).join('；')}`)
+        else flash('全部引擎已就绪，无需补齐')
+      })
+      .catch((err) => toastError('补齐引擎', err))
+      .finally(() => setEngineFetching(false))
+  }
+
+  function saveEngineMirror(): void {
+    window.omniget
+      .settingsSet('engines.mirror', engineMirror.trim())
+      .then(() => flash('引擎分发源已保存（即时生效）'))
+      .catch((err) => toastError('保存分发源', err))
+  }
 
   function flash(msg: string): void {
     setSaved(msg)
@@ -349,7 +427,15 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
               hint="变量：{{title}} 标题 · {{uploader}} 作者 · {{date}} 当日日期 · {{index:3}} 序号补零 3 位。非法字符自动按系统规则清洗。"
             />
             <div className="num mb-3 rounded-ctl bg-surface-2 px-3 py-2 text-[11px] text-text-2">
-              预览：{template ? template.replace(/\{\{\s*title\s*\}\}/g, '示例标题').replace(/\{\{\s*uploader\s*\}\}/g, '示例作者') : '（空）'}
+              预览：{template
+                ? template
+                    .replace(/\{\{\s*title\s*\}\}/g, '示例标题')
+                    .replace(/\{\{\s*uploader\s*\}\}/g, '示例作者')
+                    .replace(/\{\{\s*date\s*\}\}/g, '2026-10-01')
+                    .replace(/\{\{\s*index(:\d+)?\s*\}\}/g, (_m, pad: string | undefined) =>
+                      String(1).padStart(Number(pad?.slice(1) ?? 1) || 1, '0')
+                    )
+                : '（空）'}
             </div>
             <Button
               size="sm"
@@ -404,12 +490,54 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
               <Button
                 size="sm"
                 onClick={() => {
+                  // P2 修复：只保存本分区（目录/凭据）——队列分区的值不再被顺手覆盖
                   Promise.all([
                     window.omniget.settingsSet('download.saveDir', saveDir),
                     window.omniget.settingsSet('ytdlp.cookieFile', cookieFile)
                   ])
                     .then(() => flash('下载设置已保存'))
                     .catch((err) => toastError('保存下载设置', err))
+                }}
+              >
+                保存
+              </Button>
+            </Section>
+
+            {/* R2/R7：队列与归档 */}
+            <Section title="队列与归档">
+              <div className="mb-3">
+                <label className="mb-1 block text-xs text-text-2">最大同时下载数（0 = 不限）</label>
+                <input
+                  value={maxConcurrent}
+                  onChange={(e) => setMaxConcurrent(e.target.value.replace(/[^\d]/g, ''))}
+                  className="num h-8 w-28 rounded-ctl border border-border bg-surface-2 px-3 text-xs outline-none focus:border-accent"
+                />
+                <p className="mt-1 text-[10px] leading-relaxed text-text-3">
+                  超出上限的新任务自动排队（FIFO），任一任务完成/失败/暂停后按顺序自动启动；音乐与工具箱任务有各自独立的并发限制
+                </p>
+              </div>
+              <label className="flex cursor-pointer items-center gap-2 text-xs text-text-2">
+                <input
+                  type="checkbox"
+                  checked={autoArchive}
+                  onChange={(e) => setAutoArchive(e.target.checked)}
+                />
+                按类型自动归档到子目录（视频 / 音乐）
+              </label>
+              <p className="mt-1 text-[10px] leading-relaxed text-text-3">
+                开启后新建视频任务落至「保存目录/视频」，直链媒体按扩展名归类；BT/磁力保持原目录结构
+              </p>
+              {/* P2 修复：本分区此前没有保存入口（唯一保存按钮在上方"目录与凭据"分区） */}
+              <Button
+                size="sm"
+                className="mt-3"
+                onClick={() => {
+                  Promise.all([
+                    window.omniget.settingsSet('download.maxConcurrent', Number(maxConcurrent) || 0),
+                    window.omniget.settingsSet('download.autoArchive', autoArchive)
+                  ])
+                    .then(() => flash('队列与归档设置已保存'))
+                    .catch((err) => toastError('保存队列设置', err))
                 }}
               >
                 保存
@@ -476,6 +604,66 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
               </p>
             </Section>
           </>
+        )}
+
+        {/* ── 远程 / 扩展（R1+R5：本地桥接）─────────────────────────── */}
+        {tab === 'remote' && (
+          <Section title="远程访问 / 浏览器扩展">
+            <p className="mb-3 text-[11px] leading-relaxed text-text-3">
+              本地桥接服务已随应用启动（仅绑定 127.0.0.1 回环，令牌鉴权）。Web
+              面板可在同机浏览器打开；浏览器扩展用于右键发送链接或接管浏览器下载。
+            </p>
+            {bridgeInfo?.running ? (
+              <>
+                <div className="mb-3 space-y-1 rounded-panel border border-border bg-surface-2/40 px-3 py-2 text-xs">
+                  <div className="flex items-center gap-2">
+                    <span className="w-14 shrink-0 text-text-3">Web 面板</span>
+                    <span
+                      className="num min-w-0 flex-1 truncate text-text-2"
+                      title={`http://127.0.0.1:${bridgeInfo.port}/?token=${bridgeInfo.token}`}
+                    >
+                      http://127.0.0.1:{bridgeInfo.port}/?token={bridgeInfo.token}
+                    </span>
+                    <button
+                      className="press shrink-0 text-[10px] text-accent hover:underline"
+                      onClick={() =>
+                        window.open(
+                          `http://127.0.0.1:${bridgeInfo.port}/?token=${bridgeInfo.token}`,
+                          '_blank'
+                        )
+                      }
+                    >
+                      打开
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="w-14 shrink-0 text-text-3">端口</span>
+                    <span className="num text-text-2">{bridgeInfo.port}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="w-14 shrink-0 text-text-3">令牌</span>
+                    <span className="num min-w-0 flex-1 truncate text-text-2" title={bridgeInfo.token}>
+                      {bridgeInfo.token}
+                    </span>
+                  </div>
+                </div>
+                <div className="space-y-1 text-[11px] leading-relaxed text-text-3">
+                  <p>
+                    <span className="text-text-2">浏览器扩展安装</span>
+                    （Chrome/Edge/Firefox，MV3）：1) 打开浏览器扩展管理页并开启「开发者模式」；2)
+                    「加载已解压的扩展程序」选择应用目录下的{' '}
+                    <span className="num">resources/extension</span>；3) 在扩展弹窗中填入上方端口与令牌。
+                  </p>
+                  <p>
+                    扩展能力：右键链接「用 OmniGet 下载」；开启「自动拦截」后浏览器新建下载会被取消并转发到
+                    OmniGet（含查重与秒校验）。
+                  </p>
+                </div>
+              </>
+            ) : (
+              <p className="text-xs text-text-3">桥接服务未就绪（重启应用后重试）</p>
+            )}
+          </Section>
         )}
 
         {/* ── Tracker ──────────────────────────────────────────────── */}
@@ -743,6 +931,57 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
               引擎更新：yt-dlp 属高频失效资产，提取器失效时失败任务会提示「更新引擎」，校验
               SHA256 后原子替换（TOFU 指纹口径，指纹不符拒绝安装）。
             </p>
+
+            {/* R6：引擎按需下载管理 */}
+            <div className="mb-4 rounded-panel border border-border p-3">
+              <p className="mb-2 text-xs font-medium text-text-1">引擎管理（按需下载）</p>
+              <div className="mb-2 space-y-1">
+                {engineList.length === 0 && (
+                  <p className="text-[11px] text-text-3">引擎状态加载中…</p>
+                )}
+                {engineList.map((e) => (
+                  <div key={e.name} className="flex items-center gap-2 text-[11px]">
+                    <span
+                      className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${
+                        e.installed ? 'bg-success' : 'bg-warning'
+                      }`}
+                    />
+                    <span className="num w-16 shrink-0 text-text-2">{e.name}</span>
+                    <span className="num flex-1 text-text-3">
+                      {e.installed ? `已安装（${((e.size ?? 0) / 1024 / 1024).toFixed(1)} MB）` : '缺失——将从分发源按需下载'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <div className="mb-2 flex items-center gap-2">
+                <Button
+                  size="xs"
+                  variant="outline"
+                  disabled={engineFetching}
+                  onClick={fetchEnginesNow}
+                >
+                  {engineFetching ? '补齐中…' : '补齐缺失引擎'}
+                </Button>
+                <span className="min-w-0 flex-1 truncate text-[10px] text-text-3">
+                  下载经 SHA256 校验后原子安装，并自动登记 TOFU 指纹
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  value={engineMirror}
+                  onChange={(e) => setEngineMirror(e.target.value)}
+                  placeholder="分发源（默认 GitHub Releases，可指向自建镜像）"
+                  className="num h-7 min-w-0 flex-1 rounded-ctl border border-border bg-surface-2 px-2 text-[10px] outline-none focus:border-accent"
+                />
+                <Button size="xs" variant="ghost" onClick={saveEngineMirror}>
+                  保存分发源
+                </Button>
+              </div>
+              <p className="mt-1 text-[10px] leading-relaxed text-text-3">
+                目录约定：<span className="num">{engineMirror || '默认分发源'}/&lt;platform&gt;-&lt;arch&gt;/</span>{' '}
+                下提供 manifest.json（文件名 → SHA256）与各引擎文件；缺失引擎会在启动时自动补齐
+              </p>
+            </div>
             <Button
               size="sm"
               variant="outline"

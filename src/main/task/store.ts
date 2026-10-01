@@ -106,6 +106,7 @@ export function updateTaskFields(
     quality: string | null
     error: string | null
     completedAt: number | null
+    saveDir: string
   }>
 ): void {
   const sets: string[] = []
@@ -123,7 +124,8 @@ export function updateTaskFields(
     wmLevel: 'wm_level',
     quality: 'quality',
     error: 'error',
-    completedAt: 'completed_at'
+    completedAt: 'completed_at',
+    saveDir: 'save_dir'
   }
   for (const [k, col] of Object.entries(map)) {
     if (k in fields) {
@@ -147,11 +149,12 @@ export function getTask(id: string): Task | null {
 export function listTasks(filter: {
   status?: TaskStatus[]
   type?: TaskType[]
-  includeDeleted?: boolean
+  /** P3 修复：原参数名 includeDeleted 语义实为「仅已删除」，按字面义复用会漏数据——改名正名 */
+  onlyDeleted?: boolean
 }): Task[] {
   const conds: string[] = []
   const args: Record<string, unknown> = {}
-  if (!filter.includeDeleted) {
+  if (!filter.onlyDeleted) {
     conds.push('deleted_at IS NULL')
   } else {
     conds.push('deleted_at IS NOT NULL')
@@ -224,21 +227,23 @@ export function saveTaskFiles(taskId: string, files: TaskFile[]): void {
   const tx = getDb().transaction((items: TaskFile[]) => {
     getDb().prepare('DELETE FROM task_files WHERE task_id = ?').run(taskId)
     const ins = getDb().prepare(
-      'INSERT INTO task_files (task_id, path, size, selected, downloaded) VALUES (?, ?, ?, ?, 0)'
+      'INSERT INTO task_files (task_id, path, size, selected, downloaded) VALUES (?, ?, ?, ?, ?)'
     )
     for (const f of items) {
-      ins.run(taskId, f.path, f.size, f.selected ? 1 : 0)
+      // P3 修复：downloaded 此前硬编码 0（产物已完成量被丢弃）
+      ins.run(taskId, f.path, f.size, f.selected ? 1 : 0, f.downloaded ?? 0)
     }
   })
   tx(files)
 }
 
 export function setTaskFileSelection(taskId: string, selectedPaths: string[]): void {
-  getDb().prepare('UPDATE task_files SET selected = 0 WHERE task_id = ?').run(taskId)
   const upd = getDb().prepare(
     'UPDATE task_files SET selected = 1 WHERE task_id = ? AND path = ?'
   )
+  // P3 修复：先清后置两步此前未包事务——中间崩溃会丢掉全部勾选；整体原子化
   const tx = getDb().transaction((paths: string[]) => {
+    getDb().prepare('UPDATE task_files SET selected = 0 WHERE task_id = ?').run(taskId)
     for (const p of paths) upd.run(taskId, p)
   })
   tx(selectedPaths)

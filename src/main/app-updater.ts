@@ -40,11 +40,44 @@ export function startAppUpdater(): void {
       await autoUpdater.checkForUpdatesAndNotify()
       // 每 4 小时复查
       setInterval(
-        () => void autoUpdater.checkForUpdatesAndNotify().catch(() => {}),
+        () =>
+          void autoUpdater
+            .checkForUpdatesAndNotify()
+            .catch((err) => log.warn('应用更新检查失败（4 小时后重试）', { error: String(err) })),
         4 * 60 * 60 * 1000
       )
     } catch (err) {
       log.warn('electron-updater unavailable:', String(err))
     }
   })()
+}
+
+/** 手动触发一次应用更新检查（IPC app:update；dev/Linux 未启用通道 → null） */
+export async function checkForAppUpdateNow(): Promise<{
+  ok: boolean
+  version?: string
+  error?: string
+} | null> {
+  if (
+    !process.resourcesPath ||
+    process.env.NODE_ENV === 'development' ||
+    process.platform === 'linux'
+  ) {
+    return null
+  }
+  try {
+    const { autoUpdater } = await import('electron-updater')
+    autoUpdater.autoDownload = true
+    autoUpdater.autoInstallOnAppQuit = true
+    const result = await autoUpdater.checkForUpdates()
+    const info = result?.updateInfo
+    const latest = String(info?.version ?? '')
+    const current = autoUpdater.currentVersion.format()
+    return {
+      ok: latest !== '' && latest !== current,
+      version: latest || undefined
+    }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
 }

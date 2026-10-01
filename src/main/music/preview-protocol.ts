@@ -29,7 +29,20 @@ const LOCAL_MEDIA_TYPES: Record<string, string> = {
   '.webm': 'video/webm',
   '.mkv': 'video/x-matroska',
   '.mov': 'video/quicktime',
-  '.ts': 'video/mp2t'
+  '.ts': 'video/mp2t',
+  // 工具箱产物预览：图片 + 纯文本（校验和 / 磁力 txt / 字幕）
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+  '.txt': 'text/plain; charset=utf-8',
+  '.srt': 'text/plain; charset=utf-8',
+  '.ass': 'text/plain; charset=utf-8',
+  '.vtt': 'text/plain; charset=utf-8',
+  '.sha256': 'text/plain; charset=utf-8',
+  '.sha1': 'text/plain; charset=utf-8',
+  '.md5': 'text/plain; charset=utf-8'
 }
 
 /** app.ready 前调用：注册特权 scheme（媒体流 + fetch 支持） */
@@ -42,12 +55,31 @@ export function registerPreviewScheme(): void {
   ])
 }
 
-/** 本地媒体流（Range 支持：<video>/<audio> 拖动进度必需） */
+/** 本地媒体流（Range 支持：<video>/<audio> 拖动进度必需）。
+ * P3 加固：扩展名白名单之外再挡系统/敏感目录——防被攻破的渲染层把该协议当
+ * 全盘媒体文件枚举读取通道（媒体类用户文件不在此列，正常剪辑试听不受影响） */
+function isSensitivePath(p: string): boolean {
+  const norm = p.replace(/\\/g, '/').toLowerCase()
+  const profile = (process.env.USERPROFILE ?? process.env.HOME ?? '').replace(/\\/g, '/')
+  const blocked = [
+    'c:/windows',
+    'c:/program files',
+    'c:/program files (x86)',
+    '/usr', '/etc', '/bin', '/sbin', '/boot', '/proc', '/sys', '/dev',
+    profile ? `${profile}/.ssh` : '',
+    profile ? `${profile}/.gnupg` : '',
+    profile ? `${profile}/AppData/Roaming` : '',
+    profile ? `${profile}/Library/Keychains` : ''
+  ].filter(Boolean)
+  return blocked.some((d) => norm === d || norm.startsWith(`${d}/`))
+}
+
 async function serveLocalMedia(path: string, request: Request): Promise<Response> {
   try {
     if (!isAbsolute(path)) return new Response('bad request', { status: 400 })
     const type = LOCAL_MEDIA_TYPES[extname(path).toLowerCase()]
     if (!type) return new Response('unsupported media type', { status: 415 })
+    if (isSensitivePath(path)) return new Response('forbidden', { status: 403 })
     const info = await stat(path)
     if (!info.isFile()) return new Response('not found', { status: 404 })
     const size = info.size

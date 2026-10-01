@@ -200,6 +200,10 @@ export interface ToolDefInfo {
   category?: 'audio' | 'video' | 'common'
   desc?: string
   fields: Array<{ key: string; label: string; type: string; options?: string[]; default?: string }>
+  /** T4：多文件输入（文件顺序 = 处理顺序，如拼接） */
+  multi?: boolean
+  /** T4：附加文件选择器（如字幕文件），路径经 params[key] 传入 build */
+  extraFile?: { key: string; label: string; accept: string }
 }
 
 /** M4-4 统计页数据 */
@@ -389,6 +393,8 @@ export interface OmniGetBridge {
   engineUpdate(engine: 'ytdlp'): Promise<EngineUpdateResult>
   // tool
   toolCreate(input: ToolCreateInput): Promise<{ taskId: string }>
+  /** 工具产物定位：在系统文件管理器中高亮该文件（失败经全局通知反馈） */
+  revealToolOutput(output: string): Promise<void>
   // settings
   settingsGet(key: string): Promise<unknown>
   settingsSet(key: string, value: unknown): Promise<void>
@@ -412,10 +418,17 @@ export interface OmniGetBridge {
   listAdapterScripts(): Promise<AdapterScriptInfo[]>
   reloadAdapterScripts(): Promise<AdapterScriptInfo[]>
   toggleAdapterScript(id: string, enabled: boolean): Promise<void>
+  /** R1+R5：本地桥接信息（端口/token，浏览器扩展与 Web UI 配置用） */
+  getBridgeInfo(): Promise<{ port: number; token: string; running: boolean }>
+  /** R6：引擎按需下载（状态查询 + 手动补齐缺失引擎） */
+  getEngineStatus(): Promise<Array<{ name: string; file: string; installed: boolean; size?: number }>>
+  fetchEngines(): Promise<{
+    installed: string[]
+    skipped: string[]
+    failed: Array<{ name: string; error: string }>
+  }>
   /** M4-13 工具箱事件流 */
   onToolEvents(listener: (e: ToolEvent) => void): () => void
-  /** M4-7：触发应用自检更新 */
-  checkAppUpdate(): Promise<{ ok: boolean; version?: string; error?: string } | null>
   /** 标题栏 overlay 随主题变色 */
   syncTheme(theme: 'dark' | 'light'): void
   /** Electron 32+ 移除 File.path 后获取拖拽/选择的文件绝对路径（preload webUtils） */
@@ -455,12 +468,19 @@ export const IPC_CHANNELS = {
   appOpenReleases: 'app:openReleases',
   engineUpdate: 'engine:update',
   toolCreate: 'tool:create',
+  /** 工具产物定位：系统文件管理器高亮产物（「打开结果所在目录」） */
+  toolReveal: 'tool:reveal',
   /** Backlog：平台适配健康面板 */
   healthGet: 'health:get',
   /** Backlog：平台适配脚本注册表 */
   scriptsList: 'scripts:list',
   scriptsReload: 'scripts:reload',
   scriptsToggle: 'scripts:toggle',
+  /** R1+R5：本地桥接信息 */
+  bridgeInfo: 'bridge:info',
+  /** R6：引擎按需下载 */
+  enginesStatus: 'engines:status',
+  enginesFetch: 'engines:fetch',
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
   eventTasks: 'event:tasks',

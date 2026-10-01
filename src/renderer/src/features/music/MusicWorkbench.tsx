@@ -13,9 +13,9 @@ import {
   PauseCircle,
   Warning
 } from '@phosphor-icons/react'
-import type { MusicCandidate, MusicSearchResult, UiNotice } from '@shared/types'
+import type { MusicCandidate, MusicSearchResult } from '@shared/types'
 import { Button, Input } from '../../components/ui'
-import { toast } from '../../lib/feedback'
+import { toast, toastError } from '../../lib/feedback'
 
 const QUALITY_LABELS: Record<string, string> = {
   standard: '标准 128k',
@@ -29,11 +29,12 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
   const [result, setResult] = useState<MusicSearchResult | null>(null)
   const [searchError, setSearchError] = useState('')
   const [quality, setQuality] = useState<'standard' | 'high' | 'lossless'>('high')
-  const [notices, setNotices] = useState<UiNotice[]>([])
   const [posting, setPosting] = useState<Set<string>>(new Set())
   const [batchOpen, setBatchOpen] = useState(false)
   const [batchText, setBatchText] = useState('')
   const [batchInfo, setBatchInfo] = useState('')
+  const [batchBusy, setBatchBusy] = useState(false)
+  const [idBusy, setIdBusy] = useState(false)
   /** F1：试听状态（单实例 Audio）与 ID 精确下载入口 */
   const [playingId, setPlayingId] = useState<string | null>(null)
   const [idOpen, setIdOpen] = useState(false)
@@ -41,13 +42,16 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
   const [idArtist, setIdArtist] = useState('')
   const [idSong, setIdSong] = useState('')
   const audioRef = useRef<HTMLAudioElement | null>(null)
+  /** P2 修复：试听竞态守卫——await 期间再点别处时，过期回调用序号自弃 */
+  const previewSeq = useRef(0)
 
-  // 降级黄条（§4.4 music.warning 事件）
+  // P2 修复：离开音乐页时停止试听（此前 Audio 随页面卸载继续播放且无法控制）
   useEffect(() => {
-    const off = window.omniget.onNotices((ns: UiNotice[]) => {
-      setNotices((prev) => [...ns, ...prev].slice(0, 4))
-    })
-    return off
+    return () => {
+      previewSeq.current++
+      audioRef.current?.pause()
+      audioRef.current = null
+    }
   }, [])
 
   async function doSearch(): Promise<void> {
@@ -75,13 +79,11 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
         quality,
         saveDir: await window.omniget.defaultSaveDir().catch(() => undefined)
       })
+      // P1 修复：成功提示必须在 await 成功之后——此前在 try/catch 之后无条件执行，
+      // 失败时同时出现黄条 + 绿色"已加入队列"假成功
+      toast(`「${c.name}」已加入下载队列`, 'success')
     } catch (err) {
-      setNotices((prev) =>
-        [
-          { level: 'warning' as const, message: err instanceof Error ? err.message : String(err) },
-          ...prev
-        ].slice(0, 4)
-      )
+      toastError('加入下载队列', err)
     } finally {
       setPosting((prev) => {
         const next = new Set(prev)
@@ -89,7 +91,6 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
         return next
       })
     }
-    toast(`「${c.name}」已加入下载队列`, 'success')
   }
 
   /** F1 试听：经主进程 omniget-preview:// 协议代理的预览流（符合 CSP media-src） */
@@ -100,12 +101,13 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
       setPlayingId(null)
       return
     }
+    const seq = ++previewSeq.current
     audioRef.current?.pause()
+    setPlayingId(null)
     const url = await window.omniget.musicPreview(c.platform, c.id).catch(() => '')
+    if (seq !== previewSeq.current) return // P2 修复：等待期间用户已点开其他候选
     if (!url) {
-      setNotices((prev) =>
-        [{ level: 'warning' as const, message: '该平台暂不支持试听' }, ...prev].slice(0, 4)
-      )
+      toast('该平台暂不支持试听', 'warning')
       return
     }
     const audio = new Audio(url)
@@ -113,9 +115,7 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
     audio.onended = () => setPlayingId(null)
     audio.onerror = () => {
       setPlayingId(null)
-      setNotices((prev) =>
-        [{ level: 'warning' as const, message: '试听加载失败（镜像可能已失效）' }, ...prev].slice(0, 4)
-      )
+      toast('试听加载失败（镜像可能已失效）', 'warning')
     }
     void audio.play()
     setPlayingId(key)
@@ -124,7 +124,8 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
   /** F1：用 ID 精确下载（§4.4 兜底通道） */
   async function downloadById(): Promise<void> {
     const id = idValue.trim()
-    if (!id) return
+    if (!id || idBusy) return
+    setIdBusy(true)
     try {
       await window.omniget.musicDownload({
         neteaseId: id,
@@ -136,22 +137,21 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
       setIdValue('')
       toast('歌曲已加入下载队列', 'success')
     } catch (err) {
-      setNotices((prev) =>
-        [
-          { level: 'warning' as const, message: err instanceof Error ? err.message : String(err) },
-          ...prev
-        ].slice(0, 4)
-      )
+      toastError('ID 精确下载', err)
+    } finally {
+      setIdBusy(false)
     }
   }
 
   /** M2-8 批量导入：多行文本逐行入队（服务端同源解析） */
   async function batchImport(): Promise<void> {
+    if (batchBusy) return // P2 修复：无防重入，连点会重复入队
     const lines = batchText
       .split('\n')
       .map((l) => l.trim())
       .filter(Boolean)
     if (lines.length === 0) return
+    setBatchBusy(true)
     setBatchInfo(`入队中 0/${lines.length}`)
     let done = 0
     let failed = 0
@@ -168,16 +168,9 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
       done++
       setBatchInfo(`入队中 ${done}/${lines.length}`)
     }
+    setBatchBusy(false)
     if (failed > 0) {
-      setNotices((prev) =>
-        [
-          {
-            level: 'warning' as const,
-            message: `批量入队完成：成功 ${done - failed} 个，失败 ${failed} 个（无法解析或平台不支持）`
-          },
-          ...prev
-        ].slice(0, 4)
-      )
+      toast(`批量入队：成功 ${done - failed} 个，失败 ${failed} 个（无法解析或平台不支持）`, 'warning')
     }
     setBatchInfo(
       failed > 0
@@ -228,21 +221,6 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
             </span>
           </div>
         )}
-        {notices.map((n, i) => (
-          <div
-            key={`${n.message}-${i}`}
-            className="mt-2 flex items-start gap-2 rounded-ctl border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning"
-          >
-            <Warning size={14} className="mt-px shrink-0" />
-            <span className="flex-1">{n.message}</span>
-            <button
-              className="press text-warning/70 hover:text-warning"
-              onClick={() => setNotices((prev) => prev.filter((_, j) => j !== i))}
-            >
-              ✕
-            </button>
-          </div>
-        ))}
         {searchError && <p className="mt-3 text-xs text-danger">{searchError}</p>}
 
         {/* ── 批量导入（M2-8）────────────────────────────────────── */}
@@ -260,8 +238,13 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
             />
             <div className="mt-2 flex items-center justify-between">
               <span className="num text-[11px] text-text-3">{batchInfo}</span>
-              <Button size="sm" icon={<DownloadSimple size={13} />} onClick={() => void batchImport()}>
-                批量入队
+              <Button
+                size="sm"
+                icon={<DownloadSimple size={13} />}
+                disabled={batchBusy || !batchText.trim()}
+                onClick={() => void batchImport()}
+              >
+                {batchBusy ? '入队中…' : '批量入队'}
               </Button>
             </div>
           </div>
@@ -311,8 +294,12 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
                 placeholder="歌名（可选）"
                 className="h-7 w-32 rounded-ctl border border-border bg-surface-2 px-2 text-xs outline-none focus:border-accent"
               />
-              <Button size="xs" onClick={() => void downloadById()} disabled={!idValue.trim()}>
-                入队
+              <Button
+                size="xs"
+                onClick={() => void downloadById()}
+                disabled={!idValue.trim() || idBusy}
+              >
+                {idBusy ? '入队中…' : '入队'}
               </Button>
             </div>
           )}

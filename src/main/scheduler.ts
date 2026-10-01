@@ -77,11 +77,12 @@ export function startScheduler(apply: (limit: string) => Promise<void> | void): 
       if (limit !== null && limit !== applied) {
         applied = limit
         log.info(`schedule applied: ${limit}`)
-        void apply(limit)
+        // P3 加固：apply 是 async（内部 RPC 调用可 reject），无 .catch 会成 unhandledRejection
+        void Promise.resolve(apply(limit)).catch((err) => log.warn('schedule apply failed', err))
       } else if (limit === null && applied !== null) {
         // 计划表整体清空/时段结束：恢复不限速
         applied = '0'
-        void apply('0')
+        void Promise.resolve(apply('0')).catch((err) => log.warn('schedule apply failed', err))
       }
     } catch (err) {
       log.error('schedule tick failed', err)

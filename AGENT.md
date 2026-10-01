@@ -76,7 +76,7 @@ resources/engines/ sidecar 按 <platform> 目录；构建经 extraResources
 ## 7. 验证命令
 
 ```bash
-npm test                  # 20 个单测（状态机/torrent/嗅探/事件合并/搜索语法）
+npm test                  # 39 个单测（状态机/torrent/嗅探/事件合并/搜索语法）
 npm run typecheck         # tsconfig.node + tsconfig.web 双严格检查
 npm run build             # 三端构建
 npx tsx --tsconfig tsconfig.node.json scripts/e2e-aria2.ts   # aria2 真实端到端
@@ -153,6 +153,49 @@ npm run dev               # GUI 冒烟（看日志：aria2 online / tray created
 - Windows 冒烟清理命令（Stop-Process/taskkill）需审批，脚本化时注意
 
 ## 9. 审查与修复记录
+
+**音乐链路 + 日志专项（2026-10-01 下午，用户反馈"牡丹亭 fetch failed"）**：typecheck 双端 + 39/39 单测。修复——
+1. **P1 下载/试听全链必败根因**：`downloadNeteaseAudio` 镜像 fetcher 无 try/catch——第一个镜像（cenguigui）不可达即 `fetch failed` 整任务失败，后 3 个镜像永不尝试；试听只走 haitangw 单镜像。修复：下载/试听均改四镜像（cenguigui→haitangw→rrvenn→toubiec）逐个容错回退 + 逐镜像日志
+2. **P1 GIF/图片预览被 CSP 拦截**：img-src 无 `omniget-preview:`（文本预览 fetch 同被 connect-src 拦）→ CSP 补齐。⚠ 剪辑编辑器波形解码 fetch 此前也一直被 connect-src 静默拦截（降级纯时间轴），一并修复
+3. **P1 「打开目录」无反应**：preload 未重启时新桥方法缺失 → 同步 TypeError 被 void 吞掉；渲染层防御（桥缺失提示重启 + catch toastError）
+4. **P2 错误中文化（http.ts humanizeNetworkError）**：undici 顶层 'fetch failed' 按 cause 链 errno 归因（ENOTFOUND/ECONNRESET/ETIMEDOUT/TLS 证书等 18 种）→ 中文 + 出口动作；fetchJson/getText/openStream 全部接入，HTTP ${status} → 「接口异常（HTTP xxx）」；toolbox fs 错误（ENOENT/EACCES/ENOSPC/EBUSY）中文化
+5. **日志专项（子代理全量排查 11 处静默 catch）**：P1×4——TOFU 指纹库损坏当空库=静默重置信任基线（区分 ENOENT/损坏）、yt-dlp 更新备份/回滚失败静默、旧数据迁移失败静默（env.ts 用 console.error，logger 未初始化）；P2×3——QQ/酷狗/咪咕/汽水平台直链失败逐个 cb.log、引擎自动补齐链外层兜底、purge 删用户文件失败；P3×4——tracker 注入、歌词接口、应用更新检查、适配脚本热更加载。music-engine 的 console.log 换 createLogger('music-engine')，下载成功/失败、搜索平台降级均留痕
+6. **处理动态按工具隔离（用户反馈：一个工具处理完切别的工具记录还在）**：ToolboxPage 处理动态改按 activeTool 过滤（剪辑页附带隐藏工具 region-concat 的合并任务）；后台事件流继续记录，切回仍可见；加「清空记录」按钮（仅清当前工具）
+
+**工具箱专项审查（2026-10-01）**：逐工具过 24 个 ToolDef + Runner，typecheck 双端通过 + 39/39 单测。修复——
+1. **P1 node 任务取消误删历史产物**：nodeTasks 登记 output 初值为 outDir → cancel `rm(recursive)` 会删整个 `工具箱输出/<工具名>/`；改 output='' 只删真实产物，compute 后取消则删刚产出物再报「任务已取消」
+2. **P1 build 抛错无 failed 事件**：region-concat 空区域等 build 阶段异常此前不广播 ToolEvent（工具箱页处理动态无记录）；包 try/catch 补发
+3. **P2 gif 参数注入**：from/duration/width 原样拼 args/vf 链 → 数值钳制白名单（width 64–1920）
+4. **P2 demucs 任意二进制执行**：demucsPath 来自渲染层 → basename 白名单 `demucs(.exe)`
+5. **P2 容器兼容**：video-mute 直拷 webm/mkv 源装 mp4 必败 → 容器跟随；rotate/scale/subtitles-burn 非 mp4 系源音轨 `-c:a copy` 改 AAC
+6. P3：cancel 事件 tool 字段误填 taskId（改记真实工具名，进度行能显示工具 label）；ffmpeg 非零退出带 stderr 尾行、kill 后报「任务已取消」；trim/clip/frame 产物名 Math.round 碰撞改 0.1s 精度；convert 对 flac/wav 不再传 -b:a、bitrate 白名单
+7. **工具产物预览 + 打开目录**（新功能）：①`tool:reveal` IPC（showItemInFolder + 存在性校验 + 失败广播通知）；②preview://local 白名单扩展图片/文本类型；③工具箱「处理动态」完成行加 预览（Eye）/打开目录（FolderOpen）按钮 + 预览弹层（图片/视频/音频流播、文本读 64KB、Esc/遮罩关闭、媒体不支持时引导开目录）；④manager 完成时 saveDir 归位产物目录（任务列表「打开目录」直达），store.updateTaskFields 补 saveDir 字段
+
+**三轮全面审查（2026-10-01）**：typecheck 双端通过 + 39/39 单测。P1×7 / P2×12 / P3×14 全修——
+
+主进程：
+1. **P1 覆盖风险**：`--allow-overwrite` 从全局启动参数收窄为每任务选项（默认 false），仅增量补下（re-add）显式放行；"File already exists" 归一为中文带出口动作提示
+2. **P1 增量补下**：confirmSelection re-add 改经 `selectionFor()`（此前只传 paths，.torrent 任务 select-file 永不注入 → 全量重下）
+3. **P1 删除承诺**：yt-dlp 单视频完成时产物落 task_files（persistYtdlpProduct）；音乐 mp3/lrc 落 task_files——回收站「删除（含文件）」对 video/music 不再落空
+4. **P2 settingsSet 白名单**：渲染层可写键白名单 + `engines.mirror` 强制 https（堵供应链投毒通道）；bridge.token/schedule.rules 主进程独占
+5. **P2 并发闸门**：`launching` Set 计入在途启动（DB 状态滞后不再穿透 maxConcurrent）；同任务并发 re-add 拦截；跨 await 后统一重读复核（recover/retry/runWhenQueued/pause-music）
+6. **P2 幽灵事件**：applyEngineEvents 跳过回收站/已删任务；pushEvent 终态不再写入速度快照表（Map 泄漏）
+7. **P2 before-quit**：preventDefault + await supervisor.shutdown（RPC 限时 2s）→ taskkill 兜底必达；app:update 通道改走 electron-updater（此前误调 yt-dlp 引擎热更）
+8. **P2 TOFU**：ensureVerified 缓存加首尾 64KB 内容短指纹；yt-dlp parse（-J）路径强制过闸门
+9. **P2 parseFile**：USERPROFILE 整目录黑名单改为系统目录+高敏子目录（Downloads 主用例恢复可用）
+10. **P2 音乐暂停竞态**：POST 返回后补偿检查任务状态，已取消则立即 cancel 引擎任务
+11. **P2 工具箱**：node 任务额度移交修正 + nodeTasks 登记支持取消
+12. P3：磁力元数据临时目录清理、RPC secret 改 --rpc-secret-file、WS 重建前摘除旧监听、send 竞态兜底、上传速度接 getGlobalStat、setTaskFileSelection 原子化、saveTaskFiles downloaded 落库、scheduler apply 加 catch、tracker 订阅源过滤逗号/空白、torrent 解析路径过 sanitize、bridge readBody 超限必 settle、preview://local 挡敏感目录、剪贴板/协议唤起去重键改完整文本
+
+渲染层：
+1. **P1 批量操作**：回收站恢复/彻底删除/清空统一 runBatch（try/finally + 逐项容错 + 失败 toast）——busy 不再永久卡死
+2. **P1 假成功**：音乐下载成功提示移入 try 内；失败 toastError
+3. **P1 静默失败**：TaskList 全部行操作/Inspector/App 快捷键统一 guarded/toastError 包装
+4. **UX 标准 2 补齐**：deletePreset、resetAll（恢复默认键位）加 confirmAction 二次确认
+5. P2：回收站行禁止打开 Inspector；批量/ID 入队防重入；试听 seq 竞态守卫 + 离开页面停止 Audio；设置页主题与侧栏经 `app:theme-changed` 事件同步；队列/归档分区独立保存按钮；初始化 IIFE 加 catch；全不选提交拦截（渲染层禁用 + 主进程兜底）；音乐页黄条与全局 toast 去重（页内订阅移除）
+6. P3：TaskRow memo（10k jank）、快捷键监听经 ref 中转防每批重挂、回收站行内操作重载 'trash' 防双载闪烁、checked 残留清理、footer 假上传速度移除、toast success 视觉区分、i18n 补 settings.tab.remote、HelpOverlay 读实际键位、命名模板预览支持 {{date}}/{{index:N}}、拖拽文件 .torrent 类型校验、批量汇总含失败时改警示配色、状态栏非任务视图不发 listTasks
+
+遗留（记录不修）：task:purge 与 restore 的 TOCTOU 窗口极小未做原子化；音乐引擎 abort 后 rename 的极低概率半成品文件；剪贴板自动弹窗未区分链接类型（需产品决策是否加设置项）。
 
 **M1 一轮（2026-09-29）**：P1×3/P2×8/P3×9 全修（详见任务计划文档）。
 

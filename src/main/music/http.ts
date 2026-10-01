@@ -5,7 +5,13 @@
 
 // 统一使用 npm undici 的 fetch（与 Agent 同源，保证 dispatcher 兼容；
 // Node 内置 fetch 的内置 undici 版本与 npm 包可能不一致，混用有运行时风险）
+// ⚠️ undici 必须固定在 v6 线（^6.21）：v7+ 依赖 node:util markAsUncloneable（Node 22+），
+// Electron 33 内置 Node 20.18 加载即崩（App threw an error during load）。
+// 升级 undici 前必须先核对 Electron 内置 Node 版本（ELECTRON_RUN_AS_NODE=1 npx electron -p process.version）。
 import { Agent, fetch as undiciFetch, type RequestInit as UndiciRequestInit } from 'undici'
+import { createLogger } from '../logger'
+
+const log = createLogger('music-http')
 
 type FetchInit = UndiciRequestInit & { dispatcher?: Agent }
 
@@ -119,6 +125,68 @@ function mergeSignal(signal: AbortSignal | undefined, timeoutMs: number): AbortS
   return signal ? AbortSignal.any([signal, t]) : t
 }
 
+// ── 网络错误中文化（§4.1：用户可见文案必须中文 + 出口动作）────────────
+// undici 的顶层错误是英文 'fetch failed'，真实原因在 cause 链的 errno 上，
+// 逐层下钻归因后给出中文原因 + 检查建议。
+
+/** 用户可取消（AbortController）与超时（AbortSignal.timeout）在 err.name 区分 */
+function isAbortLike(err: unknown): boolean {
+  return err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError')
+}
+
+const ERRNO_REASONS: Record<string, string> = {
+  ENOTFOUND: '域名解析失败（检查 DNS/网络）',
+  EAI_AGAIN: '域名解析暂时失败（检查 DNS/网络）',
+  ECONNREFUSED: '服务器拒绝连接（服务可能已下线）',
+  ECONNRESET: '连接被重置',
+  ECONNABORTED: '连接中断',
+  ETIMEDOUT: '连接超时',
+  UND_ERR_CONNECT_TIMEOUT: '连接超时',
+  UND_ERR_HEADERS_TIMEOUT: '服务器响应超时',
+  UND_ERR_BODY_TIMEOUT: '响应体传输超时',
+  UND_ERR_SOCKET: '网络连接中断',
+  EPIPE: '网络连接中断',
+  ENETUNREACH: '网络不可达（检查网络/代理）',
+  EHOSTUNREACH: '主机不可达（检查网络/代理）',
+  CERT_HAS_EXPIRED: 'TLS 证书已过期',
+  ERR_TLS_CERT_ALTNAME_INVALID: 'TLS 证书域名不匹配',
+  DEPTH_ZERO_SELF_SIGNED_CERT: 'TLS 自签名证书',
+  UNABLE_TO_VERIFY_LEAF_SIGNATURE: 'TLS 证书无法验证',
+  SELF_SIGNED_CERT_IN_CHAIN: 'TLS 证书链含自签名'
+}
+
+/** 把 fetch 相关错误归因为中文（带出口动作）；未识别错误原样返回 message */
+export function humanizeNetworkError(err: unknown, url = ''): string {
+  let host = ''
+  if (url) {
+    try {
+      host = new URL(url).hostname
+    } catch {
+      host = ''
+    }
+  }
+  const suffix = host ? `（${host}）` : ''
+  if (isAbortLike(err)) return `请求超时或已取消${suffix}`
+  // cause 链下钻（fetch failed → cause errno）
+  let cur: unknown = err
+  for (let depth = 0; depth < 6 && cur instanceof Error; depth++) {
+    const code = (cur as NodeJS.ErrnoException).code ?? ''
+    const reason = ERRNO_REASONS[code]
+    if (reason) return `网络请求失败：${reason}${suffix}，请检查网络或代理后重试`
+    cur = (cur as Error & { cause?: unknown }).cause
+  }
+  const msg = err instanceof Error ? err.message : String(err)
+  if (msg) return `${msg}${suffix}，请检查网络后重试`
+  return `网络请求失败${suffix}，请检查网络或代理后重试`
+}
+
+/** 失败统一记日志（含 URL 与原始错误），便于事后归因 */
+function logHttpFailure(url: string, err: unknown): void {
+  const code =
+    err instanceof Error ? ((err as NodeJS.ErrnoException).code ?? err.name) : typeof err
+  log.error(`HTTP 请求失败: ${url}`, { code, detail: String(err) })
+}
+
 /** 不可重试错误（4xx 等）：立即上抛，避免对第三方 API 做无效重试 */
 class NonRetryableError extends Error {}
 
@@ -140,10 +208,10 @@ export async function fetchJson<T = unknown>(
         dispatcher: dispatcherFor(url)
       })
       if (res.ok) return (await res.json()) as T
-      if (!RETRY_STATUS.has(res.status)) throw new NonRetryableError(`HTTP ${res.status}`)
+      if (!RETRY_STATUS.has(res.status)) throw new NonRetryableError(`接口异常（HTTP ${res.status}）`)
       // 5xx：消费掉旧响应体再重试（防 undici socket 挂起）
       await res.body?.cancel().catch(() => {})
-      if (attempt >= RETRY_TOTAL) throw new Error(`HTTP ${res.status}`)
+      if (attempt >= RETRY_TOTAL) throw new Error(`接口异常（HTTP ${res.status}）`)
       await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS * (attempt + 1)))
     } catch (err) {
       if (signal?.aborted || err instanceof NonRetryableError) throw err
@@ -153,7 +221,9 @@ export async function fetchJson<T = unknown>(
       }
     }
   }
-  throw lastErr
+  // 重试耗尽：归因中文化（用户可见）+ 记日志（排障）
+  logHttpFailure(url, lastErr)
+  throw new Error(humanizeNetworkError(lastErr, url))
 }
 
 export async function getJson<T = unknown>(
@@ -204,13 +274,19 @@ export async function postForm<T = unknown>(
 /** GET 文本（歌词等） */
 export async function getText(url: string, headers?: Record<string, string>, opts: HttpOpts = {}): Promise<string> {
   url = rewriteUrl(url)
-  const res = await undiciFetch(url, {
-    method: 'GET',
-    headers,
-    signal: mergeSignal(opts.signal, opts.timeoutMs ?? 15_000),
-    dispatcher: dispatcherFor(url)
-  })
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  let res: Awaited<ReturnType<typeof undiciFetch>>
+  try {
+    res = await undiciFetch(url, {
+      method: 'GET',
+      headers,
+      signal: mergeSignal(opts.signal, opts.timeoutMs ?? 15_000),
+      dispatcher: dispatcherFor(url)
+    })
+  } catch (err) {
+    logHttpFailure(url, err)
+    throw new Error(humanizeNetworkError(err, url))
+  }
+  if (!res.ok) throw new Error(`接口异常（HTTP ${res.status}）`)
   return res.text()
 }
 
@@ -274,6 +350,8 @@ export async function fetchToFile(
   } catch (err) {
     await unlink(tmp).catch(() => {})
     if (signal?.aborted) throw err
+    // 静默容错语义保持（返回 0 由调用方降级），但必须记日志供排障
+    logHttpFailure(url, err)
     return 0
   }
 }
@@ -283,11 +361,17 @@ export async function openStream(
   url: string
 ): Promise<{ status: number; ok: boolean; contentType: string; contentLength: string | null; body: unknown }> {
   url = rewriteUrl(url)
-  const res = await undiciFetch(url, {
-    method: 'GET',
-    headers: { 'User-Agent': 'Mozilla/5.0' },
-    dispatcher: streamingDispatcherFor(url)
-  })
+  let res: Awaited<ReturnType<typeof undiciFetch>>
+  try {
+    res = await undiciFetch(url, {
+      method: 'GET',
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      dispatcher: streamingDispatcherFor(url)
+    })
+  } catch (err) {
+    logHttpFailure(url, err)
+    throw new Error(humanizeNetworkError(err, url))
+  }
   return {
     status: res.status,
     ok: res.ok,

@@ -27,11 +27,25 @@ import {
   type TreeNode
 } from './fileTree'
 import { Button, Input } from '../../components/ui'
+import { confirmAction, toast, toastError } from '../../lib/feedback'
 
 interface Props {
   open: boolean
   initialSource?: string
   onClose: () => void
+}
+
+/** R4：视频下载参数预设（download.videoPresets 持久化） */
+interface VideoPreset {
+  id: number
+  name: string
+  opts: {
+    formatId: string | null
+    audioOnly: boolean
+    embedSubs: boolean
+    embedThumbnail: boolean
+    delogo: boolean
+  }
 }
 
 type Phase = 'input' | 'parsing' | 'awaiting'
@@ -58,6 +72,14 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
   const [embedSubs, setEmbedSubs] = useState(false)
   const [embedThumbnail, setEmbedThumbnail] = useState(false)
   const [delogo, setDelogo] = useState(false)
+  // R3：批量链接抓取
+  const [batchMode, setBatchMode] = useState(false)
+  const [batchBusy, setBatchBusy] = useState(false)
+  const [notice, setNotice] = useState('')
+  // R4：参数预设
+  const [presets, setPresets] = useState<VideoPreset[]>([])
+  const [presetName, setPresetName] = useState('')
+  const [activePreset, setActivePreset] = useState<number | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   // #16 会话计数器：对话框每次打开自增；关闭后未完成的异步回调用它判定过期，
@@ -91,6 +113,18 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
           })
           .catch(() => {})
       }
+      setBatchMode(false)
+      setBatchBusy(false)
+      setNotice('')
+      setPresetName('')
+      setActivePreset(null)
+      const sid2 = sessionRef.current
+      window.omniget
+        .settingsGet('download.videoPresets')
+        .then((v) => {
+          if (sid2 === sessionRef.current) setPresets(Array.isArray(v) ? (v as VideoPreset[]) : [])
+        })
+        .catch(() => {})
       setTimeout(() => inputRef.current?.focus(), 60)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -141,6 +175,10 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
 
   async function submitSource(): Promise<void> {
     if (!source.trim()) return
+    if (batchMode) {
+      await submitBatch()
+      return
+    }
     const sid = sessionRef.current
     setPhase('parsing')
     setError('')
@@ -160,10 +198,124 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
     }
   }
 
-  /** F1：选择/拖入 .torrent → 取绝对路径直接解析（webUtils 桥） */
+  /** R3：批量链接抓取——逐行 createTask；awaiting 类默认全选直接确认入队 */
+  async function submitBatch(): Promise<void> {
+    const lines = source
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+    if (lines.length === 0) return
+    const sid = sessionRef.current
+    setBatchBusy(true)
+    setError('')
+    let started = 0
+    let failed = 0
+    const failures: string[] = []
+    for (const [i, line] of lines.entries()) {
+      if (sid !== sessionRef.current) {
+        setBatchBusy(false)
+        return
+      }
+      setNotice(`批量入队中 ${i + 1}/${lines.length}…`)
+      try {
+        const res = await window.omniget.createTask({
+          source: line,
+          threads,
+          saveDir,
+          seedRatio: seedAndStop ? 0 : undefined
+        })
+        if (res.kind === 'failed') {
+          failed++
+          failures.push(`「${line.slice(0, 40)}」：${res.error}`)
+          continue
+        }
+        // awaiting 类（磁力/BT/视频）默认全选 + 默认视频参数直接确认；http 在 createTask 已直启
+        if (res.kind === 'awaiting' && res.sniff.type !== 'http') {
+          await window.omniget.confirmSelection({ taskId: res.taskId, threads })
+        }
+        started++
+      } catch (err) {
+        failed++
+        failures.push(
+          `「${line.slice(0, 40)}」：${err instanceof Error ? err.message : String(err)}`
+        )
+      }
+    }
+    if (sid !== sessionRef.current) {
+      setBatchBusy(false)
+      return
+    }
+    setBatchBusy(false)
+    setNotice(
+      `批量入队完成：成功 ${started}，失败 ${failed}` +
+        (failures.length ? `；${failures.join('；')}` : '')
+    )
+    void useTasks.getState().load('all')
+  }
+
+  /** R4：应用参数预设 */
+  function applyPreset(idStr: string): void {
+    const p = presets.find((x) => x.id === Number(idStr))
+    if (!p) {
+      setActivePreset(null)
+      return
+    }
+    setActivePreset(p.id)
+    setFormatId(p.opts.formatId)
+    setAudioOnly(p.opts.audioOnly)
+    setEmbedSubs(p.opts.embedSubs)
+    setEmbedThumbnail(p.opts.embedThumbnail)
+    setDelogo(p.opts.delogo)
+  }
+
+  /** R4：把当前视频参数存为预设 */
+  function savePreset(): void {
+    const name = presetName.trim() || `预设 ${presets.length + 1}`
+    const p: VideoPreset = {
+      id: Date.now(),
+      name,
+      opts: { formatId, audioOnly, embedSubs, embedThumbnail, delogo }
+    }
+    const next = [...presets, p]
+    setPresets(next)
+    setPresetName('')
+    setActivePreset(p.id)
+    // UX 硬性标准：持久化失败必须可见反馈
+    window.omniget
+      .settingsSet('download.videoPresets', next)
+      .then(() => toast(`预设「${name}」已保存`, 'success'))
+      .catch((err) => toastError('保存预设', err))
+  }
+
+  /** R4：删除当前选中的预设（UX 硬性标准：删除类操作二次确认） */
+  async function deletePreset(): Promise<void> {
+    if (activePreset === null) return
+    const target = presets.find((x) => x.id === activePreset)
+    const ok = await confirmAction({
+      title: '删除参数预设',
+      message: `将删除预设「${target?.name ?? activePreset}」，此操作不可恢复。`,
+      confirmLabel: '删除预设',
+      danger: true
+    })
+    if (!ok) return
+    const next = presets.filter((x) => x.id !== activePreset)
+    setPresets(next)
+    setActivePreset(null)
+    window.omniget
+      .settingsSet('download.videoPresets', next)
+      .then(() => toast('预设已删除', 'success'))
+      .catch((err) => toastError('删除预设', err))
+  }
+
+  /** F1：选择/拖入 .torrent → 取绝对路径直接解析（webUtils 桥）。
+   * P3 修复：此前不校验类型，任意文件被当种子提交后只能等主进程报晦涩错误 */
   function handleTorrentFiles(fileList: FileList | null): void {
     const file = fileList?.[0]
     if (!file) return
+    if (!/\.torrent$/i.test(file.name)) {
+      setError('仅支持 .torrent 种子文件，链接请直接粘贴到上方输入框')
+      return
+    }
     const path = window.omniget.filePath(file)
     setSource(path)
     void submitSourceWithPath(path)
@@ -267,19 +419,44 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
                 </div>
               )}
 
-              {/* ── 输入区 ──────────────────────────────────────────── */}
+              {/* ── 输入区（R3：支持批量模式多行抓取）────────────────── */}
+              {phase === 'input' && (
+                <div className="mb-2">
+                  <button
+                    className="press text-[11px] text-text-3 transition-colors hover:text-accent"
+                    onClick={() => {
+                      setBatchMode((v) => !v)
+                      setSource('')
+                      setError('')
+                    }}
+                  >
+                    {batchMode ? '← 单条模式' : '批量模式（每行一个链接，默认全选直接入队）'}
+                  </button>
+                </div>
+              )}
               <div className="flex gap-2">
-                <Input
-                  ref={inputRef}
-                  value={source}
-                  onChange={(e) => setSource(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && phase === 'input' && void submitSource()}
-                  placeholder="粘贴磁力 / 视频链接 / 音乐名，或选择种子文件"
-                  disabled={phase !== 'input'}
-                  lead={<LinkSimple size={14} />}
-                  className="flex-1"
-                />
-                {phase === 'input' && (
+                {batchMode ? (
+                  <textarea
+                    value={source}
+                    onChange={(e) => setSource(e.target.value)}
+                    rows={5}
+                    disabled={batchBusy}
+                    placeholder={'每行一个链接 / 磁力 / 歌名，例如：\nhttps://example.com/video\nmagnet:?xt=urn:btih:...'}
+                    className="min-h-0 flex-1 resize-none rounded-ctl border border-border bg-surface-2 px-3 py-2 text-xs outline-none placeholder:text-text-3 focus:border-accent"
+                  />
+                ) : (
+                  <Input
+                    ref={inputRef}
+                    value={source}
+                    onChange={(e) => setSource(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && phase === 'input' && void submitSource()}
+                    placeholder="粘贴磁力 / 视频链接 / 音乐名，或选择种子文件"
+                    disabled={phase !== 'input'}
+                    lead={<LinkSimple size={14} />}
+                    className="flex-1"
+                  />
+                )}
+                {phase === 'input' && !batchMode && (
                   <>
                     <input
                       ref={fileInputRef}
@@ -300,9 +477,30 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
                     </Button>
                   </>
                 )}
+                {phase === 'input' && batchMode && (
+                  <Button
+                    icon={<MagnifyingGlass size={14} />}
+                    disabled={batchBusy}
+                    onClick={() => void submitBatch()}
+                  >
+                    {batchBusy ? '入队中…' : '批量入队'}
+                  </Button>
+                )}
               </div>
               {error && (
                 <p className="mt-2 text-xs leading-relaxed text-danger">{error}</p>
+              )}
+              {/* R3：批量入队进度/汇总（P3 修复：含失败明细时不得渲染成"成功"配色） */}
+              {notice && (
+                <div
+                  className={`mt-2 break-words rounded-ctl border px-3 py-2 text-xs ${
+                    notice.includes('失败 0')
+                      ? 'border-success/40 bg-success/10 text-success'
+                      : 'border-warning/40 bg-warning/10 text-warning'
+                  }`}
+                >
+                  {notice}
+                </div>
               )}
 
               {/* ── 解析中：磁力雷达（§7.8 之二）────────────────────── */}
@@ -464,6 +662,42 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
                       <Warning size={12} /> ffmpeg 缺失：仅显示预合并格式（画质可能受限）
                     </p>
                   )}
+
+                  {/* R4：参数预设（应用/保存/删除，download.videoPresets 持久化） */}
+                  <div className="mt-3 flex flex-wrap items-center gap-1.5">
+                    <select
+                      value={activePreset ?? ''}
+                      onChange={(e) => applyPreset(e.target.value)}
+                      className="h-7 min-w-36 rounded-ctl border border-border bg-surface-2 px-2 text-[11px] outline-none focus:border-accent"
+                    >
+                      <option value="">应用预设…</option>
+                      {presets.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      value={presetName}
+                      onChange={(e) => setPresetName(e.target.value)}
+                      placeholder="预设名称（可选）"
+                      className="h-7 w-32 rounded-ctl border border-border bg-surface-2 px-2 text-[11px] outline-none focus:border-accent"
+                    />
+                    <button
+                      className="press rounded-ctl border border-border px-2 py-1 text-[10px] text-text-2 transition-colors hover:text-text-1"
+                      onClick={savePreset}
+                    >
+                      存为预设
+                    </button>
+                    {activePreset !== null && (
+                      <button
+                        className="press rounded-ctl border border-border px-2 py-1 text-[10px] text-text-3 transition-colors hover:text-danger"
+                        onClick={deletePreset}
+                      >
+                        删除当前
+                      </button>
+                    )}
+                  </div>
 
                   {/* 分辨率快筛（§4.3.2 多维筛选） */}
                   <div className="mt-3 flex items-center gap-1.5">
@@ -645,14 +879,16 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
               {phase === 'awaiting' && (
                 <Button
                   onClick={() => void confirm()}
-                  disabled={submitting}
+                  disabled={submitting || (files.length > 0 && selectedPaths.length === 0)}
                   icon={<DownloadSimple size={14} weight="bold" />}
                 >
                   {submitting
                     ? '提交中…'
-                    : selectedPaths.length > 0
-                      ? `立即下载 (${selectedPaths.length})`
-                      : '立即下载'}
+                    : files.length > 0 && selectedPaths.length === 0
+                      ? '请先勾选文件'
+                      : selectedPaths.length > 0
+                        ? `立即下载 (${selectedPaths.length})`
+                        : '立即下载'}
                 </Button>
               )}
             </div>

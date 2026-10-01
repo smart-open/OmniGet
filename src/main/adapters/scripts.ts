@@ -151,7 +151,8 @@ function loadAll(): void {
       }
     }
     setScriptHostOverrides(overrides)
-    log.info(`适配脚本加载完成：${loaded.length} 个，host 重写 ${overrides.size} 条`)
+    // GBK 控制台会乱码（chcp 936）：主进程日志统一 ASCII
+    log.info(`adapter scripts loaded: ${loaded.length}, host rewrites: ${overrides.size}`)
   } catch (err) {
     // 目录不可用（权限/磁盘）：保留上次成功加载结果，host 重写表清空（保守回退）
     log.error('适配脚本目录加载失败，沿用上次结果', err)

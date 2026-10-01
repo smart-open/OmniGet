@@ -1,6 +1,8 @@
 // IPC handler 注册表（T0-3 + M1 接入真实编排，§6.1 白名单）
 
 import { app, ipcMain, BrowserWindow, shell } from 'electron'
+import { stat } from 'fs/promises'
+import { isAbsolute } from 'path'
 import {
   IPC_CHANNELS,
   type AppUpdateCheck,
@@ -103,27 +105,43 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.taskParseFile, async (_e, path: string) => {
     // 本地 .torrent 解析：零引擎依赖即时出文件树（§4.2）。
-    // 收口：仅允许 .torrent 扩展 + 拒绝系统目录（防渲染层被攻破后的任意文件探测）
+    // 收口：仅允许 .torrent 扩展 + 拒绝系统/敏感目录（防渲染层被攻破后的任意文件探测）。
+    // P2 修复：此前把整个 USERPROFILE 加入黑名单——Windows 用户下载的 .torrent
+    // 几乎都在 %USERPROFILE%\Downloads，主用例恒失败。改为只拦系统目录与高敏子目录。
     const p = String(path ?? '').trim()
     if (!/\.torrent$/i.test(p)) throw new Error('仅支持解析 .torrent 文件')
-    const sysDirs = [process.env.SystemRoot ?? 'C:\\Windows', process.env.WINDIR ?? 'C:\\Windows']
-      .concat([
-        'C:\\Windows',
-        '/usr',
-        '/etc',
-        '/bin',
-        '/sbin',
-        '/boot',
-        process.env.TEMP ?? '',
-        process.env.TMP ?? '',
-        process.env.USERPROFILE ?? process.env.HOME ?? ''
-      ])
+    const profile = (process.env.USERPROFILE ?? process.env.HOME ?? '').replace(/\\/g, '/')
+    const blocked = [
+      process.env.SystemRoot ?? 'C:\\Windows',
+      process.env.WINDIR ?? 'C:\\Windows',
+      'C:\\Windows',
+      'C:\\Program Files',
+      'C:\\Program Files (x86)',
+      '/usr',
+      '/etc',
+      '/bin',
+      '/sbin',
+      '/boot',
+      '/proc',
+      '/sys',
+      '/dev',
+      process.env.TEMP ?? '',
+      process.env.TMP ?? '',
+      // 高敏配置/凭据目录（不整拦用户主目录——Downloads/Desktop/Documents 必须可用）
+      profile ? `${profile}/.ssh` : '',
+      profile ? `${profile}/.gnupg` : '',
+      profile ? `${profile}/.aws` : '',
+      profile ? `${profile}/.kube` : '',
+      profile ? `${profile}/AppData/Roaming` : '',
+      profile ? `${profile}/AppData/Local/Temp` : '',
+      profile ? `${profile}/Library/Keychains` : ''
+    ]
       .filter(Boolean)
       .map((d) => d.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase())
     const norm = p.replace(/\\/g, '/').toLowerCase()
-    // P3 加固：目录本身与子路径一并拒绝（原实现仅匹配子路径，C:\Windows 本体可绕过）
-    if (sysDirs.some((d) => norm === d || norm.startsWith(d + '/'))) {
-      throw new Error('不允许解析系统目录中的文件')
+    // 目录本身与子路径一并拒绝（防 C:\Windows 本体绕过）
+    if (blocked.some((d) => norm === d || norm.startsWith(d + '/'))) {
+      throw new Error('不允许解析系统或敏感目录中的文件')
     }
     const info = parseTorrentFile(p)
     return {
@@ -200,7 +218,7 @@ export function registerIpcHandlers(): void {
       case 'completed':
         return listTasks({ status: ['completed', 'seeding'] })
       case 'trash':
-        return listTasks({ includeDeleted: true })
+        return listTasks({ onlyDeleted: true })
       default:
         return listTasks({})
     }
@@ -228,14 +246,36 @@ export function registerIpcHandlers(): void {
     if (!taskManager) throw new Error('任务系统尚未就绪，请稍候')
     return taskManager.createToolTask(input)
   })
+  // 工具产物定位：在系统文件管理器中高亮产物文件（「打开结果所在目录」）
+  ipcMain.handle(IPC_CHANNELS.toolReveal, async (_e, output: string) => {
+    const p = typeof output === 'string' ? output.trim() : ''
+    if (!p || !isAbsolute(p)) {
+      broadcastNotices([{ level: 'warning', message: '打开目录失败：产物路径无效' }])
+      return
+    }
+    try {
+      const info = await stat(p)
+      if (!info.isFile()) throw new Error('产物不存在或已被移动')
+      shell.showItemInFolder(p)
+    } catch (err) {
+      broadcastNotices([
+        {
+          level: 'warning',
+          message: `打开目录失败：${err instanceof Error ? err.message : String(err)}`
+        }
+      ])
+    }
+  })
   ipcMain.handle('tool:defs', () => {
     return import('./toolbox').then((m) =>
-      m.TOOL_DEFS.map((d) => ({
+      m.TOOL_DEFS.filter((d) => !d.hidden).map((d) => ({
         id: d.id,
         label: d.label,
         category: d.category,
         desc: d.desc,
-        fields: d.fields
+        fields: d.fields,
+        multi: d.multi,
+        extraFile: d.extraFile
       }))
     )
   })
@@ -244,6 +284,22 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.healthGet, async () => {
     const { platformHealthSnapshot } = await import('./health')
     return platformHealthSnapshot()
+  })
+
+  // ── R1+R5：本地桥接信息（端口/token，设置页展示）─────────────────────
+  ipcMain.handle(IPC_CHANNELS.bridgeInfo, async () => {
+    const { getBridgeInfo } = await import('./bridge')
+    return getBridgeInfo()
+  })
+
+  // ── R6：引擎按需下载（状态查询 + 手动补齐）───────────────────────────
+  ipcMain.handle(IPC_CHANNELS.enginesStatus, async () => {
+    const m = await import('./updater/engine-fetch')
+    return m.engineStatus()
+  })
+  ipcMain.handle(IPC_CHANNELS.enginesFetch, async () => {
+    const m = await import('./updater/engine-fetch')
+    return m.fetchMissingEngines()
   })
 
   // ── Backlog：平台适配脚本注册表（内置自维护 + userData 热更）─────────
@@ -347,9 +403,11 @@ export function registerIpcHandlers(): void {
   })
 
   // ── M4-7 应用自检更新 ────────────────────────────────────────────────
+  // P2 修复：此前误调 updateYtDlp（引擎热更）——用户点「检查应用更新」实际在替换 yt-dlp。
+  // 现走 electron-updater 通道（dev/Linux 返回 null，渲染层降级为手动检查口径）
   ipcMain.handle('app:update', async () => {
-    const { updateYtDlp } = await import('./updater/ytdlp')
-    return updateYtDlp()
+    const { checkForAppUpdateNow } = await import('./app-updater')
+    return checkForAppUpdateNow()
   })
 
   // settings
@@ -361,8 +419,37 @@ export function registerIpcHandlers(): void {
       return raw
     }
   })
+  // P2 加固：设置键白名单——渲染层被攻破时不得借此改写主进程仲裁的敏感配置
+  //（bridge.token/schedule.rules 主进程独占；engines.mirror 只允许 https 分发源，
+  //  否则可指向攻击者服务器构成引擎供应链投毒通道）
+  const RENDERER_WRITABLE_SETTINGS = new Set<string>([
+    'ui.theme',
+    'ui.locale',
+    'ui.keymap',
+    'ui.pinnedTasks',
+    'ui.clipboardWatch',
+    'onboarded',
+    'download.saveDir',
+    'download.maxConcurrent',
+    'download.autoArchive',
+    'download.videoPresets',
+    'naming.template',
+    'engines.mirror',
+    'engines.autoFetch',
+    'ytdlp.cookieFile'
+  ])
   ipcMain.handle(IPC_CHANNELS.settingsSet, (_e, key: string, value: unknown) => {
-    setSetting(key, JSON.stringify(value ?? null))
+    const k = String(key ?? '')
+    if (!RENDERER_WRITABLE_SETTINGS.has(k)) {
+      throw new Error(`设置项 ${k} 不存在或由系统管理，不可修改`)
+    }
+    if (k === 'engines.mirror') {
+      const v = typeof value === 'string' ? value.trim() : ''
+      if (v && !/^https:\/\//i.test(v)) {
+        throw new Error('引擎分发源必须是 https:// 地址')
+      }
+    }
+    setSetting(k, JSON.stringify(value ?? null))
   })
 
   // 窗口底色随主题同步（圆角外壳外的一圈底色）
@@ -552,7 +639,7 @@ export function registerIpcHandlers(): void {
   // Backlog：适配脚本热更监听（加载内置清单 + userData 目录 watch）
   import('./adapters/scripts')
     .then((m) => m.startAdapterScriptWatcher())
-    .catch(() => {})
+    .catch((err) => log.warn('适配脚本热更模块加载失败', { error: String(err) }))
 
   log.info('ipc handlers registered')
 }

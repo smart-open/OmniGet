@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { font-family: system-ui, sans-serif; width: 300px; margin: 0; padding: 12px; background: #0B0C0E; color: #E7E9EC; }
+    h1 { font-size: 13px; margin: 0 0 10px; }
+    label { display: block; font-size: 11px; color: #8B9096; margin: 8px 0 2px; }
+    input[type=text], input[type=number] { width: 100%; box-sizing: border-box; background: #15171A; border: 1px solid #2A2D33; border-radius: 6px; color: inherit; padding: 5px 8px; font-size: 12px; }
+    .row { display: flex; align-items: center; gap: 8px; margin: 10px 0; font-size: 12px; }
+    button { background: #3B6EFF; color: #fff; border: 0; border-radius: 6px; padding: 6px 12px; font-size: 12px; cursor: pointer; }
+    #status { font-size: 11px; margin-top: 8px; min-height: 14px; }
+    .ok { color: #4CAF7D; } .bad { color: #E5615C; }
+  </style>
+</head>
+<body>
+  <h1>OmniGet 接管下载</h1>
+  <label>端口（OmniGet 设置 → 远程/扩展 查看）</label>
+  <input type="number" id="port" />
+  <label>访问令牌 token</label>
+  <input type="text" id="token" />
+  <div class="row">
+    <input type="checkbox" id="intercept" />
+    <span>自动拦截浏览器下载并转发到 OmniGet</span>
+  </div>
+  <div class="row">
+    <button id="save">保存</button>
+    <button id="ping" style="background:#2A2D33">测试连接</button>
+  </div>
+  <div id="status"></div>
+  <script src="popup.js"></script>
+</body>
+</html>

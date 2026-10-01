@@ -69,7 +69,17 @@ async function sha256(file: string): Promise<string> {
 async function loadFingerprints(): Promise<FingerprintStore> {
   try {
     return JSON.parse(await readFile(fingerprintsFile(), 'utf8')) as FingerprintStore
-  } catch {
+  } catch (err) {
+    // ⚠ 区分「首启无指纹库」（正常 TOFU 登记）与「指纹库损坏/不可读」——
+    // 后者若当空库处理等于静默重置信任基线，篡改的二进制会被放行
+    const code = (err as NodeJS.ErrnoException).code
+    if (code === 'ENOENT') {
+      log.info('fingerprints.json 不存在（首次运行，TOFU 将登记初始指纹）')
+    } else {
+      log.error('TOFU 指纹库读取失败——按空库处理会重置信任基线，请检查文件权限/完整性', {
+        error: String(err)
+      })
+    }
     return {}
   }
 }
@@ -123,8 +133,31 @@ export async function recordFingerprint(name: SidecarBinary, digest: string): Pr
   verifiedCache.delete(name) // 热更换了新指纹，进程内缓存失效
 }
 
-// 进程内已校验缓存（mtime+size 命中即视为已过 TOFU，避免每次 spawn 重哈希十几 MB）
-const verifiedCache = new Map<SidecarBinary, { m: number; size: number }>()
+// 进程内已校验缓存（mtime+size+内容短指纹命中即视为已过 TOFU，避免每次 spawn 全量重哈希）。
+// P2 加固：原 (mtime,size) 判据可被「改完二进制再把 mtime/size 改回去」伪造绕过——
+// 追加首尾 64KB 的快速内容指纹（全量 SHA256 仍由 checkBinary 负责）。
+const verifiedCache = new Map<SidecarBinary, { m: number; size: number; fp: string }>()
+
+async function quickFingerprint(path: string, size: number): Promise<string> {
+  const { open } = await import('fs/promises')
+  const { createHash } = await import('crypto')
+  const WINDOW = 64 * 1024
+  const handle = await open(path, 'r')
+  try {
+    const head = Buffer.alloc(Math.min(WINDOW, size))
+    await handle.read(head, 0, head.length, 0)
+    const hash = createHash('sha256').update(head)
+    if (size > WINDOW) {
+      const tail = Buffer.alloc(WINDOW)
+      await handle.read(tail, 0, WINDOW, Math.max(0, size - WINDOW))
+      hash.update(tail)
+    }
+    hash.update(String(size))
+    return hash.digest('hex')
+  } finally {
+    await handle.close()
+  }
+}
 
 /**
  * 强制 TOFU 校验（spawn 前必调）：缺失或指纹不符均抛错。
@@ -139,10 +172,11 @@ export async function ensureVerified(name: SidecarBinary): Promise<void> {
       message: `引擎 ${binaryName(name)} 缺失（${path}）。请在设置中更新或重新安装引擎。`
     })
   }
+  const fp = await quickFingerprint(path, st.size).catch(() => 'unavailable')
   const cached = verifiedCache.get(name)
-  if (cached && cached.m === st.mtimeMs && cached.size === st.size) return
+  if (cached && cached.m === st.mtimeMs && cached.size === st.size && cached.fp === fp) return
   await checkBinary(name) // 指纹不符时内部抛 ENGINE_BINARY_TAMPERED
-  verifiedCache.set(name, { m: st.mtimeMs, size: st.size })
+  verifiedCache.set(name, { m: st.mtimeMs, size: st.size, fp })
 }
 
 /** M3-9：热更器复用的单文件 SHA256 */

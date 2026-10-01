@@ -72,8 +72,10 @@ function migrateFromLegacy(legacy: string, target: string): void {
     if (existsSync(from) && !existsSync(to)) {
       try {
         copyFileSync(from, to)
-      } catch {
-        // 迁移失败不阻塞启动（新库从零开始）
+      } catch (err) {
+        // 迁移失败不阻塞启动（新库从零开始），但必须留痕——用户视角是历史数据"消失"
+        // eslint-disable-next-line no-console
+        console.error(`[env] 旧数据迁移失败: ${from} → ${to}`, err)
       }
     }
   }

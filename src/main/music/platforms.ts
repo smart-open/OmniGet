@@ -219,9 +219,21 @@ export class PlatformEngine {
       (id: string, lvl: string) => this.neteaseUrlToubiec(id, lvl)
     ]
     const part = mp3Path.replace(/\.mp3$/i, '.part.mp3')
-    for (const fetcher of fetchers) {
+    const fetcherNames = ['cenguigui', 'haitangw', 'rrvenn', 'toubiec']
+    let lastErr: unknown = null
+    for (const [fi, fetcher] of fetchers.entries()) {
       for (const lvl of levels[quality]) {
-        const url = await fetcher(sid, lvl)
+        let url = ''
+        try {
+          url = await fetcher(sid, lvl)
+        } catch (err) {
+          // ⚠ 单个镜像不可达只跳过该镜像，绝不能中断整个镜像链
+          //（此前无 try/catch：第一个镜像 fetch failed → 整个下载直接失败）
+          if (this.cb.signal?.aborted) throw err
+          lastErr = err
+          this.cb.log?.(`镜像 ${fetcherNames[fi] ?? fi} 取直链失败（level=${lvl}）：${err instanceof Error ? err.message : String(err)}`)
+          continue
+        }
         if (!url || !url.startsWith('http')) continue
         const size = await fetchToFile(url, part, { signal: this.cb.signal, minBytes: 1024 })
         if (size >= minMb * 1024 * 1024) {
@@ -231,6 +243,8 @@ export class PlatformEngine {
         if (size > 0) await unlink(part).catch(() => {})
       }
     }
+    // 全部镜像失败：日志留痕（归因链已由 http 层记录），便于事后排查
+    if (lastErr) this.cb.log?.(`网易云全部镜像取直链失败 sid=${sid}`)
     return false
   }
 
@@ -249,8 +263,9 @@ export class PlatformEngine {
         await writeLrc(lrcPath, lyric)
         return true
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      // 歌词失败降级占位，但写盘类失败（磁盘满/权限）需留痕
+      if (!this.cb.signal?.aborted) this.cb.log?.(`网易云官方歌词接口失败 sid=${sid}：${err instanceof Error ? err.message : String(err)}`)
     }
     return false
   }
@@ -322,9 +337,24 @@ export class PlatformEngine {
     return true
   }
 
-  /** F1 试听直链（网易云镜像，engine.previewUrl 调用） */
+  /** F1 试听直链（网易云镜像，engine.previewUrl 调用）。
+   *  此前只试 haitangw 单镜像——该域不可达时试听必败；改为四镜像顺序回退。 */
   async previewNetease(sid: string, quality = 'standard'): Promise<string> {
-    return this.neteaseUrlHaitangw(sid, quality)
+    const fetchers: Array<[string, (id: string, lvl: string) => Promise<string>]> = [
+      ['cenguigui', (id, lvl) => this.neteaseUrlCenguigui(id, lvl)],
+      ['haitangw', (id, lvl) => this.neteaseUrlHaitangw(id, lvl)],
+      ['rrvenn', (id, lvl) => this.neteaseUrlRrvenn(id, lvl)],
+      ['toubiec', (id, lvl) => this.neteaseUrlToubiec(id, lvl)]
+    ]
+    for (const [name, fetcher] of fetchers) {
+      try {
+        const url = await fetcher(sid, quality)
+        if (url && url.startsWith('http')) return url
+      } catch (err) {
+        this.cb.log?.(`试听镜像 ${name} 失败：${err instanceof Error ? err.message : String(err)}`)
+      }
+    }
+    return ''
   }
 
   // ========== QQ 音乐 ==========
@@ -386,8 +416,8 @@ export class PlatformEngine {
         await this.saveQqLyric(songMid, lrcPath)
         return true
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      if (!this.cb.signal?.aborted) this.cb.log?.(`QQ 音乐 vkeys 直链失败 mid=${songMid}：${err instanceof Error ? err.message : String(err)}`)
     }
     // 317ak
     try {
@@ -401,8 +431,8 @@ export class PlatformEngine {
           return true
         }
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      if (!this.cb.signal?.aborted) this.cb.log?.(`QQ 音乐 317ak 直链失败 mid=${songMid}：${err instanceof Error ? err.message : String(err)}`)
     }
     return false
   }
@@ -465,8 +495,8 @@ export class PlatformEngine {
           return true
         }
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      if (!this.cb.signal?.aborted) this.cb.log?.(`酷狗 317ak 直链失败 hash=${fileHash}：${err instanceof Error ? err.message : String(err)}`)
     }
     try {
       for (const q2 of ['hires', 'lossless', 'exhigh']) {
@@ -479,8 +509,8 @@ export class PlatformEngine {
           return true
         }
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      if (!this.cb.signal?.aborted) this.cb.log?.(`酷狗 haitangw 直链失败 hash=${fileHash}：${err instanceof Error ? err.message : String(err)}`)
     }
     return false
   }
@@ -560,13 +590,14 @@ export class PlatformEngine {
             lyric = await getText(r2.data.lrcUrl, UA, { signal: this.cb.signal, timeoutMs: 10_000 })
           }
         } catch {
+          // 歌词接口失败不影响音频（下方落占位歌词）
           lyric = ''
         }
         await writeLrc(lrcPath, lyric || EMPTY_LRC)
         return true
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      if (!this.cb.signal?.aborted) this.cb.log?.(`咪咕直链失败 contentId=${contentId}：${err instanceof Error ? err.message : String(err)}`)
     }
     return false
   }
@@ -647,8 +678,8 @@ export class PlatformEngine {
         await writeLrc(lrcPath, data.data?.lyric || EMPTY_LRC)
         return true
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      if (!this.cb.signal?.aborted) this.cb.log?.(`汽水 qiuyu520 直链失败 track=${songId}：${err instanceof Error ? err.message : String(err)}`)
     }
     // Fallback: official share page
     try {
@@ -674,8 +705,8 @@ export class PlatformEngine {
           return true
         }
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      if (!this.cb.signal?.aborted) this.cb.log?.(`汽水分享页直链失败 track=${songId}：${err instanceof Error ? err.message : String(err)}`)
     }
     return false
   }

@@ -246,21 +246,29 @@ export class YtDlpAdapter {
     }
 
     if (cls === 'ok') {
-      // M4-12：完成文件完整性探测（ffprobe 读元数据，失败标黄"可能损坏"）
-      await this.verifyIntegrity(task)
+      // M4-12：完成文件完整性探测（ffprobe 读元数据，失败返回提示文案）
+      const integrityMsg = await this.verifyIntegrity(task)
       // M3-6：wm_level 回填
-      const wmLevel = ctx.video.delogo ? 'post' : ctx.shortVideo ? 'direct' : null
-      this.emit({ taskId: task.id, status: 'completed', wmLevel: wmLevel ?? undefined })
-      // M3-7 L3：delogo 后处理（产出 _nowm 副本，保留原件）
+      let wmLevel = ctx.video.delogo ? 'post' : ctx.shortVideo ? 'direct' : null
+      let message = integrityMsg
+      // M3-7 L3：delogo 后处理（产出 _nowm 副本，保留原件）。
+      // P3 修复：此前 integrity/delogo/主完成各 emit 一次 completed → 系统通知刷 2~3 条；合并为一条
       if (ctx.shortVideo && ctx.video.delogo && this.ffmpegOk) {
         try {
           await this.delogoLatest(task)
-          this.emit({ taskId: task.id, status: 'completed', wmLevel: 'post', message: 'delogo 完成' })
+          wmLevel = 'post'
+          message = message ?? 'delogo 完成'
         } catch (err) {
           log.warn('delogo failed', err)
-          this.emit({ taskId: task.id, status: 'completed', message: 'delogo 失败，保留原片' })
+          message = message ?? 'delogo 失败，保留原片'
         }
       }
+      this.emit({
+        taskId: task.id,
+        status: 'completed',
+        wmLevel: wmLevel ?? undefined,
+        message
+      })
       this.cleanupTaskState(task.id)
       return
     }
@@ -315,6 +323,7 @@ export class YtDlpAdapter {
     this.videoOpts.delete(taskId)
     this.shortVideo.delete(taskId)
     this.userPaused.delete(taskId)
+    this.running.delete(taskId) // P3：remove 路径进程可能已死、onExit 不会再触发，防 Set 残留
     this.supervisor.dropTask(taskId)
   }
 
@@ -351,8 +360,8 @@ export class YtDlpAdapter {
     })
   }
 
-  /** M4-12：ffprobe 完整性探测（可探测项失败 → 标黄提示，不判失败） */
-  private async verifyIntegrity(task: Task): Promise<void> {
+  /** M4-12：ffprobe 完整性探测（可探测项失败 → 返回标黄提示文案，不判失败） */
+  private async verifyIntegrity(task: Task): Promise<string | undefined> {
     try {
       const { readdir } = await import('fs/promises')
       const { spawn } = await import('child_process')
@@ -375,15 +384,12 @@ export class YtDlpAdapter {
       })
       const duration = Number((JSON.parse(out || '{}') as { format?: { duration?: string } }).format?.duration ?? 0)
       if (duration <= 0) {
-        this.emit({
-          taskId: task.id,
-          status: 'completed',
-          message: '完整性探测未通过：文件可能损坏，点击重试可重新下载。'
-        })
+        return '完整性探测未通过：文件可能损坏，点击重试可重新下载。'
       }
     } catch {
       // 探测失败不影响完成语义（可选项）
     }
+    return undefined
   }
 
   // ── control（§4.1 语义）────────────────────────────────────────────

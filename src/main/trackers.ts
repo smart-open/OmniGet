@@ -85,6 +85,9 @@ async function fetchSource(url: string): Promise<string[]> {
     .split('\n')
     .map((l) => l.trim())
     .filter((l) => l && !l.startsWith('#') && /^[a-z]+:\/\//i.test(l))
+    // P3 加固：与 addTracker 同口径——禁止逗号/空白条目（bt-tracker 为 CSV，
+    // 订阅源被投毒插入伪条目会原样进入 aria2 全局选项）
+    .filter((l) => !/[\s,]/.test(l) && l.length <= 500)
 }
 
 /** 订阅源刷新：多源合并去重；单个源失败不影响其余（全部失败才抛出走缓存降级） */
@@ -117,9 +120,10 @@ export async function refreshTrackers(): Promise<number> {
   return total
 }
 
-/** 汇总注入 aria2 bt-tracker（全局选项） */
+/** 汇总注入 aria2 bt-tracker（全局选项）。兜底再过滤一次 CSV 注入向量 */
 export function joinedTrackers(): string {
   return listTrackers()
     .map((t) => t.url)
+    .filter((u) => !/[\s,]/.test(u))
     .join(',')
 }

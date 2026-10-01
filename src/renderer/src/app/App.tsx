@@ -4,7 +4,6 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   ArrowDown,
-  ArrowUp,
   ChartBar,
   CheckCircle,
   DownloadSimple,
@@ -36,7 +35,7 @@ import { ToolboxPage } from '../features/toolbox/ToolboxPage'
 import { HelpOverlay } from '../features/help/HelpOverlay'
 import { Onboarding } from '../features/onboarding/Onboarding'
 import { SpeedSparkline, IconButton, ConfirmDialog } from '../components/ui'
-import { toast, useToasts, confirmAction, isConfirmActive } from '../lib/feedback'
+import { toast, useToasts, confirmAction, isConfirmActive, toastError } from '../lib/feedback'
 import {
   effectiveKeys,
   eventToKey,
@@ -109,7 +108,12 @@ export default function App() {
   const reload = useTasks((s) => s.load)
 
   useEffect(() => wireTaskEvents(), [])
-  useEffect(() => void reload(active), [active, reload])
+  // P3 修复：stats/settings/toolbox/health 不是任务过滤器——此前把这些字符串原样
+  // 发给主进程 listTasks，既浪费 IPC 又会把 loadedFilter 污染成非任务视图值
+  const TASK_FILTERS = ['all', 'downloading', 'completed', 'bt', 'video', 'music', 'trash']
+  useEffect(() => {
+    if (TASK_FILTERS.includes(active)) void reload(active)
+  }, [active, reload])
   useEffect(() => initLocale(), [])
 
   // 主题：恢复 + 应用 + 跟随系统（多主题见 theme.ts）
@@ -119,6 +123,13 @@ export default function App() {
       setTheme(id)
       applyTheme(id)
     })
+    // P2 修复：设置页改主题时同步侧栏菜单选中态（此前两份独立 state 不互通）
+    const onThemeChanged = (e: Event): void => {
+      const id = (e as CustomEvent<ThemeId>).detail
+      if (id) setTheme(id)
+    }
+    window.addEventListener('app:theme-changed', onThemeChanged)
+    return () => window.removeEventListener('app:theme-changed', onThemeChanged)
   }, [])
   useEffect(() => watchSystemTheme(theme, () => {}), [theme])
   const changeTheme = (id: ThemeId): void => {
@@ -175,14 +186,19 @@ export default function App() {
     return () => window.removeEventListener('keymap-changed', onChanged)
   }, [])
 
-  // 快捷键全集（§7.9）：新建/搜索/帮助/分组 1-6/Space 暂停/Delete 回收站（键位可自定义）
+  // 快捷键全集（§7.9）：新建/搜索/帮助/分组 1-6/Space 暂停/Delete 回收站（键位可自定义）。
+  // P3 修复：tasks/selectedTaskId 每个事件批次都会换新引用——经 ref 中转避免每批重挂监听器
+  const tasksRef = useRef(tasks)
+  tasksRef.current = tasks
+  const selRef = useRef(selectedTaskId)
+  selRef.current = selectedTaskId
   useEffect(() => {
     const keys = effectiveKeys(keymap)
     const onKey = (e: KeyboardEvent): void => {
       const tag = (e.target as HTMLElement)?.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
-      // 确认对话框模态期间屏蔽全局快捷键（防 Space/Delete 穿透误触发后台任务操作）
-      if (isConfirmActive()) return
+      // 模态期间屏蔽全局快捷键（确认框/新建任务/帮助/向导——防穿透误触发后台任务操作）
+      if (isConfirmActive() || dialogOpen || showHelp || onboarding) return
       const k = eventToKey(e)
       if (!k) return
       if (k === keys['new-task']) {
@@ -201,19 +217,23 @@ export default function App() {
         const idx = Number(k.slice(5)) - 1
         if (flat[idx]) setActive(flat[idx].id)
       } else if (k === keys['pause-toggle']) {
-        if (!selectedTaskId) return
-        e.preventDefault()
-        const t = tasks.get(selectedTaskId)
-        if (!t) return
-        const action = t.status === 'paused' ? 'resume' : 'pause'
-        void window.omniget
-          .controlTask({ taskId: selectedTaskId, action })
-          .then(() => toast(action === 'pause' ? '任务已暂停' : '任务已继续下载', 'success'))
-      } else if (k === keys.trash) {
-        const sel = selectedTaskId
+        const sel = selRef.current
         if (!sel) return
         e.preventDefault()
-        const t = tasks.get(sel)
+        const t = tasksRef.current.get(sel)
+        if (!t) return
+        // P3 修复：completed/failed/parsing 等状态不可暂停——守卫后再发，防无意义报错
+        if (t.status !== 'running' && t.status !== 'queued' && t.status !== 'paused') return
+        const action = t.status === 'paused' ? 'resume' : 'pause'
+        void window.omniget
+          .controlTask({ taskId: sel, action })
+          .then(() => toast(action === 'pause' ? '任务已暂停' : '任务已继续下载', 'success'))
+          .catch((err) => toastError('任务操作', err)) // P1 修复：失败不得静默
+      } else if (k === keys.trash) {
+        const sel = selRef.current
+        if (!sel) return
+        e.preventDefault()
+        const t = tasksRef.current.get(sel)
         // 移入回收站属删除类操作：二次确认（可恢复，用轻量确认）
         void confirmAction({
           title: '移入回收站',
@@ -227,12 +247,13 @@ export default function App() {
               toast('任务已移入回收站', 'success')
               return reload('all')
             })
+            .catch((err) => toastError('移入回收站', err))
         })
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [selectedTaskId, tasks, reload, keymap])
+  }, [keymap, reload, dialogOpen, showHelp, onboarding])
 
   // 侧栏角标计数：主进程 SQL 全表口径（跨视图一致，含回收站）
   const counts = useTasks((s) => s.counts)
@@ -468,10 +489,7 @@ export default function App() {
             <ArrowDown size={11} weight="bold" className="text-accent" />
             {formatBytes(globalSpeedBps)}/s
           </span>
-          <span className="num inline-flex items-center gap-1">
-            <ArrowUp size={11} weight="bold" className="text-text-3" />
-            0 B/s
-          </span>
+          {/* 上传速度已移除硬编码 0 B/s 假数据——真实上行数据经托盘 tooltip 展示 */}
           <span className="num text-text-3">
             {t('status.running')} {counts.running} · {t('status.queued')} {counts.queued}
           </span>
@@ -512,7 +530,9 @@ export default function App() {
             className={`stagger-in rounded-ctl border px-3 py-2 text-xs shadow-[var(--shadow-pop)] ${
               t.level === 'warning'
                 ? 'border-warning/40 bg-[var(--tooltip-bg)] text-warning'
-                : 'border-border bg-[var(--tooltip-bg)] text-text-1'
+                : t.level === 'success'
+                  ? 'border-success/40 bg-[var(--tooltip-bg)] text-success'
+                  : 'border-border bg-[var(--tooltip-bg)] text-text-1'
             }`}
           >
             {t.message}

@@ -2,6 +2,7 @@
 
 import { create } from 'zustand'
 import type { EngineHealth, Task, TaskCounts, TaskEvent } from '@shared/types'
+import { toastError } from '../lib/feedback'
 
 const SPEED_HISTORY_MAX = 40
 
@@ -82,8 +83,10 @@ export const useTasks = create<TasksState>()((set, get) => ({
     const cur = get().pinned
     const next = cur.includes(id) ? cur.filter((x) => x !== id) : [id, ...cur]
     set({ pinned: next })
-    // P2 加固：settingsSet 可能因 DB 异常 reject，void 直调会产生 unhandledrejection
-    window.omniget.settingsSet('ui.pinnedTasks', next).catch(() => {})
+    // UX 硬性标准：持久化失败必须可见反馈（此前静默吞掉——UI 已置顶但重启即丢）
+    window.omniget.settingsSet('ui.pinnedTasks', next).catch((err) =>
+      toastError('保存置顶状态', err)
+    )
   },
 
   applyEvents: (events) => {

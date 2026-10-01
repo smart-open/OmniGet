@@ -16,7 +16,7 @@ import {
 import type { Task, TaskFile } from '@shared/types'
 import { useEffect, useState } from 'react'
 import { FILE_CATEGORIES, fileCategory } from '@shared/file-category'
-import { confirmAction, toast } from '../../lib/feedback'
+import { confirmAction, toast, toastError } from '../../lib/feedback'
 import { formatBytes } from '../new-task/fileTree'
 
 const spring = { type: 'spring' as const, stiffness: 300, damping: 32 }
@@ -63,7 +63,7 @@ export function Inspector({
     task.totalBytes > 0 ? Math.min(100, (task.downloadedBytes / task.totalBytes) * 100) : 0
   const running = task.status === 'running'
   const failed = task.status === 'failed'
-  const trashed = false // 列表过滤已保证 trash 视图不进 Inspector（select 仅在非回收站行触发）
+  // 列表过滤已保证 trash 视图不进 Inspector（TaskList 回收站行已禁用 select）
 
   const control = async (action: 'pause' | 'resume' | 'remove'): Promise<void> => {
     if (action === 'remove') {
@@ -74,11 +74,15 @@ export function Inspector({
       })
       if (!ok) return
     }
-    await window.omniget.controlTask({ taskId: task.id, action })
-    onChanged()
-    if (action === 'pause') toast('任务已暂停', 'success')
-    else if (action === 'resume') toast('任务已继续下载', 'success')
-    else toast('任务已移入回收站', 'success')
+    try {
+      await window.omniget.controlTask({ taskId: task.id, action })
+      onChanged()
+      if (action === 'pause') toast('任务已暂停', 'success')
+      else if (action === 'resume') toast('任务已继续下载', 'success')
+      else toast('任务已移入回收站', 'success')
+    } catch (err) {
+      toastError('任务操作', err) // UX 硬性标准：失败必须可见反馈
+    }
   }
 
   const retry = (): void => {
@@ -88,12 +92,18 @@ export function Inspector({
         toast('任务已重新排队', 'success')
         onChanged()
       })
+      .catch((err) => toastError('重试任务', err))
   }
 
   const copySource = (): void => {
-    void navigator.clipboard?.writeText(task.source).catch(() => {})
-    setCopied(true)
-    setTimeout(() => setCopied(false), 1200)
+    // P3 修复：仅复制成功才显示「已复制」
+    void navigator.clipboard
+      ?.writeText(task.source)
+      .then(() => {
+        setCopied(true)
+        setTimeout(() => setCopied(false), 1200)
+      })
+      .catch((err) => toastError('复制来源', err))
   }
 
   return (
@@ -293,7 +303,7 @@ export function Inspector({
               <ArrowClockwise size={13} /> 重试
             </button>
           )}
-          {!trashed && task.status !== 'completed' && task.status !== 'failed' && (
+          {task.status !== 'completed' && task.status !== 'failed' && (
             <span className="flex-1" />
           )}
           <button

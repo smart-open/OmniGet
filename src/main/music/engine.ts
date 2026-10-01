@@ -6,6 +6,7 @@
 import { dirname, extname, join } from 'path'
 import { rename, stat, unlink } from 'fs/promises'
 import type { MusicSearchResult, ServiceEvent } from '@shared/types'
+import { createLogger } from '../logger'
 import { HostGate } from './gate'
 import { isTrustedAudioHost } from './http'
 import { DEFAULT_TEMPLATE, getNamingTemplate, renderNamingTemplate } from '../naming'
@@ -55,6 +56,8 @@ export interface MusicDownloadResult {
   bytes?: number
 }
 
+const log = createLogger('music-engine')
+
 export class MusicEngine {
   private gate = new HostGate(1000)
   private jobs = new Map<string, MusicJob>()
@@ -67,7 +70,8 @@ export class MusicEngine {
     return new PlatformEngine({
       gate: this.gate,
       signal,
-      log: (msg) => console.log(`[music-engine] ${msg}`)
+      // 引擎内部日志统一走分级 logger（dev 同时镜像控制台），不再裸 console
+      log: (msg) => log.info(msg)
     })
   }
 
@@ -107,7 +111,9 @@ export class MusicEngine {
       let rows: PlatformSong[] = []
       try {
         rows = (await fn(keyword, limit)) ?? []
-      } catch {
+      } catch (err) {
+        // 平台降级必须留痕（此前静默吞掉，无法排查"为什么搜不到"）
+        log.warn(`搜索平台 ${platform} 降级`, { error: String(err) })
         rows = []
       }
       if (!rows.length) {
@@ -211,13 +217,17 @@ export class MusicEngine {
         out.bytes = await stat(out.mp3Path).then((s) => s.size).catch(() => 0)
       }
       job.status = out.success ? 'completed' : 'failed'
+      if (out.success) log.info(`音乐下载完成: ${out.message} → ${out.mp3Path}`)
+      else log.error(`音乐下载失败: ${out.message}`)
       return out
     } catch (err) {
       if (job.controller.signal.aborted) return this.cancelledResult()
+      const message = err instanceof Error ? err.message : String(err)
+      log.error('音乐下载异常', { error: message })
       return {
         success: false,
         source: '',
-        message: err instanceof Error ? err.message : String(err),
+        message,
         mp3Path: '',
         lrcPath: ''
       }
@@ -332,6 +342,7 @@ export class MusicEngine {
         }
       }
       job.status = 'completed'
+      log.info(`音乐按 ID 下载完成: 网易云:${nid} → ${mp3Path}`)
       const final = await this.applyNaming(mp3Path, lrcPath, artist, song)
       const finalBase = final.mp3.replace(/\\/g, '/').split('/').pop() ?? filename
       return {
@@ -344,10 +355,12 @@ export class MusicEngine {
       }
     } catch (err) {
       if (job.controller.signal.aborted) return this.cancelledResult()
+      const message = err instanceof Error ? err.message : String(err)
+      log.error('音乐按 ID 下载异常', { error: message })
       return {
         success: false,
         source: '',
-        message: err instanceof Error ? err.message : String(err),
+        message,
         mp3Path: '',
         lrcPath: ''
       }

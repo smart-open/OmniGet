@@ -5,7 +5,7 @@
 
 import { spawn, type ChildProcess } from 'child_process'
 import { createLogger } from '../logger'
-import { binaryPath, checkBinary } from './binaries'
+import { binaryPath, checkBinary, ensureVerified } from './binaries'
 import { terminateTree } from './proc'
 
 const log = createLogger('ytdlp')
@@ -50,8 +50,10 @@ export class YtDlpSupervisor {
     }
   }
 
-  /** -J JSON 解析（parse 用） */
+  /** -J JSON 解析（parse 用）。P2 加固：解析路径此前完全绕过 TOFU 闸门——被篡改的
+   * 二进制可以先在解析阶段执行；spawn 前强制指纹校验 */
   async execJson(args: string[], timeoutMs = 60_000): Promise<string> {
+    await ensureVerified('ytdlp')
     return this.exec(args, timeoutMs)
   }
 

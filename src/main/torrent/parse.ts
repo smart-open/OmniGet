@@ -5,6 +5,7 @@ import bencode from 'bencode'
 import { createHash } from 'crypto'
 import { readFileSync } from 'fs'
 import type { TaskFile } from '@shared/types'
+import { sanitizeFilename, sanitizeRelativePath } from '@shared/sanitize'
 
 interface BDict { [key: string]: BencodeValue }
 type BencodeValue = number | Buffer | BencodeValue[] | BDict
@@ -59,14 +60,21 @@ function buildFileList(info: BDict): TaskFile[] {
       if (typeof f !== 'object' || f === null) continue
       const fd = f as BDict
       const pathParts = Array.isArray(fd['path'])
-        ? (fd['path'] as Buffer[]).map((p) => decodeStr(p as Buffer))
+        ? (fd['path'] as Buffer[]).map((p) => sanitizeFilename(decodeStr(p as Buffer)))
         : []
       const length = typeof fd['length'] === 'number' ? fd['length'] : 0
-      list.push({ path: pathParts.join('/'), size: length, selected: true, downloaded: 0 })
+      // P3 加固：与 aria2 轮询路径同口径——本地解析的路径也过清洗（恶意种子可携带
+      // `..`/Windows 非法字符，删除与比对逻辑依赖相对路径口径一致）
+      list.push({
+        path: sanitizeRelativePath(pathParts.join('/')),
+        size: length,
+        selected: true,
+        downloaded: 0
+      })
     }
     return list
   }
-  const name = decodeStr(info['name'] as Buffer)
+  const name = sanitizeFilename(decodeStr(info['name'] as Buffer))
   const length = typeof info['length'] === 'number' ? info['length'] : 0
   return [{ path: name, size: length, selected: true, downloaded: 0 }]
 }

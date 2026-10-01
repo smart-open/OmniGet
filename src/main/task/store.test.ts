@@ -81,7 +81,7 @@ test('软删除/恢复/彻底删除（§4.5 回收站）', () => {
   // 默认列表不含回收站任务；getTask 按 id 取（回收站行仍可直接操作）
   assert.ok(getTask('a2'))
   assert.ok(!listTasks({}).some((t) => t.id === 'a2'))
-  assert.equal(listTasks({ includeDeleted: true }).length, 1)
+  assert.equal(listTasks({ onlyDeleted: true }).length, 1)
   restoreTask('a2')
   assert.ok(listTasks({}).some((t) => t.id === 'a2'))
   purgeTask('a2')

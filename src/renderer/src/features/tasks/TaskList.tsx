@@ -2,7 +2,7 @@
 // 虚拟滚动（10k+ 行）、行 hover 浮出图标操作、3px 进度条 scaleX 动效（禁 width 动画）。
 // 首载 stagger 仅前 10 行（§7.8）；空态/骨架/错误三态齐备（§7.1 原则 4）。
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import {
@@ -19,8 +19,17 @@ import {
 import { useTasks } from '../../stores/tasks'
 import { formatBytes, formatEta } from '../new-task/fileTree'
 import { Button, EmptyState, TaskRowSkeleton } from '../../components/ui'
-import { confirmAction, toast } from '../../lib/feedback'
+import { confirmAction, toast, toastError } from '../../lib/feedback'
 import type { Task } from '@shared/types'
+
+/** UX 硬性标准：写操作失败必须给用户可见反馈——所有行内/批量操作统一经此包装 */
+async function guarded(action: string, fn: () => Promise<void>): Promise<void> {
+  try {
+    await fn()
+  } catch (err) {
+    toastError(action, err)
+  }
+}
 
 const FILTERS: Record<string, (t: Task) => boolean> = {
   all: () => true,
@@ -93,17 +102,50 @@ export function TaskList({
       return next
     })
   }
-  const batchRestore = async (): Promise<void> => {
-    if (!trashDataReady || checked.size === 0) return
-    setBusy(true)
-    for (const id of checked) await window.omniget.restoreTask(id)
-    setChecked(new Set())
-    await useTasks.getState().load('trash')
+  /** 批量执行器：P1 修复——任一 IPC 失败不得让 busy 永久卡死或静默无反馈 */
+  const runBatch = async (
+    ids: string[],
+    op: (id: string) => Promise<void>,
+    action: string
+  ): Promise<number> => {
+    let okCount = 0
+    let lastErr: unknown = null
+    for (const id of ids) {
+      try {
+        await op(id)
+        okCount++
+      } catch (err) {
+        lastErr = err
+      }
+    }
+    try {
+      await useTasks.getState().load('trash')
+    } catch {
+      // 重载失败不掩盖批量结果
+    }
     setBusy(false)
-    toast(`已恢复 ${checked.size} 个任务到原分组`, 'success')
+    if (okCount < ids.length && lastErr) {
+      toastError(action, lastErr)
+    }
+    if (okCount > 0) {
+      toast(
+        ids.length === okCount
+          ? `已处理 ${okCount} 个任务`
+          : `${okCount}/${ids.length} 个任务处理成功`,
+        okCount === ids.length ? 'success' : 'warning'
+      )
+    }
+    return okCount
+  }
+  const batchRestore = async (): Promise<void> => {
+    if (!trashDataReady || checked.size === 0 || busy) return
+    setBusy(true)
+    const ids = [...checked]
+    await runBatch(ids, (id) => window.omniget.restoreTask(id), '恢复任务')
+    setChecked(new Set())
   }
   const batchPurge = async (): Promise<void> => {
-    if (!trashDataReady || checked.size === 0) return
+    if (!trashDataReady || checked.size === 0 || busy) return
     const ok = await confirmAction({
       title: `彻底删除 ${checked.size} 个任务`,
       message: '将永久删除这些任务及其已下载的全部文件，此操作不可恢复。请确认已不再需要它们。',
@@ -112,15 +154,13 @@ export function TaskList({
     })
     if (!ok) return
     setBusy(true)
-    for (const id of checked) await window.omniget.purgeTask(id)
+    const ids = [...checked]
+    await runBatch(ids, (id) => window.omniget.purgeTask(id), '彻底删除')
     setChecked(new Set())
-    await useTasks.getState().load('trash')
-    setBusy(false)
-    toast(`已彻底删除 ${checked.size} 个任务及其文件`, 'success')
   }
   const emptyTrash = async (): Promise<void> => {
     // 双保险：数据源必须是回收站（trash 过滤）才允许清空
-    if (!trashDataReady || list.length === 0) return
+    if (!trashDataReady || list.length === 0 || busy) return
     const ok = await confirmAction({
       title: '清空回收站',
       message: `将永久删除回收站内全部 ${list.length} 个任务及其已下载文件，此操作不可恢复。`,
@@ -129,11 +169,8 @@ export function TaskList({
     })
     if (!ok) return
     setBusy(true)
-    for (const t of list) await window.omniget.purgeTask(t.id)
+    await runBatch(list.map((t) => t.id), (id) => window.omniget.purgeTask(id), '清空回收站')
     setChecked(new Set())
-    await useTasks.getState().load('trash')
-    setBusy(false)
-    toast('回收站已清空', 'success')
   }
 
   const list = useMemo(() => {
@@ -154,6 +191,19 @@ export function TaskList({
       return pa - pb
     })
   }, [tasks, active, query, pinned])
+
+  // P3 修复：单行操作后 checked 集合残留已删 id → 计数虚高、全选框错乱
+  const checkedKey = list.map((t) => t.id).join('|')
+  useEffect(() => {
+    const alive = new Set(checkedKey.split('|').filter(Boolean))
+    setChecked((prev) => {
+      const stale = [...prev].filter((id) => !alive.has(id))
+      if (stale.length === 0) return prev
+      const next = new Set(prev)
+      for (const id of stale) next.delete(id)
+      return next
+    })
+  }, [checkedKey])
 
   const virtualizer = useVirtualizer({
     count: list.length,
@@ -295,8 +345,9 @@ export function TaskList({
 }
 
 // ── 任务行（§7.4：首行状态+名称+体积 / 次行上下文 / 三行细进度条）──────
+// memo：任何事件批次都会换 tasks Map，未 memo 时所有可见行全量重渲染（10k 下主要 jank 源）
 
-function TaskRow({
+const TaskRow = memo(function TaskRow({
   task,
   isTrash,
   selected,
@@ -334,7 +385,8 @@ function TaskRow({
 
   async function restore(): Promise<void> {
     await window.omniget.restoreTask(task.id)
-    await useTasks.getState().load('all')
+    // P3 修复：回收站行内操作重载 'all' 会触发数据源守卫再重载 'trash' → 双载+骨架闪烁
+    await useTasks.getState().load(isTrash ? 'trash' : 'all')
     toast(`已恢复「${task.name || task.source}」`, 'success')
   }
 
@@ -347,7 +399,7 @@ function TaskRow({
     })
     if (!ok) return
     await window.omniget.purgeTask(task.id)
-    await useTasks.getState().load('all')
+    await useTasks.getState().load(isTrash ? 'trash' : 'all')
     toast('任务及其文件已彻底删除', 'success')
   }
 
@@ -360,7 +412,7 @@ function TaskRow({
     })
     if (!ok) return
     await window.omniget.purgeTaskRecord(task.id)
-    await useTasks.getState().load('all')
+    await useTasks.getState().load(isTrash ? 'trash' : 'all')
     toast('任务记录已删除（文件保留）', 'success')
   }
 
@@ -378,7 +430,7 @@ function TaskRow({
 
   async function control(action: 'pause' | 'resume' | 'remove' | 'top'): Promise<void> {
     await window.omniget.controlTask({ taskId: task.id, action, withFiles: false })
-    await useTasks.getState().load('all')
+    await useTasks.getState().load(isTrash ? 'trash' : 'all')
     if (action === 'pause') toast('任务已暂停', 'success')
     else if (action === 'resume') toast('任务已继续下载', 'success')
   }
@@ -391,7 +443,9 @@ function TaskRow({
       className={`row-line group cursor-pointer px-4 py-2.5 transition-colors hover:bg-surface-2 ${
         selected ? 'bg-accent-soft' : ''
       }`}
-      onClick={onSelect}
+      // P2 修复：回收站行禁止选中打开 Inspector——对已删任务显示暂停/移入回收站
+      // 等操作会调 engine control 打出无意义错误
+      onClick={isTrash ? undefined : onSelect}
     >
       {/* 首行 */}
       <div className="flex items-center gap-2.5">
@@ -456,13 +510,13 @@ function TaskRow({
         <span className="ml-auto flex items-center gap-0.5 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
           {isTrash ? (
             <>
-              <RowAction label="恢复" onClick={() => void restore()}>
+              <RowAction label="恢复" onClick={() => void guarded('恢复任务', restore)}>
                 <ArrowsClockwise size={13} />
               </RowAction>
-              <RowAction label="彻底删除（含文件）" danger onClick={() => void purge()}>
+              <RowAction label="彻底删除（含文件）" danger onClick={() => void guarded('彻底删除', purge)}>
                 <Trash size={13} />
               </RowAction>
-              <RowAction label="删除（保留文件）" onClick={() => void purgeRecord()}>
+              <RowAction label="删除（保留文件）" onClick={() => void guarded('删除记录', purgeRecord)}>
                 <FileX size={13} />
               </RowAction>
               <RowAction label="打开目录" onClick={() => void window.omniget.openFolder(task.id)}>
@@ -472,12 +526,12 @@ function TaskRow({
           ) : (
             <>
               {canPause && (
-                <RowAction label="暂停" onClick={() => void control('pause')}>
+                <RowAction label="暂停" onClick={() => void guarded('暂停任务', () => control('pause'))}>
                   <Pause size={13} />
                 </RowAction>
               )}
               {canResume && (
-                <RowAction label="继续" onClick={() => void control('resume')}>
+                <RowAction label="继续" onClick={() => void guarded('继续任务', () => control('resume'))}>
                   <Play size={13} weight="fill" />
                 </RowAction>
               )}
@@ -493,7 +547,7 @@ function TaskRow({
               <RowAction label="打开目录" onClick={() => void window.omniget.openFolder(task.id)}>
                 <FolderOpen size={13} />
               </RowAction>
-              <RowAction label="移入回收站" danger onClick={() => void moveToTrash()}>
+              <RowAction label="移入回收站" danger onClick={() => void guarded('移入回收站', moveToTrash)}>
                 <Trash size={13} />
               </RowAction>
             </>
@@ -510,7 +564,7 @@ function TaskRow({
       </div>
     </div>
   )
-}
+})
 
 function RowAction({
   label,

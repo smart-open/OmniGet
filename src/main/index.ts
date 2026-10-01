@@ -19,6 +19,7 @@ import { createLogger } from './logger'
 import { runtimeBase } from './env'
 import { startStatsScheduler, stopStatsScheduler } from './stats'
 import { startScheduler } from './scheduler'
+import { startBridge } from './bridge'
 import { toolbox } from './toolbox'
 import { broadcastToolEvents } from './ipc'
 import { refreshTrackers, joinedTrackers } from './trackers'
@@ -54,7 +55,7 @@ if (!gotLock) {
       if (win.isMinimized()) win.restore()
       win.show()
       win.focus()
-      if (source && sniff(source) && launchDedupe.check(source.slice(0, 120))) {
+      if (source && sniff(source) && launchDedupe.check(source)) {
         win.webContents.send('ui:action', { action: 'new-task', payload: source })
       }
     }
@@ -80,9 +81,9 @@ async function bootstrap(): Promise<void> {
   // 去掉原生菜单栏（应用内导航 + 自绘标题栏承担全部入口）
   Menu.setApplicationMenu(null)
 
-  app.whenReady().then(createWindow)
-
-  // §2.2 应用启动：恢复 DB → 端口分配 → 二进制校验 → 恢复任务 → 引擎 → IPC
+  // §2.2 应用启动：恢复 DB → 端口分配 → 二进制校验 → 恢复任务 → 引擎 → IPC → 窗口
+  // ⚠️ 窗口必须在 registerIpcHandlers() 之后创建：提前创建会让渲染层在 handler
+  // 注册完成前发起 invoke（task:list/settings:get...），刷一屏 "No handler registered"
   await app.whenReady()
   getDb()
 
@@ -95,6 +96,33 @@ async function bootstrap(): Promise<void> {
       log.error(`binary check failed: ${name}`, err)
     }
   }
+  // R6：引擎按需下载——缺失且开启自动补齐时后台拉取（不阻塞启动，成败经通知栏反馈）
+  void import('./updater/engine-fetch')
+    .then(async (m) => {
+      if (!m.autoFetchEnabled()) return
+      const st = await m.engineStatus()
+      const missing = st.filter((e) => !e.installed).map((e) => e.name)
+      if (missing.length === 0) return
+      log.info(`auto-fetching missing engines: ${missing.join(', ')}`)
+      const r = await m.fetchMissingEngines({ names: missing })
+      const { broadcastNotices } = await import('./ipc')
+      if (r.installed.length > 0) {
+        broadcastNotices([
+          { level: 'info', message: `已自动安装引擎：${r.installed.join('、')}，如未生效请重启应用` }
+        ])
+      }
+      if (r.failed.length > 0) {
+        broadcastNotices([
+          {
+            level: 'warning',
+            message: `引擎自动补齐失败：${r.failed
+              .map((f) => `${f.name}（${f.error}）`)
+              .join('；')}。可在设置 → 更新 中重试`
+          }
+        ])
+      }
+    })
+    .catch((err) => log.warn('引擎自动补齐链路异常', { error: String(err) }))
   // ffprobe（可选工具，非 SidecarBinary）：缺失仅 warning——完整性探测会静默降级
   try {
     const { toolPath } = await import('./orchestrator/binaries')
@@ -107,6 +135,7 @@ async function bootstrap(): Promise<void> {
   registerIpcHandlers()
   registerProtocol() // magnet: 协议（M1-12）
   registerPreviewHandler() // omniget-preview: 试听流协议（F1，主进程内引擎）
+  createWindow() // IPC/协议全部就绪后再创建窗口（渲染层 invoke 不再撞上未注册通道）
 
   // M1 编排：任务恢复 → aria2 监督器 → 适配器 → 管理器
   const supervisor = new Aria2Supervisor(ports.aria2RpcPort, undefined, {
@@ -121,7 +150,7 @@ async function bootstrap(): Promise<void> {
         .getClient()
         .call('changeGlobalOption', { 'bt-tracker': trackerCsv })
         .then(() => manager.injectTrackersToRunning(trackerCsv))
-        .catch(() => {})
+        .catch((err) => log.warn('启动期 Tracker 注入失败', { error: String(err) }))
     },
     onOffline: () => {
       manager.broadcastHealth(false, 'aria2 连续重启失败')
@@ -168,6 +197,9 @@ async function bootstrap(): Promise<void> {
   manager.resumeMusicQueue()
   log.info('music engine online (in-process)')
 
+  // R1+R5：本地桥接（浏览器扩展 + Web UI 远程面板，回环 + token 鉴权）
+  startBridge(manager)
+
   // M1-12 系统集成：托盘 / 关窗最小化 / 剪贴板监听（按设置启停）
   setSpeedProvider(() => manager.getAggregateSpeeds())
   setBulkControlHandlers(
@@ -187,15 +219,31 @@ async function bootstrap(): Promise<void> {
     // 关窗已最小化到托盘（interceptCloseToTray），此处仅托盘退出时触发
   })
 
-  app.on('before-quit', () => {
+  // P2 修复：before-quit 必须等待 supervisor.shutdown() 完成——原 void 直调时
+  // Electron 可能在 taskkill 兜底执行前就退出，aria2c 孤儿进程占端口/继续上传。
+  // preventDefault + 显式 app.exit(0) 保证清理链跑完再退。
+  let quitCleanupDone = false
+  app.on('before-quit', (e) => {
+    if (quitCleanupDone) return
+    quitCleanupDone = true
+    e.preventDefault()
     markQuitting()
-    void supervisor.shutdown()
     manager.stopPolling()
     stopStatsScheduler()
     getYtDlpSupervisor().killAll()
     // 音乐任务 abort 全部网络请求，避免遗留 .part 文件
     getMusicEngine().shutdown()
-    closeDb()
+    void supervisor
+      .shutdown()
+      .catch(() => {})
+      .finally(() => {
+        try {
+          closeDb()
+        } catch {
+          // ignore
+        }
+        app.exit(0)
+      })
   })
 
   app.on('activate', () => {

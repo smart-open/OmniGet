@@ -29,6 +29,17 @@ export class Aria2RpcClient {
 
   connect(): Promise<void> {
     return new Promise((resolve, reject) => {
+      // P3 加固：废弃的旧 WS 仍挂着 onClose → scheduleRestart 回调，会引发多余重启——
+      // 重建前先摘除全部监听并终止旧连接
+      if (this.ws) {
+        try {
+          this.ws.removeAllListeners()
+          this.ws.terminate()
+        } catch {
+          // ignore
+        }
+        this.ws = null
+      }
       const ws = new WebSocket(`ws://127.0.0.1:${this.port}/jsonrpc`)
       this.ws = ws
       ws.on('open', () => resolve())
@@ -101,7 +112,18 @@ export class Aria2RpcClient {
           reject(e)
         }
       })
-      this.ws!.send(JSON.stringify(payload))
+      // P3 加固：isOpen 检查与 send 之间 WS 可能被 close() 置 null——send 失败按离线处理
+      try {
+        this.ws!.send(JSON.stringify(payload))
+      } catch (err) {
+        this.pending.delete(id)
+        clearTimeout(timer)
+        reject(
+          new Error(
+            `aria2 连接已断开（引擎可能正在重启），请稍候重试：${err instanceof Error ? err.message : String(err)}`
+          )
+        )
+      }
     })
   }
 
@@ -161,7 +183,13 @@ export class Aria2Supervisor {
   private async spawnAndConnect(): Promise<void> {
     this.restarting = true
     try {
-      const args = toSpawnArgs(this.globalOptions, this.secret, this.rpcPort)
+      // P3 加固：secret 写文件注入（不出现在命令行；aria2 启动后即读走）
+      const { writeFile } = await import('fs/promises')
+      const { join } = await import('path')
+      const { userDataDir } = await import('../env')
+      const secretFile = join(userDataDir(), 'aria2-rpc-secret')
+      await writeFile(secretFile, this.secret, 'utf8')
+      const args = toSpawnArgs(this.globalOptions, secretFile, this.rpcPort)
       this.proc = spawn(binaryPath('aria2c'), args, {
         stdio: ['ignore', 'ignore', 'pipe'],
         windowsHide: true
@@ -267,15 +295,16 @@ export class Aria2Supervisor {
     }
   }
 
-  /** 应用退出：shutdown 优雅关闭 */
+  /** 应用退出：shutdown 优雅关闭。
+   * P2 修复：RPC 优雅关闭限时 2s——WS 已断时 call 会挂到 10s 超时，
+   * before-quit 等不及即退出 → taskkill 兜底永不执行 → aria2c 孤儿进程占端口/继续上传。 */
   async shutdown(): Promise<void> {
     this.stopped = true
     this.stopHeartbeat()
-    try {
-      await this.client?.call('shutdown')
-    } catch {
-      // 忽略，直接杀进程
-    }
+    await Promise.race([
+      this.client?.call('shutdown').catch(() => {}) ?? Promise.resolve(),
+      new Promise((r) => setTimeout(r, 2000))
+    ])
     this.client?.close()
     if (this.proc && this.proc.exitCode === null) {
       // 10s 超时强杀（§2.2）；Windows 上由 taskkill /T 保证进程树整体退出

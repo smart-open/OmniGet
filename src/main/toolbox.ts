@@ -3,8 +3,8 @@
 // 产物默认落 源目录/工具箱输出/<工具名>/
 
 import { spawn, type ChildProcess } from 'child_process'
-import { mkdir, stat } from 'fs/promises'
-import { basename, join } from 'path'
+import { mkdir, rm, stat, writeFile } from 'fs/promises'
+import { basename, extname, join } from 'path'
 import type { ToolCreateInput, ToolEvent } from '@shared/types'
 import { createLogger } from './logger'
 import { toolPath, ensureVerified } from './orchestrator/binaries'
@@ -22,11 +22,71 @@ export interface ToolDef {
   desc: string
   /** 参数表单描述（渲染层据此渲染） */
   fields: Array<{ key: string; label: string; type: 'text' | 'number' | 'select'; options?: string[]; default?: string }>
-  build: (inputPath: string, outDir: string, params: Record<string, unknown>) => { args: string[]; output: string }
+  /** T4：多文件输入（渲染层允许多选；文件顺序 = 处理顺序） */
+  multi?: boolean
+  /** T4：附加文件选择器（如字幕文件），路径经 params[key] 传入 build */
+  extraFile?: { key: string; label: string; accept: string }
+  /** T5：执行运行时（默认 ffmpeg CLI；node = 纯 JS compute） */
+  runtime?: 'ffmpeg' | 'node'
+  /** true：不出现在渲染层工具导航（由其他工具内部调用的辅助项） */
+  hidden?: boolean
+  /** runtime=node：JS 执行体，返回产物路径 */
+  compute?: (inputPath: string, outDir: string, params: Record<string, unknown>) => Promise<string>
+  build: (inputPath: string, outDir: string, params: Record<string, unknown>) => {
+    args: string[]
+    output: string
+    /** 执行前写入的辅助文件（如 concat 清单） */
+    prewrite?: { path: string; content: string }
+  }
 }
 
 function baseName(input: string): string {
   return basename(input).replace(/\.\w+$/, '')
+}
+
+/** 常见文件系统错误中文化（§4.1：用户可见文案必须中文 + 出口动作） */
+function fsErrToChinese(err: unknown): string {
+  if (err instanceof Error) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code === 'ENOENT') return '文件或目录不存在（源文件可能已被移动/删除）'
+    if (code === 'EACCES' || code === 'EPERM') return '没有读写权限（尝试更换输出目录，或检查文件是否被占用）'
+    if (code === 'ENOSPC') return '磁盘空间不足'
+    if (code === 'EMFILE' || code === 'ENFILE') return '打开的文件过多，请稍后重试'
+    if (code === 'EBUSY') return '文件被其他程序占用'
+  }
+  return err instanceof Error ? err.message : String(err)
+}
+
+/** T4：多文件输入解析（params.__files 来自渲染层多选，JSON 串或数组；回退单输入） */
+function parseFilesParam(input: string, params: Record<string, unknown>): string[] {
+  const raw = params.__files
+  let list: unknown = raw
+  if (typeof raw === 'string') {
+    try {
+      list = JSON.parse(raw)
+    } catch {
+      list = raw
+    }
+  }
+  if (Array.isArray(list)) {
+    const files = list.map(String).filter((f) => f.trim())
+    if (files.length > 0) return files
+  }
+  return [input]
+}
+
+/** T6：剪辑区域解析（渲染层 JSON；排序 + 去过短段 + 上限 50） */
+function parseRegions(params: Record<string, unknown>): Array<{ start: number; end: number }> {
+  try {
+    const raw = JSON.parse(String(params.regions ?? '[]')) as Array<{ start: number; end: number }>
+    return (Array.isArray(raw) ? raw : [])
+      .map((r) => ({ start: Math.max(0, Number(r?.start) || 0), end: Number(r?.end) || 0 }))
+      .filter((r) => r.end - r.start >= 0.5)
+      .sort((a, b) => a.start - b.start)
+      .slice(0, 50)
+  } catch {
+    return []
+  }
 }
 
 export const TOOL_DEFS: ToolDef[] = [
@@ -42,11 +102,17 @@ export const TOOL_DEFS: ToolDef[] = [
     build: (input, outDir, params) => {
       const fmt = String(params.format ?? 'mp3')
       const audio = ['mp3', 'aac', 'm4a', 'opus', 'flac', 'wav'].includes(fmt)
+      // 数值白名单：bitrate 只允许预置档位（防选项注入）；flac/wav 无损不吃码率参数
+      const bitrate = ['128k', '192k', '320k'].includes(String(params.bitrate))
+        ? String(params.bitrate)
+        : '320k'
       const out = join(outDir, `${baseName(input)}_converted.${fmt}`)
       return {
         args: [
           '-y', '-i', input,
-          ...(audio ? ['-vn', '-b:a', String(params.bitrate ?? '320k')] : ['-c:v', 'libx264', '-crf', '23']),
+          ...(audio
+            ? ['-vn', ...(['flac', 'wav'].includes(fmt) ? [] : ['-b:a', bitrate])]
+            : ['-c:v', 'libx264', '-crf', '23']),
           out
         ],
         output: out
@@ -57,7 +123,7 @@ export const TOOL_DEFS: ToolDef[] = [
     id: 'trim',
     label: '音频裁剪',
     category: 'audio',
-    desc: '按起止时间无损剪切片段（关键帧对齐，秒级完成）；渲染层剪辑编辑器可逐区域批量提交',
+    desc: '按起止时间无损剪切片段（关键帧对齐，秒级完成）；剪辑编辑器支持波形拖选多区域批量提交',
     fields: [
       { key: 'from', label: '起始(秒)', type: 'text', default: '0' },
       { key: 'duration', label: '时长(秒)', type: 'text', default: '30' }
@@ -66,10 +132,21 @@ export const TOOL_DEFS: ToolDef[] = [
       // 数值白名单：params 来自渲染层，`-` 开头值会被 ffmpeg 当作选项
       const from = Math.min(86400 * 7, Math.max(0, Number(params.from) || 0))
       const duration = Math.min(86400 * 7, Math.max(0.1, Number(params.duration) || 30))
-      // 产物名带起始时间：多区域批量提交时互不覆盖
-      const out = join(outDir, `${baseName(input)}_trim_${Math.round(from)}s.mp3`)
+      // 容器兼容：流拷贝要求输出容器支持源编码。mp3 源 → mp3；
+      // m4a/aac → m4a；其余音频保持原扩展名；视频输入取音轨 → m4a
+      const ext = extname(input).toLowerCase()
+      const outExt =
+        ext === '.mp3'
+          ? '.mp3'
+          : ext === '.aac' || ext === '.m4a'
+            ? '.m4a'
+            : ['.flac', '.wav', '.ogg', '.opus'].includes(ext)
+              ? ext
+              : '.m4a'
+      // 产物名带起始时间（0.1s 精度）：多区域批量提交时互不覆盖（Math.round 会碰撞）
+      const out = join(outDir, `${baseName(input)}_trim_${from.toFixed(1)}s${outExt}`)
       return {
-        args: ['-y', '-ss', String(from), '-t', String(duration), '-i', input, '-c', 'copy', out],
+        args: ['-y', '-ss', String(from), '-t', String(duration), '-i', input, '-vn', '-c', 'copy', out],
         output: out
       }
     }
@@ -78,7 +155,7 @@ export const TOOL_DEFS: ToolDef[] = [
     id: 'trim-video',
     label: '视频剪辑',
     category: 'video',
-    desc: '按起止时间无损剪切视频片段（关键帧对齐，秒级完成），音轨直拷；渲染层剪辑编辑器可预览画面并拖选多个剪辑区域',
+    desc: '按起止时间无损剪切视频片段（关键帧对齐，秒级完成），音轨直拷；剪辑编辑器可预览画面并在时间轴拖选多个剪辑区域（支持多段合并输出）',
     fields: [
       { key: 'from', label: '起始(秒)', type: 'text', default: '0' },
       { key: 'duration', label: '时长(秒)', type: 'text', default: '30' }
@@ -86,7 +163,10 @@ export const TOOL_DEFS: ToolDef[] = [
     build: (input, outDir, params) => {
       const from = Math.min(86400 * 7, Math.max(0, Number(params.from) || 0))
       const duration = Math.min(86400 * 7, Math.max(0.1, Number(params.duration) || 30))
-      const out = join(outDir, `${baseName(input)}_clip_${Math.round(from)}s.mp4`)
+      // 容器兼容：mp4 系输入直拷 mp4；webm/mkv 等编码 mp4 容器装不下 → matroska
+      const ext = extname(input).toLowerCase()
+      const outExt = ['.mp4', '.m4v', '.mov'].includes(ext) ? '.mp4' : '.mkv'
+      const out = join(outDir, `${baseName(input)}_clip_${from.toFixed(1)}s${outExt}`)
       return {
         args: ['-y', '-ss', String(from), '-t', String(duration), '-i', input, '-c', 'copy', out],
         output: out
@@ -111,18 +191,26 @@ export const TOOL_DEFS: ToolDef[] = [
     id: 'metadata',
     label: '元数据编辑',
     category: 'audio',
-    desc: '写入/修改 ID3 标签（标题/艺术家/专辑），与音乐模块 LRC 联动',
+    desc: '写入/修改 ID3 标签（标题/艺术家/专辑），与音乐模块 LRC 联动。输出容器跟随源文件',
     fields: [
       { key: 'title', label: '标题', type: 'text' },
       { key: 'artist', label: '艺术家', type: 'text' },
       { key: 'album', label: '专辑', type: 'text' }
     ],
     build: (input, outDir, params) => {
-      const out = join(outDir, `${baseName(input)}_tagged.mp3`)
+      // 容器兼容：此前固定 .mp3 + 流拷贝，m4a/aac/flac/wav 源会因容器不支持而失败；
+      // 改为跟随源扩展名（未知类型回退 mp3 并重编码保证可用）
+      const ext = extname(input).toLowerCase()
+      const known = ['.mp3', '.m4a', '.aac', '.flac', '.wav', '.ogg', '.opus', '.mp4', '.mkv', '.mov', '.m4v']
+      const outExt = known.includes(ext) ? ext : '.mp3'
+      const out = join(outDir, `${baseName(input)}_tagged${outExt}`)
       const meta: string[] = []
       if (params.title) meta.push('-metadata', `title=${String(params.title)}`)
       if (params.artist) meta.push('-metadata', `artist=${String(params.artist)}`)
       if (params.album) meta.push('-metadata', `album=${String(params.album)}`)
+      if (outExt === '.mp3' && ext !== '.mp3') {
+        return { args: ['-y', '-i', input, ...meta, '-b:a', '320k', out], output: out }
+      }
       return { args: ['-y', '-i', input, ...meta, '-c', 'copy', out], output: out }
     }
   },
@@ -172,11 +260,15 @@ export const TOOL_DEFS: ToolDef[] = [
       { key: 'width', label: '宽度', type: 'text', default: '480' }
     ],
     build: (input, outDir, params) => {
+      // 数值白名单：from/duration/width 全部钳制，防注入 ffmpeg 选项 / 滤镜链
+      const from = Math.min(86400 * 7, Math.max(0, Number(params.from) || 0))
+      const duration = Math.min(600, Math.max(0.5, Number(params.duration) || 5))
+      const width = Math.min(1920, Math.max(64, Math.round(Number(params.width) || 480)))
       const out = join(outDir, `${baseName(input)}.gif`)
       return {
         args: [
-          '-y', '-ss', String(params.from ?? '0'), '-t', String(params.duration ?? '5'), '-i', input,
-          '-vf', `fps=12,scale=${String(params.width ?? '480')}:-1:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse`,
+          '-y', '-ss', String(from), '-t', String(duration), '-i', input,
+          '-vf', `fps=12,scale=${width}:-1:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse`,
           out
         ],
         output: out
@@ -232,7 +324,10 @@ export const TOOL_DEFS: ToolDef[] = [
     desc: '去掉视频中的音频流（画面无损直拷，秒级完成），输出无声视频',
     fields: [],
     build: (input, outDir) => {
-      const out = join(outDir, `${baseName(input)}_muted.mp4`)
+      // 容器兼容：直拷要求容器支持源编码（webm/mkv 源装不进 mp4 → matroska）
+      const ext = extname(input).toLowerCase()
+      const outExt = ['.mp4', '.m4v', '.mov'].includes(ext) ? '.mp4' : '.mkv'
+      const out = join(outDir, `${baseName(input)}_muted${outExt}`)
       return { args: ['-y', '-i', input, '-an', '-c:v', 'copy', out], output: out }
     }
   },
@@ -298,8 +393,14 @@ export const TOOL_DEFS: ToolDef[] = [
         垂直镜像: 'vflip'
       }
       const out = join(outDir, `${baseName(input)}_${suffix[String(params.mode ?? '')] ?? 'rot'}.mp4`)
+      // 容器兼容：非 mp4 系源（webm/mkv 的 vorbis/opus）直拷进 mp4 容器会失败 → 转 AAC
+      const mp4ish = ['.mp4', '.m4v', '.mov'].includes(extname(input).toLowerCase())
       return {
-        args: ['-y', '-i', input, '-vf', mode, '-c:v', 'libx264', '-crf', '23', '-c:a', 'copy', out],
+        args: [
+          '-y', '-i', input, '-vf', mode,
+          '-c:v', 'libx264', '-crf', '23', '-c:a', mp4ish ? 'copy' : 'aac',
+          out
+        ],
         output: out
       }
     }
@@ -321,11 +422,13 @@ export const TOOL_DEFS: ToolDef[] = [
     build: (input, outDir, params) => {
       const h = { '1080p': 1080, '720p': 720, '480p': 480, '360p': 360 }[String(params.height ?? '720p')] ?? 720
       const out = join(outDir, `${baseName(input)}_${h}p.mp4`)
+      // 容器兼容：非 mp4 系源（webm/mkv 的 vorbis/opus）直拷进 mp4 容器会失败 → 转 AAC
+      const mp4ish = ['.mp4', '.m4v', '.mov'].includes(extname(input).toLowerCase())
       return {
         args: [
           '-y', '-i', input,
           '-vf', `scale=-2:${h}:flags=lanczos`,
-          '-c:v', 'libx264', '-crf', '23', '-c:a', 'copy',
+          '-c:v', 'libx264', '-crf', '23', '-c:a', mp4ish ? 'copy' : 'aac',
           out
         ],
         output: out
@@ -340,7 +443,7 @@ export const TOOL_DEFS: ToolDef[] = [
     fields: [{ key: 'from', label: '时间点(秒)', type: 'text', default: '0' }],
     build: (input, outDir, params) => {
       const from = Math.min(86400 * 7, Math.max(0, Number(params.from) || 0))
-      const out = join(outDir, `${baseName(input)}_frame_${Math.round(from)}s.jpg`)
+      const out = join(outDir, `${baseName(input)}_frame_${from.toFixed(1)}s.jpg`)
       return {
         args: ['-y', '-ss', String(from), '-i', input, '-frames:v', '1', '-q:v', '2', out],
         output: out
@@ -406,6 +509,169 @@ export const TOOL_DEFS: ToolDef[] = [
     }
   },
   {
+    // T4：多文件无损拼接（concat demuxer，流拷贝）
+    id: 'concat',
+    label: '视频/音频拼接',
+    category: 'video',
+    desc: '把多个媒体文件按选择顺序无损拼接（concat demuxer，流拷贝，秒级）。要求各段编码参数一致；多选文件时顺序即拼接顺序',
+    multi: true,
+    fields: [],
+    build: (input, outDir, params) => {
+      const files = parseFilesParam(input, params)
+      const listPath = join(outDir, `${baseName(input)}_concat.txt`)
+      // concat 清单格式：file '<路径>'；单引号转义 ' → '\''
+      const content = files
+        .map((f) => `file '${f.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`)
+        .join('\n')
+      // 输出容器跟随第一段：音频扩展名用原容器，否则 mp4
+      const ext = extname(files[0] ?? input).toLowerCase()
+      const audioOut = ['.mp3', '.m4a', '.aac', '.flac', '.wav', '.ogg', '.opus'].includes(ext)
+      const out = join(outDir, `${baseName(input)}_concat${audioOut ? ext : '.mp4'}`)
+      return {
+        args: ['-y', '-f', 'concat', '-safe', '0', '-i', listPath, '-c', 'copy', out],
+        output: out,
+        prewrite: { path: listPath, content }
+      }
+    }
+  },
+  {
+    // T4：字幕烧录（第二输入 = 字幕文件）
+    id: 'subtitles-burn',
+    label: '字幕烧录',
+    category: 'video',
+    desc: '把 srt/ass/vtt 字幕硬压进画面（重编码输出）。需在参数中选择字幕文件；Windows 含特殊字符路径建议先移至纯英文路径',
+    extraFile: { key: 'subtitle', label: '字幕文件', accept: '.srt,.ass,.vtt' },
+    fields: [],
+    build: (input, outDir, params) => {
+      const sub = String(params.subtitle ?? '')
+      // ffmpeg 滤镜文件名转义：\ → /、: → \:、' → \'
+      const esc = sub.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'")
+      const filter = sub.toLowerCase().endsWith('.ass') ? `ass=${esc}` : `subtitles=${esc}`
+      const out = join(outDir, `${baseName(input)}_subbed.mp4`)
+      // 容器兼容：非 mp4 系源（webm/mkv 的 vorbis/opus）直拷进 mp4 容器会失败 → 转 AAC
+      const mp4ish = ['.mp4', '.m4v', '.mov'].includes(extname(input).toLowerCase())
+      return {
+        args: [
+          '-y', '-i', input, '-vf', filter,
+          '-c:v', 'libx264', '-crf', '23', '-c:a', mp4ish ? 'copy' : 'aac',
+          out
+        ],
+        output: out
+      }
+    }
+  },
+  {
+    // T6：多区域剪辑合并（filter_complex 单命令完成 trim+concat）
+    // hidden：不出现在工具导航，由剪辑编辑器「合并为单个文件」自动提交
+    id: 'region-concat',
+    label: '多区域剪辑（合并输出）',
+    category: 'video',
+    desc: '按剪辑编辑器标记的多个区域一次裁剪并无缝合并为单一输出（单命令 filter_complex；视频重编码 H.264，音频转 AAC）',
+    hidden: true,
+    fields: [],
+    build: (input, outDir, params) => {
+      const regions = parseRegions(params)
+      if (regions.length === 0) {
+        throw new Error('缺少有效剪辑区域（每段至少 0.5 秒，最多 50 段）')
+      }
+      const media = String(params.media ?? 'video') === 'audio' ? 'audio' : 'video'
+      if (media === 'audio') {
+        const chains = regions
+          .map((r, i) => `[0:a]atrim=start=${r.start}:end=${r.end},asetpts=PTS-STARTPTS[a${i}]`)
+          .join(';')
+        const fc = `${chains};${regions.map((_, i) => `[a${i}]`).join('')}concat=n=${regions.length}:v=0:a=1[aout]`
+        const out = join(outDir, `${baseName(input)}_clip_merged.mp3`)
+        return {
+          args: ['-y', '-i', input, '-filter_complex', fc, '-map', '[aout]', '-b:a', '320k', out],
+          output: out
+        }
+      }
+      const vchains = regions
+        .map((r, i) => `[0:v]trim=start=${r.start}:end=${r.end},setpts=PTS-STARTPTS[v${i}]`)
+        .join(';')
+      const achains = regions
+        .map((r, i) => `[0:a]atrim=start=${r.start}:end=${r.end},asetpts=PTS-STARTPTS[a${i}]`)
+        .join(';')
+      const sel = regions.map((_, i) => `[v${i}][a${i}]`).join('')
+      const fc = `${vchains};${achains};${sel}concat=n=${regions.length}:v=1:a=1[vout][aout]`
+      const out = join(outDir, `${baseName(input)}_clip_merged.mp4`)
+      return {
+        args: [
+          '-y', '-i', input, '-filter_complex', fc,
+          '-map', '[vout]', '-map', '[aout]',
+          '-c:v', 'libx264', '-crf', '23', '-c:a', 'aac',
+          out
+        ],
+        output: out
+      }
+    }
+  },
+  {
+    // T5：种子创建（node 运行时；输入可为单文件或整个目录）
+    id: 'torrent-create',
+    label: '种子创建',
+    category: 'common',
+    desc: '把本地文件或整个文件夹制作为 .torrent（逐片 SHA1，输出 infohash/磁力信息）。Tracker 可留空（纯 DHT 分发）；目录模式递归打包全部文件',
+    fields: [{ key: 'announce', label: 'Tracker URL（可选）', type: 'text', default: '' }],
+    runtime: 'node',
+    build: () => ({ args: [], output: '' }),
+    compute: async (inputPath, outDir, params) => {
+      const { createTorrent } = await import('./torrent/create')
+      const r = await createTorrent(
+        inputPath,
+        join(outDir, `${basename(inputPath)}.torrent`),
+        { announce: String(params.announce ?? '').trim() || undefined }
+      )
+      log.info(`torrent ${r.outPath} infohash=${r.infohash} files=${r.fileCount}`)
+      return r.outPath
+    }
+  },
+  {
+    // T5：从已有 .torrent 提取磁力链接（infohash + 名称 + tracker）
+    id: 'torrent-magnet',
+    label: '种子转磁力',
+    category: 'common',
+    desc: '从 .torrent 提取磁力链接（infohash + 名称 + Tracker）并输出为 txt，秒级完成',
+    fields: [],
+    runtime: 'node',
+    build: () => ({ args: [], output: '' }),
+    compute: async (inputPath, outDir) => {
+      const { magnetFromTorrent } = await import('./torrent/create')
+      if (!/\.torrent$/i.test(inputPath)) throw new Error('输入必须是 .torrent 文件')
+      const magnet = await magnetFromTorrent(inputPath)
+      const out = join(outDir, `${baseName(inputPath)}_magnet.txt`)
+      await writeFile(out, magnet + '\n', 'utf8')
+      return out
+    }
+  },
+  {
+    // T5：校验和计算（node 运行时，流式 hash 不占内存）
+    id: 'checksum',
+    label: '校验和计算',
+    category: 'common',
+    desc: '计算文件 SHA256 / SHA1 / MD5 校验和并输出校验文件（内容格式与 sha256sum 一致，可直接用于 -c 校验）',
+    fields: [
+      { key: 'algorithm', label: '算法', type: 'select', options: ['sha256', 'sha1', 'md5'], default: 'sha256' }
+    ],
+    runtime: 'node',
+    build: () => ({ args: [], output: '' }),
+    compute: async (inputPath, outDir, params) => {
+      const { createHash } = await import('crypto')
+      const { createReadStream } = await import('fs')
+      const { pipeline } = await import('stream/promises')
+      const { writeFile } = await import('fs/promises')
+      const algo = ['sha256', 'sha1', 'md5'].includes(String(params.algorithm))
+        ? String(params.algorithm)
+        : 'sha256'
+      const hash = createHash(algo)
+      await pipeline(createReadStream(inputPath), hash) // 流式：大文件不进内存
+      const digest = hash.digest('hex')
+      const out = join(outDir, `${baseName(inputPath)}.${algo}`)
+      await writeFile(out, `${digest}  ${basename(inputPath)}\n`, 'utf8')
+      return out
+    }
+  },
+  {
     // Backlog：神经网络音轨分离 L2（可选增强组件，不随包分发）
     // 遵循 §4.7 "零内置模型"原则：Demucs 运行时与模型（+200MB）由用户自装；
     // 缺席时给出明确出口动作，不静默失败。
@@ -433,7 +699,9 @@ export class ToolboxRunner {
   private queue: Array<() => void> = []
   private listeners = new Set<(e: ToolEvent) => void>()
   /** 运行中的 ffmpeg 进程（按任务 id 索引，支持取消） */
-  private procs = new Map<string, { proc: ChildProcess; output: string }>()
+  private procs = new Map<string, { proc: ChildProcess; output: string; tool: string }>()
+  /** node 运行时任务（纯 JS compute 无法强杀，登记取消标记 + 产物路径） */
+  private nodeTasks = new Map<string, { output: string; cancelled: boolean; tool: string }>()
 
   onEvent(cb: (e: ToolEvent) => void): () => void {
     this.listeners.add(cb)
@@ -447,15 +715,33 @@ export class ToolboxRunner {
   /** 取消运行中的工具任务：杀 ffmpeg 进程并删除半成品产物 */
   cancel(taskId: string): boolean {
     const entry = this.procs.get(taskId)
-    if (!entry) return false
-    this.procs.delete(taskId)
-    entry.proc.kill()
-    // 半成品清理：ffmpeg 单文件产物；demucs 为目录产物 → recursive 兼容两者
-    import('fs/promises').then(({ rm }) =>
-      rm(entry.output, { recursive: true, force: true }).catch(() => {})
-    )
-    log.info(`tool task ${taskId} cancelled, partial output removed: ${entry.output}`)
-    return true
+    if (entry) {
+      this.procs.delete(taskId)
+      entry.proc.kill()
+      // 半成品清理：ffmpeg 单文件产物；demucs 为目录产物 → recursive 兼容两者
+      import('fs/promises').then(({ rm }) =>
+        rm(entry.output, { recursive: true, force: true }).catch(() => {})
+      )
+      log.info(`tool task ${taskId} cancelled, partial output removed: ${entry.output}`)
+      return true
+    }
+    // P2 修复：node 运行时任务（torrent-create/checksum/torrent-magnet）此前不在
+    // 进程表 → cancel 恒 false，大目录任务无法取消。登记后标记取消 + 清产物
+    const node = this.nodeTasks.get(taskId)
+    if (node) {
+      node.cancelled = true
+      // ⚠ 只删真实产物（node.output 为空 = compute 未完成，产物未知）。
+      // 严禁 rm 整个 outDir——那会连带删除该工具的历史产物
+      if (node.output) {
+        import('fs/promises').then(({ rm }) =>
+          rm(node.output, { recursive: true, force: true }).catch(() => {})
+        )
+      }
+      this.emit({ taskId, tool: node.tool, status: 'failed', message: '任务已取消' })
+      log.info(`tool(node) task ${taskId} cancelled`)
+      return true
+    }
+    return false
   }
 
   async submit(input: ToolCreateInput, taskId = ''): Promise<string> {
@@ -463,9 +749,78 @@ export class ToolboxRunner {
     if (input.tool === 'stem-demucs') return this.submitDemucs(input, taskId)
     const def = TOOL_DEFS.find((d) => d.id === input.tool)
     if (!def) throw new Error(`未知工具：${input.tool}`)
+    // T4：附加文件必选校验（如字幕烧录的字幕文件）
+    if (def.extraFile && !String(input.params[def.extraFile.key] ?? '').trim()) {
+      throw new Error(`请选择${def.extraFile.label}`)
+    }
     const outDir = join(input.saveDir ?? '.', '工具箱输出', def.label)
-    await mkdir(outDir, { recursive: true })
-    const { args, output } = def.build(input.sourcePath, outDir, input.params)
+    try {
+      await mkdir(outDir, { recursive: true })
+    } catch (err) {
+      const message = `无法创建输出目录：${fsErrToChinese(err)}`
+      this.emit({ taskId, tool: input.tool, status: 'failed', message })
+      log.error(`tool ${input.tool} mkdir failed: ${outDir}`, { error: String(err) })
+      throw new Error(message)
+    }
+    // T5：node 运行时工具（纯 JS，不经 ffmpeg CLI）
+    if (def.runtime === 'node' && def.compute) {
+      if (this.active >= MAX_TOOL_CONCURRENT) {
+        await new Promise<void>((r) => this.queue.push(r))
+      } else {
+        this.active++
+      }
+      this.emit({ taskId, tool: input.tool, status: 'running', message: '处理中' })
+      // 登记 node 任务（支持取消）；output 置空——取消时只删真实产物，
+      // 严禁 rm 整个 outDir（会连带删除历史产物）
+      const nodeEntry = { output: '', cancelled: false, tool: input.tool }
+      if (taskId) this.nodeTasks.set(taskId, nodeEntry)
+      try {
+        const output = await def.compute(input.sourcePath, outDir, input.params)
+        if (nodeEntry.cancelled) {
+          // 取消发生在 compute 进行中：删掉刚产出的产物再报「已取消」
+          await rm(output, { force: true }).catch(() => {})
+          throw new Error('任务已取消')
+        }
+        nodeEntry.output = output
+        const size = await stat(output).then((s) => s.size).catch(() => 0)
+        this.emit({ taskId, tool: input.tool, status: 'completed', message: output, bytes: size })
+        return output
+      } catch (err) {
+        if (!nodeEntry.cancelled) {
+          const message = fsErrToChinese(err)
+          this.emit({ taskId, tool: input.tool, status: 'failed', message })
+          log.error(`tool(node) ${input.tool} failed`, { error: String(err) })
+          throw new Error(message)
+        }
+        throw err
+      } finally {
+        this.nodeTasks.delete(taskId)
+        // 额度同步移交被唤醒者（同 ffmpeg 路径：先减后移，防插队突破并发上限）
+        this.active--
+        const next = this.queue.shift()
+        if (next) {
+          this.active++
+          next()
+        }
+      }
+    }
+    // 参数构建失败（如多区域剪辑无有效区域）也必须广播 failed 事件，不静默
+    let built: ReturnType<ToolDef['build']>
+    try {
+      built = def.build(input.sourcePath, outDir, input.params)
+    } catch (err) {
+      this.emit({
+        taskId,
+        tool: input.tool,
+        status: 'failed',
+        message: err instanceof Error ? err.message : String(err)
+      })
+      throw err
+    }
+    const { args, output, prewrite } = built
+    if (prewrite) {
+      await writeFile(prewrite.path, prewrite.content, 'utf8')
+    }
     log.info(`tool ${input.tool} → ${output}`)
 
     // 信号量：≤2 并发（§4.7，不计入下载并发）；排队者额度由释放方同步移交
@@ -476,14 +831,16 @@ export class ToolboxRunner {
     }
     this.emit({ taskId, tool: input.tool, status: 'running', message: '处理中' })
     try {
-      await this.runFfmpeg(args, output, taskId)
+      await this.runFfmpeg(args, output, taskId, input.tool)
       const size = await stat(output).then((s) => s.size).catch(() => 0)
       this.emit({ taskId, tool: input.tool, status: 'completed', message: output, bytes: size })
+      log.info(`tool ${input.tool} completed: ${output} (${size} bytes)`)
       return output
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       this.emit({ taskId, tool: input.tool, status: 'failed', message })
-      throw err
+      log.error(`tool ${input.tool} failed: ${message}`)
+      throw new Error(message)
     } finally {
       // P2 加固：额度同步移交被唤醒者（新 submit 在间隙内插队会突破并发上限）
       this.active--
@@ -499,7 +856,14 @@ export class ToolboxRunner {
   /** Backlog：Demucs 神经网络音轨分离（可选增强组件执行器） */
   private async submitDemucs(input: ToolCreateInput, taskId: string): Promise<string> {
     const outDir = join(input.saveDir ?? '.', '工具箱输出', '音轨分离')
-    await mkdir(outDir, { recursive: true })
+    try {
+      await mkdir(outDir, { recursive: true })
+    } catch (err) {
+      const message = `无法创建输出目录：${fsErrToChinese(err)}`
+      this.emit({ taskId, tool: input.tool, status: 'failed', message })
+      log.error(`stem-demucs mkdir failed: ${outDir}`, { error: String(err) })
+      throw new Error(message)
+    }
     const mode = String(input.params.mode ?? '两轨(人声/伴奏)')
     const model = mode.startsWith('六轨') ? 'htdemucs_6s' : 'htdemucs'
     const args = [
@@ -509,7 +873,17 @@ export class ToolboxRunner {
       '--out', outDir,
       input.sourcePath
     ]
-    const exe = String(input.params.demucsPath ?? '').trim() || 'demucs'
+    // 安全校验：demucsPath 来自渲染层，basename 必须为 demucs（防渲染层借道执行任意二进制）
+    const exeRaw = String(input.params.demucsPath ?? '').trim()
+    let exe = 'demucs'
+    if (exeRaw) {
+      if (!/^demucs(\.exe)?$/i.test(basename(exeRaw))) {
+        const message = 'demucs 可执行文件路径无效：文件名必须为 demucs 或 demucs.exe'
+        this.emit({ taskId, tool: input.tool, status: 'failed', message })
+        throw new Error(message)
+      }
+      exe = exeRaw
+    }
 
     // 排队者额度由释放方同步移交（同 submit）
     if (this.active >= MAX_TOOL_CONCURRENT) {
@@ -521,11 +895,13 @@ export class ToolboxRunner {
     try {
       const output = await this.runDemucs(exe, args, join(outDir, model, baseName(input.sourcePath)), taskId)
       this.emit({ taskId, tool: input.tool, status: 'completed', message: output })
+      log.info(`stem-demucs completed: ${output}`)
       return output
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
+      const message = fsErrToChinese(err)
       this.emit({ taskId, tool: input.tool, status: 'failed', message })
-      throw err
+      log.error(`stem-demucs failed: ${message}`)
+      throw new Error(message)
     } finally {
       // P2 加固：同 submit——额度同步移交被唤醒者
       this.active--
@@ -547,7 +923,7 @@ export class ToolboxRunner {
         reject(this.demucsMissingHint(err))
         return
       }
-      this.procs.set(taskId, { proc, output: outPath })
+      this.procs.set(taskId, { proc, output: outPath, tool: 'stem-demucs' })
       let stderrTail = ''
       proc.stderr?.on('data', (d: Buffer) => {
         stderrTail = (stderrTail + String(d)).slice(-2000)
@@ -586,24 +962,40 @@ export class ToolboxRunner {
     )
   }
 
-  private async runFfmpeg(args: string[], output: string, taskId: string): Promise<void> {
+  private async runFfmpeg(
+    args: string[],
+    output: string,
+    taskId: string,
+    tool: string
+  ): Promise<void> {
     await ensureVerified('ffmpeg') // TOFU 强制校验
     const ffmpeg = toolPath('ffmpeg')
     return new Promise((resolve, reject) => {
       const proc = spawn(ffmpeg, args, { windowsHide: true })
-      this.procs.set(taskId, { proc, output })
+      this.procs.set(taskId, { proc, output, tool })
+      let stderrTail = ''
       proc.stderr?.on('data', (d: Buffer) => {
-        const m = /time=(\d+):(\d+):(\d+\.\d+)/.exec(String(d))
+        const text = String(d)
+        stderrTail = (stderrTail + text).slice(-2000)
+        const m = /time=(\d+):(\d+):(\d+\.\d+)/.exec(text)
         if (m) {
           const seconds = Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3])
-          this.emit({ taskId, tool: '', status: 'progress', seconds })
+          this.emit({ taskId, tool, status: 'progress', seconds })
         }
       })
       proc.on('exit', (code) => {
         this.procs.delete(taskId)
+        // 取消（kill）：不报「退出码」误导用户
+        if (proc.killed) {
+          reject(new Error('任务已取消'))
+          return
+        }
+        // 原生 stderr 尾行一并带出（容器不支持等诊断上下文）
+        const tail = stderrTail.trim().split('\n').pop() ?? ''
+        const hint = tail && !tail.includes('time=') ? `：${tail.slice(-200)}` : ''
         stat(output)
-          .then(() => (code === 0 ? resolve() : reject(new Error(`ffmpeg 退出码 ${code}`))))
-          .catch(() => reject(new Error(`ffmpeg 退出码 ${code}，产物未生成`)))
+          .then(() => (code === 0 ? resolve() : reject(new Error(`ffmpeg 退出码 ${code}${hint}`))))
+          .catch(() => reject(new Error(`ffmpeg 退出码 ${code}，产物未生成${hint}`)))
       })
       proc.on('error', (err) => {
         this.procs.delete(taskId)

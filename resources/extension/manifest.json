@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "OmniGet 接管下载",
+  "version": "1.0.0",
+  "description": "把浏览器下载接管到本地 OmniGet 下载器（右键链接发送 / 开启后自动拦截下载）。端口与令牌见 OmniGet 设置 → 远程/扩展。",
+  "permissions": ["downloads", "storage", "contextMenus"],
+  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_popup": "popup.html", "default_title": "OmniGet" },
+  "icons": {}
+}

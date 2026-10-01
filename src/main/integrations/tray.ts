@@ -229,7 +229,8 @@ export function startClipboardWatcher(onSource: (source: string) => void): void 
     last = text
     const s = sniff(text)
     if (!s || s.type === 'music') return // 仅磁力/种子路径/URL 触发提示
-    if (!dedupe.check(text.slice(0, 120))) return
+    // P3 修复：去重键用完整文本——前 120 字符截断会让长 URL 前缀相同的两条不同链接被误判重复
+    if (!dedupe.check(text)) return
     log.info(`clipboard detected ${s.type} link`)
     const win = BrowserWindow.getAllWindows()[0]
     if (win) {

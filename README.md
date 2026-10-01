@@ -72,7 +72,7 @@ $env:ELECTRON_MIRROR='https://npmmirror.com/mirrors/electron/'; node node_module
 ## 验证
 
 ```bash
-npm test                                    # 33 个单测（状态机/torrent/嗅探/事件合并等）
+npm test                                    # 39 个单测（状态机/torrent/嗅探/事件合并等）
 npx tsx --tsconfig tsconfig.node.json scripts/e2e-aria2.ts   # aria2 端到端（真实 sidecar）
 ```
 

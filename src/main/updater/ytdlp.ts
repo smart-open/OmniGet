@@ -107,7 +107,9 @@ export async function updateYtDlp(): Promise<UpdateResult> {
     await unlink(tmpSums).catch(() => {})
 
     // 4. 原子替换（备份旧文件以便回滚）；Unix 需补回可执行位
-    await copyFile(target, backup).catch(() => {})
+    await copyFile(target, backup).catch((err) =>
+      log.warn('备份旧 yt-dlp 失败——本次更新将无法回滚', { error: String(err) })
+    )
     await unlink(target).catch(() => {})
     await rename(tmpExe, target)
     if (process.platform !== 'win32') await chmod(target, 0o755).catch(() => {})
@@ -118,8 +120,12 @@ export async function updateYtDlp(): Promise<UpdateResult> {
     log.info(`yt-dlp updated to ${release.tag_name}`)
     return { ok: true, version: release.tag_name }
   } catch (err) {
-    // 回滚：还原备份
-    await copyFile(backup, target).catch(() => {})
+    // 回滚：还原备份（回滚本身失败必须留痕——target 可能处于缺失/损坏状态）
+    await copyFile(backup, target).catch((rollbackErr) =>
+      log.error('yt-dlp 更新回滚失败，当前二进制可能损坏，建议重新更新或重装', {
+        error: String(rollbackErr)
+      })
+    )
     const message = err instanceof Error ? err.message : String(err)
     log.error('yt-dlp update failed', message)
     return { ok: false, error: message }
