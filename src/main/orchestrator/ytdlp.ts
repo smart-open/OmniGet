@@ -3,10 +3,10 @@
 // pause = SIGTERM（保留 .part 分片缓存）；resume = 同参数重新 spawn 续传
 // 同时承担健康探测（--version）与热更后的二进制重载（M3-9）
 
-import { spawn, type ChildProcess } from 'child_process'
+import { type ChildProcess } from 'child_process'
 import { createLogger } from '../logger'
 import { binaryPath, checkBinary, ensureVerified } from './binaries'
-import { terminateTree } from './proc'
+import { spawnTreeAware, terminateTree } from './proc'
 
 const log = createLogger('ytdlp')
 
@@ -59,13 +59,20 @@ export class YtDlpSupervisor {
 
   private exec(args: string[], timeoutMs: number): Promise<string> {
     return new Promise((resolve, reject) => {
-      const proc = spawn(this.bin(), args, { windowsHide: true })
+      const proc = spawnTreeAware(this.bin(), args)
       let out = ''
       const timer = setTimeout(() => {
-        proc.kill('SIGKILL')
+        // H3 修复：解析/探测路径同样用树终止——单进程 SIGKILL 不级联 ffmpeg 等子进程
+        terminateTree(proc, 2000)
         reject(new Error('yt-dlp 执行超时'))
       }, timeoutMs)
       proc.stdout?.on('data', (d: Buffer) => (out += String(d)))
+      // H3 修复：stderr 必须持续消费（spawn 默认 stdio 下 stderr 为 pipe），
+      // 部分站点 stderr 输出量大，64KB 管道写满会阻塞子进程直到被超时误杀
+      let errTail = ''
+      proc.stderr?.on('data', (d: Buffer) => {
+        errTail = (errTail + String(d)).slice(-1500)
+      })
       proc.on('exit', () => {
         clearTimeout(timer)
         resolve(out)
@@ -83,7 +90,7 @@ export class YtDlpSupervisor {
 
   /** 启动一个下载任务（长驻进程，逐行回调） */
   spawnTask(taskId: string, args: string[], opts: YtDlpRunOptions): YtDlpRunHandle {
-    const proc = spawn(this.bin(), args, { windowsHide: true })
+    const proc = spawnTreeAware(this.bin(), args)
     this.procs.set(taskId, proc)
     log.info(`spawn ${taskId}: yt-dlp ${args.join(' ').slice(0, 120)}…`)
 
@@ -123,8 +130,9 @@ export class YtDlpSupervisor {
 
     return {
       taskId,
-      kill: (signal = 'SIGTERM') => {
-        if (proc.exitCode === null) proc.kill(signal)
+      kill: () => {
+        // L2 修复：与 pause/killAll 口径一致，走树终止防 ffmpeg 孤儿
+        if (proc.exitCode === null) terminateTree(proc, 8000)
       }
     }
   }

@@ -26,6 +26,7 @@ class Logger {
   private scope: string
   private minLevel: number
   private static logDir: string | null = null
+  private static pruned = false
 
   constructor(scope = 'app') {
     this.scope = scope
@@ -33,7 +34,26 @@ class Logger {
   }
 
   static init(): void {
+    if (Logger.logDir === resolveLogDir()) return // 幂等：不再重复重置全局字段
     Logger.logDir = resolveLogDir()
+  }
+
+  /** L6 修复：日志轮转——按天分文件但从不清理会让 logs/ 无限膨胀，保留最近 14 天 */
+  static pruneOldLogs(): void {
+    if (Logger.pruned || !Logger.logDir) return
+    Logger.pruned = true
+    void (async () => {
+      const { readdir, rm } = await import('fs/promises')
+      const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000
+      const entries = await readdir(Logger.logDir!).catch(() => [] as string[])
+      for (const f of entries) {
+        const m = /^main-(\d{4}-\d{2}-\d{2})\.log$/.exec(f)
+        if (!m) continue
+        if (new Date(`${m[1]}T00:00:00Z`).getTime() < cutoff) {
+          await rm(join(Logger.logDir!, f), { force: true }).catch(() => {})
+        }
+      }
+    })().catch(() => {})
   }
 
 
@@ -84,5 +104,6 @@ class Logger {
 
 export function createLogger(scope: string): Logger {
   Logger.init()
+  Logger.pruneOldLogs()
   return new Logger(scope)
 }

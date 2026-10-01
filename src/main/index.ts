@@ -137,6 +137,22 @@ async function bootstrap(): Promise<void> {
   registerPreviewHandler() // omniget-preview: 试听流协议（F1，主进程内引擎）
   createWindow() // IPC/协议全部就绪后再创建窗口（渲染层 invoke 不再撞上未注册通道）
 
+  // L5 修复：旧数据迁移失败必须让用户可见（此前只有 console 留痕，用户视角是历史数据消失）
+  const { legacyMigrationErrors } = await import('./env')
+  if (legacyMigrationErrors.length > 0) {
+    // 延迟到渲染层订阅建立后广播（窗口刚创建，渲染层尚未挂载监听）
+    setTimeout(() => {
+      void import('./ipc').then(({ broadcastNotices }) =>
+        broadcastNotices([
+          {
+            level: 'warning',
+            message: `历史数据迁移失败：${legacyMigrationErrors.join('；')}。旧记录可能无法保留，详见日志`
+          }
+        ])
+      )
+    }, 5000)
+  }
+
   // M1 编排：任务恢复 → aria2 监督器 → 适配器 → 管理器
   const supervisor = new Aria2Supervisor(ports.aria2RpcPort, undefined, {
     onOnline: (port) => {
@@ -222,10 +238,15 @@ async function bootstrap(): Promise<void> {
   // P2 修复：before-quit 必须等待 supervisor.shutdown() 完成——原 void 直调时
   // Electron 可能在 taskkill 兜底执行前就退出，aria2c 孤儿进程占端口/继续上传。
   // preventDefault + 显式 app.exit(0) 保证清理链跑完再退。
-  let quitCleanupDone = false
+  let quitCleanupStarted = false
   app.on('before-quit', (e) => {
-    if (quitCleanupDone) return
-    quitCleanupDone = true
+    // L5 修复：标志在异步清理完成后才落位——二次触发 quit（before-quit 再入）
+    // 期间若已置 done 会跳过 preventDefault，supervisor.shutdown() 未完成即退出
+    if (quitCleanupStarted) {
+      e.preventDefault() // 清理链在跑：拦住，由 app.exit(0) 收尾
+      return
+    }
+    quitCleanupStarted = true
     e.preventDefault()
     markQuitting()
     manager.stopPolling()

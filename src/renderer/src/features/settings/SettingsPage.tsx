@@ -1,6 +1,6 @@
 // 设置页（M4-11/15/16 + 基础设置）：内部菜单分区
 // 模板 / 下载 / Tracker / 更新 / 说明
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ArrowClockwise, CheckCircle, FolderOpen, Trash } from '@phosphor-icons/react'
 import type { AppUpdateCheck, AdapterScriptInfo, ScheduleRule, TrackerEntry } from '@shared/types'
 import { Button } from '../../components/ui'
@@ -23,10 +23,18 @@ function KeysSection({ onOpenHelp }: { onOpenHelp?: () => void }) {
   const [overrides, setOverrides] = useState<Keymap>({})
   const [recording, setRecording] = useState<ShortcutAction | null>(null)
   const [tip, setTip] = useState('')
+  const tipTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const flashToast = (msg: string): void => {
     setTip(msg)
-    setTimeout(() => setTip(''), 2500)
+    if (tipTimer.current) clearTimeout(tipTimer.current)
+    tipTimer.current = setTimeout(() => setTip(''), 2500)
   }
+  useEffect(
+    () => () => {
+      if (tipTimer.current) clearTimeout(tipTimer.current)
+    },
+    []
+  )
 
   useEffect(() => {
     void window.omniget.settingsGet('ui.keymap').then((v) => setOverrides(parseKeymap(v)))
@@ -57,7 +65,10 @@ function KeysSection({ onOpenHelp }: { onOpenHelp?: () => void }) {
       const next = { ...overrides, [recording]: k }
       setOverrides(next)
       setRecording(null)
-      void window.omniget.settingsSet('ui.keymap', next)
+      // UX 硬性标准：持久化失败必须可见反馈（此前静默，重启后新键位丢失）
+      window.omniget
+        .settingsSet('ui.keymap', next)
+        .catch((err) => toastError('保存快捷键', err))
       window.dispatchEvent(new Event('keymap-changed'))
     }
     window.addEventListener('keydown', onKey, { capture: true })
@@ -161,7 +172,10 @@ function AppearanceSection() {
   const change = (id: ThemeId): void => {
     setTheme(id)
     applyTheme(id)
-    void window.omniget.settingsSet('ui.theme', id)
+    // UX 硬性标准：持久化失败必须可见反馈
+    window.omniget
+      .settingsSet('ui.theme', id)
+      .catch((err) => toastError('保存主题设置', err))
     // P2 修复：App 侧栏主题菜单是另一份本地 state——广播事件保持双端同步
     window.dispatchEvent(new CustomEvent('app:theme-changed', { detail: id }))
   }
@@ -319,6 +333,8 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
   >([])
   const [engineFetching, setEngineFetching] = useState(false)
   const [engineMirror, setEngineMirror] = useState('')
+  /** M11：设置加载完成前不渲染表单——输入框显示默认值时点保存会把默认值当真值落盘 */
+  const [settingsLoaded, setSettingsLoaded] = useState(false)
   const t = useI18n((s) => s.t)
 
   useEffect(() => {
@@ -334,9 +350,11 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
       setBridgeInfo(await window.omniget.getBridgeInfo())
       setEngineList(await window.omniget.getEngineStatus())
       setEngineMirror(String((await window.omniget.settingsGet('engines.mirror')) ?? ''))
+      setSettingsLoaded(true)
     })().catch((err) => {
       // P2 修复：任一 await 失败不得静默中断后续初始化（页面停留默认值且无提示）
       toastError('加载设置', err)
+      setSettingsLoaded(true)
     })
   }, [])
 
@@ -369,8 +387,16 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
 
   function flash(msg: string): void {
     setSaved(msg)
-    setTimeout(() => setSaved(''), 2500)
+    if (flashTimer.current) clearTimeout(flashTimer.current)
+    flashTimer.current = setTimeout(() => setSaved(''), 2500)
   }
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(
+    () => () => {
+      if (flashTimer.current) clearTimeout(flashTimer.current)
+    },
+    []
+  )
 
   const reloadScripts = (): Promise<void> =>
     window.omniget
@@ -380,6 +406,17 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
 
   const reloadTrackers = (): Promise<void> =>
     window.omniget.listTrackers().then(setTrackers)
+
+  if (!settingsLoaded) {
+    return (
+      <main className="h-full overflow-y-auto">
+        <div className="mx-auto max-w-[760px] px-8 py-6">
+          <h2 className="mb-4 text-sm font-medium">设置</h2>
+          <p className="animate-pulse text-xs text-text-3">设置加载中…</p>
+        </div>
+      </main>
+    )
+  }
 
   return (
     <main className="h-full overflow-y-auto">
@@ -573,7 +610,10 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                     size="xs"
                     variant="danger"
                     icon={<Trash size={11} />}
-                    onClick={() => setRules(rules.filter((_, j) => j !== i))}
+                    onClick={() => {
+                      setRules(rules.filter((_, j) => j !== i))
+                      flash('时段已移除（点「保存计划」生效）')
+                    }}
                   >
                     删除
                   </Button>

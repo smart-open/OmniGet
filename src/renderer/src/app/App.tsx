@@ -136,7 +136,10 @@ export default function App() {
     setTheme(id)
     setThemeMenu(false)
     applyTheme(id)
-    void window.omniget.settingsSet('ui.theme', id)
+    // UX 硬性标准：持久化失败必须可见反馈
+    window.omniget
+      .settingsSet('ui.theme', id)
+      .catch((err) => toastError('保存主题设置', err))
   }
 
   // 托盘/剪贴板/协议唤起 → 打开新建任务（M1-12）
@@ -211,44 +214,49 @@ export default function App() {
       } else if (k === keys.help) {
         e.preventDefault()
         setShowHelp((v) => !v)
-      } else if (/^ctrl\+[1-6]$/.test(k) && k === keys[`group${k.slice(5)}` as ShortcutAction]) {
-        e.preventDefault()
-        const flat = NAV_GROUPS.flatMap((g) => g.items)
-        const idx = Number(k.slice(5)) - 1
-        if (flat[idx]) setActive(flat[idx].id)
-      } else if (k === keys['pause-toggle']) {
-        const sel = selRef.current
-        if (!sel) return
-        e.preventDefault()
-        const t = tasksRef.current.get(sel)
-        if (!t) return
-        // P3 修复：completed/failed/parsing 等状态不可暂停——守卫后再发，防无意义报错
-        if (t.status !== 'running' && t.status !== 'queued' && t.status !== 'paused') return
-        const action = t.status === 'paused' ? 'resume' : 'pause'
-        void window.omniget
-          .controlTask({ taskId: sel, action })
-          .then(() => toast(action === 'pause' ? '任务已暂停' : '任务已继续下载', 'success'))
-          .catch((err) => toastError('任务操作', err)) // P1 修复：失败不得静默
-      } else if (k === keys.trash) {
-        const sel = selRef.current
-        if (!sel) return
-        e.preventDefault()
-        const t = tasksRef.current.get(sel)
-        // 移入回收站属删除类操作：二次确认（可恢复，用轻量确认）
-        void confirmAction({
-          title: '移入回收站',
-          message: `「${t?.name || sel}」将被移入回收站，可在回收站中恢复。`,
-          confirmLabel: '移入回收站'
-        }).then((ok) => {
-          if (!ok) return
+      } else {
+        // 分组切换：按键来自 keymap（用户可改绑），不得硬编码 ctrl+N——否则改绑后永不触发
+        const groupActions: ShortcutAction[] = ['group1', 'group2', 'group3', 'group4', 'group5', 'group6']
+        const hit = groupActions.find((a) => k === keys[a])
+        if (hit) {
+          e.preventDefault()
+          const flat = NAV_GROUPS.flatMap((g) => g.items)
+          const idx = Number(hit.slice(5)) - 1
+          if (flat[idx]) setActive(flat[idx].id)
+        } else if (k === keys['pause-toggle']) {
+          const sel = selRef.current
+          if (!sel) return
+          e.preventDefault()
+          const t = tasksRef.current.get(sel)
+          if (!t) return
+          // P3 修复：completed/failed/parsing 等状态不可暂停——守卫后再发，防无意义报错
+          if (t.status !== 'running' && t.status !== 'queued' && t.status !== 'paused') return
+          const action = t.status === 'paused' ? 'resume' : 'pause'
           void window.omniget
-            .controlTask({ taskId: sel, action: 'remove' })
-            .then(() => {
-              toast('任务已移入回收站', 'success')
-              return reload('all')
-            })
-            .catch((err) => toastError('移入回收站', err))
-        })
+            .controlTask({ taskId: sel, action })
+            .then(() => toast(action === 'pause' ? '任务已暂停' : '任务已继续下载', 'success'))
+            .catch((err) => toastError('任务操作', err)) // P1 修复：失败不得静默
+        } else if (k === keys.trash) {
+          const sel = selRef.current
+          if (!sel) return
+          e.preventDefault()
+          const t = tasksRef.current.get(sel)
+          // 移入回收站属删除类操作：二次确认（可恢复，用轻量确认）
+          void confirmAction({
+            title: '移入回收站',
+            message: `「${t?.name || sel}」将被移入回收站，可在回收站中恢复。`,
+            confirmLabel: '移入回收站'
+          }).then((ok) => {
+            if (!ok) return
+            void window.omniget
+              .controlTask({ taskId: sel, action: 'remove' })
+              .then(() => {
+                toast('任务已移入回收站', 'success')
+                return reload('all')
+              })
+              .catch((err) => toastError('移入回收站', err))
+          })
+        }
       }
     }
     window.addEventListener('keydown', onKey)

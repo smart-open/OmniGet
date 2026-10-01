@@ -207,7 +207,8 @@ export async function fetchJson<T = unknown>(
         signal: merged,
         dispatcher: dispatcherFor(url)
       })
-      if (res.ok) return (await res.json()) as T
+      // M5 修复：响应体大小上限——恶意/被投毒镜像可返回数百 MB JSON 撑爆主进程内存
+      if (res.ok) return (await readBodyCapped(res, 8 * 1024 * 1024, url).then((s) => JSON.parse(s))) as T
       if (!RETRY_STATUS.has(res.status)) throw new NonRetryableError(`接口异常（HTTP ${res.status}）`)
       // 5xx：消费掉旧响应体再重试（防 undici socket 挂起）
       await res.body?.cancel().catch(() => {})
@@ -287,7 +288,29 @@ export async function getText(url: string, headers?: Record<string, string>, opt
     throw new Error(humanizeNetworkError(err, url))
   }
   if (!res.ok) throw new Error(`接口异常（HTTP ${res.status}）`)
-  return res.text()
+  // M5：歌词等文本同样限 2MB
+  return readBodyCapped(res, 2 * 1024 * 1024, url)
+}
+
+/** M5：按累计字节截断读取响应体（超限即拒绝），防内存 DoS */
+async function readBodyCapped(
+  res: Awaited<ReturnType<typeof undiciFetch>>,
+  capBytes: number,
+  url: string
+): Promise<string> {
+  const decoder = new TextDecoder()
+  let total = 0
+  const parts: string[] = []
+  for await (const chunk of res.body as AsyncIterable<Uint8Array>) {
+    total += chunk.byteLength
+    if (total > capBytes) {
+      await res.body?.cancel().catch(() => {})
+      throw new Error(`响应体超过 ${Math.round(capBytes / 1024 / 1024)}MB 上限，疑似异常数据（${hostOf(url)}）`)
+    }
+    parts.push(decoder.decode(chunk, { stream: true }))
+  }
+  parts.push(decoder.decode())
+  return parts.join('')
 }
 
 /**
@@ -331,14 +354,26 @@ export async function fetchToFile(
     const ws = createWriteStream(tmp)
     const nodeStream = Readable.fromWeb(res.body as Parameters<typeof Readable.fromWeb>[0])
     await new Promise<void>((resolve, reject) => {
+      const cleanup = (): void => {
+        // M4 修复：任一侧失败必须销毁上游响应体与文件流，防 socket/句柄滞留
+        nodeStream.destroy()
+        res.body?.cancel().catch(() => {})
+        ws.destroy()
+      }
       nodeStream.on('data', (chunk: Buffer) => {
         total += chunk.length
         if (!ws.write(chunk)) nodeStream.pause()
       })
       // drain 是可写流事件：写缓冲排空后恢复读取（挂在 nodeStream 上会永久挂起）
       ws.on('drain', () => nodeStream.resume())
-      ws.on('error', reject)
-      nodeStream.on('error', reject)
+      ws.on('error', (e) => {
+        cleanup()
+        reject(e)
+      })
+      nodeStream.on('error', (e) => {
+        cleanup()
+        reject(e)
+      })
       nodeStream.on('end', () => ws.end(() => resolve()))
     })
     if (total < minBytes) {

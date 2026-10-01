@@ -5,7 +5,7 @@
 // 源 URL 经统一嗅探器/createTask 白名单路由，不直接下载任意内容。
 
 import http from 'http'
-import { randomUUID } from 'crypto'
+import { randomUUID, timingSafeEqual } from 'crypto'
 import { createServer } from 'net'
 import { app } from 'electron'
 import type { TaskManager } from './task/manager'
@@ -52,19 +52,11 @@ function readBody(req: http.IncomingMessage): Promise<string> {
         resolve(v)
       }
     }
-    req.on('data', (c: Buffer) => {
+    const handler = (c: Buffer): void => {
       data += String(c)
       if (data.length > 1_000_000) {
         // P3 修复：超限后先摘除监听并 resolve，再销毁 socket——原实现 destroy 后
         // end/error 不保证触发，Promise 可能永不 settle（handler 挂起 + socket 泄漏）
-        req.removeListener('data', handler)
-        done(data)
-        req.destroy()
-      }
-    })
-    const handler = (c: Buffer): void => {
-      data += String(c)
-      if (data.length > 1_000_000) {
         req.removeListener('data', handler)
         done(data)
         req.destroy()
@@ -76,10 +68,30 @@ function readBody(req: http.IncomingMessage): Promise<string> {
   })
 }
 
+/** 常量时间字符串比较，防时序侧信道枚举 token */
+function safeEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a, 'utf8')
+  const bb = Buffer.from(b, 'utf8')
+  if (ab.length !== bb.length) {
+    // 长度不等也要跑一次比较，抹平时长差异
+    timingSafeEqual(ab, ab)
+    return false
+  }
+  return timingSafeEqual(ab, bb)
+}
+
 function authed(req: http.IncomingMessage, url: URL, token: string): boolean {
   const header = req.headers['x-omniget-token']
   const query = url.searchParams.get('token')
-  return (typeof header === 'string' && header === token) || query === token
+  // Host 校验：防 DNS rebinding（回环绑定 + token 仍兜底）。
+  // L1 修复：IPv6 字面量形如 [::1]:16820——按括号截取，此前 split(':')[0] 切出 '['
+  // 导致 [::1] 分支永远匹配不上且合法请求被误杀
+  const rawHost = String(req.headers.host ?? '')
+  const host = rawHost.startsWith('[')
+    ? (/\[[^\]]*\]/.exec(rawHost)?.[0] ?? rawHost)
+    : rawHost.split(':')[0]
+  if (host && host !== '127.0.0.1' && host !== 'localhost' && host !== '[::1]') return false
+  return (typeof header === 'string' && safeEqual(header, token)) || safeEqual(query ?? '', token) && query !== null
 }
 
 function taskRow(t: {
@@ -204,14 +216,17 @@ td,th{text-align:left;padding:6px 8px;border-bottom:1px solid #1E2126}
 <script>
 const token = new URLSearchParams(location.search).get('token')
 const H = { 'x-omniget-token': token, 'content-type': 'application/json' }
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]))
+}
 async function refresh() {
   try {
     const r = await fetch('/api/tasks?token=' + encodeURIComponent(token), { headers: H })
     const d = await r.json()
     document.getElementById('rows').innerHTML = (d.tasks || []).map(t =>
-      '<tr><td>' + (t.name || '').replace(/</g, '&lt;') + '</td>' +
-      '<td class="st-' + t.status + '">' + t.status + '</td>' +
-      '<td class="num">' + t.progress + '%</td><td class="muted">' + t.type + '</td></tr>'
+      '<tr><td>' + esc(t.name) + '</td>' +
+      '<td class="st-' + esc(t.status) + '">' + esc(t.status) + '</td>' +
+      '<td class="num">' + esc(t.progress) + '%</td><td class="muted">' + esc(t.type) + '</td></tr>'
     ).join('')
   } catch (e) { document.getElementById('msg').textContent = '无法连接桌面端' }
 }

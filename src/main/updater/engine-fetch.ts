@@ -6,7 +6,8 @@
 // → 与 manifest 比对（不符即丢弃，杜绝投毒）→ 原子改名安装 → TOFU 指纹登记。
 import { createHash } from 'crypto'
 import { createWriteStream } from 'fs'
-import { mkdir, rename, rm, stat } from 'fs/promises'
+import { chmod, mkdir, rename, rm, stat } from 'fs/promises'
+import { lookup } from 'dns/promises'
 import { pipeline } from 'stream/promises'
 import { fetch as undiciFetch } from 'undici'
 import type { SidecarBinary } from '../orchestrator/binaries'
@@ -18,6 +19,97 @@ const log = createLogger('engine-fetch')
 
 export const DEFAULT_MIRROR = 'https://github.com/smart-open/OmniGet/releases/latest/download'
 
+/**
+ * C2 修复：镜像信任锚。
+ * - 仅允许 https（防明文劫持替换二进制）
+ * - 拒绝回环/私网/链路本地地址（防"设置镜像"成为内网探测通道）
+ * - 主机须在已知分发域白名单内（可经 engines.mirrorHosts 扩展，扩展项同样过公网校验）
+ * SHA256 只证明"与 manifest 一致"，manifest 与二进制必须来自可信主机才有信任锚。
+ */
+const TRUSTED_MIRROR_HOSTS = [
+  'github.com',
+  'objects.githubusercontent.com',
+  'raw.githubusercontent.com',
+  'release-assets.githubusercontent.com',
+  'cdn.jsdelivr.net',
+  'fastly.jsdelivr.net',
+  'gitee.com'
+]
+
+const ipLiteralPrivate =
+  /^(127\.|10\.|192\.168\.|169\.254\.|0\.|::1$|f[cd][0-9a-f]{2}:)/i
+
+function isPrivateIPv4(host: string): boolean {
+  const m = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(host)
+  if (!m) return false
+  const [a, b] = [Number(m[1]), Number(m[2])]
+  if (a === 10 || a === 127 || a === 0) return true
+  if (a === 192 && b === 168) return true
+  if (a === 169 && b === 254) return true
+  if (a === 172 && b >= 16 && b <= 31) return true
+  if (a === 100 && b >= 64 && b <= 127) return true // CGNAT
+  return false
+}
+
+/** DNS 解析结果全部必须是公网地址（防域名解析到内网的 rebinding 式绕过） */
+const resolvedHostCache = new Map<string, boolean>()
+async function isPublicHost(host: string): Promise<boolean> {
+  if (isPrivateIPv4(host)) return false
+  if (host === 'localhost' || host.endsWith('.local') || host.endsWith('.internal')) return false
+  if (ipLiteralPrivate.test(host)) return false
+  const cached = resolvedHostCache.get(host)
+  if (cached !== undefined) return cached
+  try {
+    const addrs = await lookup(host, { all: true })
+    const ok =
+      addrs.length > 0 &&
+      addrs.every(
+        (a) =>
+          (a.family === 4 && !isPrivateIPv4(a.address)) ||
+          (a.family === 6 && !/^(::1|f[cd]|fe80)/i.test(a.address))
+      )
+    // M2 修复：只缓存"确认公网"的结果——首启离线/DNS 抖动期的不可信判定不得
+    // 钉死整个进程生命周期（此前 false 永久缓存，github.com 会被误拒到重启为止）
+    if (ok) resolvedHostCache.set(host, true)
+    return ok
+  } catch {
+    return false // 解析失败按不可信处理（fail-closed），但不落缓存
+  }
+}
+
+async function assertTrustedMirror(mirror: string): Promise<void> {
+  let u: URL
+  try {
+    u = new URL(mirror)
+  } catch {
+    throw new Error('镜像地址格式不合法')
+  }
+  if (u.protocol !== 'https:') throw new Error('镜像必须使用 https')
+  const custom = getSettingParsed<string[]>('engines.mirrorHosts') ?? []
+  const allowlist = [...TRUSTED_MIRROR_HOSTS, ...custom.filter((h) => typeof h === 'string')]
+  const host = u.hostname.toLowerCase()
+  if (!allowlist.includes(host)) {
+    throw new Error(
+      `镜像主机不在可信分发域列表（${host}）。如需自建镜像，请在设置中将其域名加入 engines.mirrorHosts`
+    )
+  }
+  if (!(await isPublicHost(host))) {
+    throw new Error(`镜像主机不可指向内网/回环地址（${host}）`)
+  }
+}
+
+/** 可信镜像基址（不可信时回退官方源并告警） */
+function mirrorBase(): string {
+  const v = getSettingParsed<string>('engines.mirror')
+  if (typeof v === 'string' && /^https:\/\//i.test(v.trim())) {
+    return v.trim().replace(/\/+$/, '')
+  }
+  if (typeof v === 'string' && v.trim()) {
+    log.warn(`engines.mirror 非 https，已忽略并回退官方源：${v.trim()}`)
+  }
+  return DEFAULT_MIRROR
+}
+
 /** 参与按需下载的引擎（ffprobe 为可选工具，同样支持补齐） */
 const ENGINE_FILES: Array<{ name: string; kind: 'sidecar' | 'tool'; sidecar?: SidecarBinary }> = [
   { name: 'aria2c', kind: 'sidecar', sidecar: 'aria2c' },
@@ -28,11 +120,6 @@ const ENGINE_FILES: Array<{ name: string; kind: 'sidecar' | 'tool'; sidecar?: Si
 
 const fileOf = (name: string): string =>
   process.platform === 'win32' ? `${name}.exe` : name
-
-function mirrorBase(): string {
-  const v = getSettingParsed<string>('engines.mirror')
-  return typeof v === 'string' && /^https?:\/\//i.test(v.trim()) ? v.trim().replace(/\/+$/, '') : DEFAULT_MIRROR
-}
 
 function dirKey(): string {
   return `${process.platform}-${process.arch}`
@@ -106,6 +193,13 @@ async function downloadAndVerify(url: string, sha256: string, dest: string, onPr
   }
   await mkdir(enginesDir(), { recursive: true })
   await rename(part, dest)
+  // H2 修复：Unix 侧按需安装的引擎必须有执行位（createWriteStream 默认 0644，
+  // 否则 checkBinary 的 access(X_OK) 永远失败，首启补齐后引擎必挂）
+  if (process.platform !== 'win32') {
+    await chmod(dest, 0o755).catch((err: unknown) =>
+      log.warn(`chmod +x failed for ${dest}`, err)
+    )
+  }
 }
 
 export interface FetchOptions {
@@ -116,7 +210,27 @@ export interface FetchOptions {
 
 /** 补齐缺失引擎；全部就绪/无分发源时快速返回。安装成功即登记 TOFU 指纹。 */
 export async function fetchMissingEngines(opts: FetchOptions = {}): Promise<FetchResult> {
+  // H5 修复：启动期自动补齐与用户手动触发可能并发，串行排队（同一 .part 会互相踩踏）
+  return fetchChain.then(() => runFetchMissingEngines(opts))
+}
+
+let fetchChain: Promise<unknown> = Promise.resolve()
+
+async function runFetchMissingEngines(opts: FetchOptions): Promise<FetchResult> {
   const result: FetchResult = { installed: [], skipped: [], failed: [] }
+  // C2 修复：分发源必须可信（https + 白名单域 + 公网地址），否则拒绝安装
+  try {
+    await assertTrustedMirror(mirrorBase())
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err)
+    log.warn(`engine mirror untrusted: ${error}`)
+    for (const e of opts.names ?? []) result.failed.push({ name: e, error })
+    if (!opts.names?.length) {
+      const status = await engineStatus()
+      for (const e of status.filter((x) => !x.installed)) result.failed.push({ name: e.name, error })
+    }
+    return result
+  }
   const status = await engineStatus()
   const wanted = status.filter((e) => !e.installed && (!opts.names || opts.names.includes(e.name)))
   if (wanted.length === 0) return result

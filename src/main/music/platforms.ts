@@ -6,9 +6,26 @@
 import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { mkdir, rename, stat, unlink, writeFile } from 'fs/promises'
-import { getJson, postForm, postJson, getText, fetchToFile, downloadFile, hostOf } from './http'
+import { getJson, postForm, postJson, getText, fetchToFile, downloadFile, hostOf, isTrustedAudioHost } from './http'
 import { HostGate } from './gate'
 import { sanitizeFilename } from '@shared/sanitize'
+
+/**
+ * H4 修复：第三方镜像 API 返回的直链必须落在可信音频域白名单内才允许主进程拉取。
+ * 此前仅查 startsWith('http')——接口被投毒即可让主进程请求内网/云 metadata（SSRF）。
+ * 下载链与试听链统一走同一白名单（原防线只覆盖试听）。
+ */
+function trustedAudioUrl(url: string): string | null {
+  const u = (url ?? '').trim()
+  if (!/^https?:\/\//i.test(u)) return null
+  try {
+    const host = new URL(u).hostname
+    if (!isTrustedAudioHost(host)) return null
+  } catch {
+    return null
+  }
+  return u
+}
 
 export type Quality = 'standard' | 'high' | 'lossless'
 
@@ -218,7 +235,9 @@ export class PlatformEngine {
       (id: string, lvl: string) => this.neteaseUrlRrvenn(id, lvl),
       (id: string, lvl: string) => this.neteaseUrlToubiec(id, lvl)
     ]
-    const part = mp3Path.replace(/\.mp3$/i, '.part.mp3')
+    // M2 修复：part 名掺入本次下载的随机后缀——同名歌曲并发任务此前共用同一
+    // .part.mp3 交错写入产生损坏文件；rename 目标同名时也会互相覆盖
+    const part = mp3Path.replace(/\.mp3$/i, `.${randomUUID().slice(0, 8)}.part.mp3`)
     const fetcherNames = ['cenguigui', 'haitangw', 'rrvenn', 'toubiec']
     let lastErr: unknown = null
     for (const [fi, fetcher] of fetchers.entries()) {
@@ -234,7 +253,7 @@ export class PlatformEngine {
           this.cb.log?.(`镜像 ${fetcherNames[fi] ?? fi} 取直链失败（level=${lvl}）：${err instanceof Error ? err.message : String(err)}`)
           continue
         }
-        if (!url || !url.startsWith('http')) continue
+        if (!trustedAudioUrl(url)) continue
         const size = await fetchToFile(url, part, { signal: this.cb.signal, minBytes: 1024 })
         if (size >= minMb * 1024 * 1024) {
           await rename(part, mp3Path)
@@ -349,7 +368,8 @@ export class PlatformEngine {
     for (const [name, fetcher] of fetchers) {
       try {
         const url = await fetcher(sid, quality)
-        if (url && url.startsWith('http')) return url
+        // H4：试听直链同样过白名单（engine.previewNetease 有二次校验，此处提前拦截）
+        if (url && trustedAudioUrl(url)) return url
       } catch (err) {
         this.cb.log?.(`试听镜像 ${name} 失败：${err instanceof Error ? err.message : String(err)}`)
       }
@@ -412,7 +432,7 @@ export class PlatformEngine {
       await this.gate(url)
       const r = await getJson<{ data?: { url?: string } }>(url, h, { signal: this.cb.signal, timeoutMs: 10_000 })
       const url2 = r.data?.url ?? ''
-      if (url2.startsWith('http') && (await downloadFile(url2, mp3Path, { signal: this.cb.signal }))) {
+      if (trustedAudioUrl(url2) && (await downloadFile(url2, mp3Path, { signal: this.cb.signal }))) {
         await this.saveQqLyric(songMid, lrcPath)
         return true
       }
@@ -426,7 +446,7 @@ export class PlatformEngine {
         await this.gate(url)
         const data = await getJson<{ url?: string; lyric?: string }>(url, h, { signal: this.cb.signal, timeoutMs: 10_000 })
         const url2 = data.url ?? ''
-        if (url2.startsWith('http') && (await downloadFile(url2, mp3Path, { signal: this.cb.signal }))) {
+        if (trustedAudioUrl(url2) && (await downloadFile(url2, mp3Path, { signal: this.cb.signal }))) {
           await writeLrc(lrcPath, data.lyric || EMPTY_LRC)
           return true
         }
@@ -490,7 +510,7 @@ export class PlatformEngine {
         await this.gate(url)
         const data = await getJson<{ url?: string; lyric?: string }>(url, h, { signal: this.cb.signal, timeoutMs: 10_000 })
         const url2 = data.url ?? ''
-        if (url2.startsWith('http') && (await downloadFile(url2, mp3Path, { signal: this.cb.signal }))) {
+        if (trustedAudioUrl(url2) && (await downloadFile(url2, mp3Path, { signal: this.cb.signal }))) {
           await writeLrc(lrcPath, data.lyric || EMPTY_LRC)
           return true
         }
@@ -504,7 +524,7 @@ export class PlatformEngine {
         await this.gate(url)
         const r = await getJson<{ data?: { url?: string } }>(url, h, { signal: this.cb.signal, timeoutMs: 10_000 })
         const url2 = r.data?.url ?? ''
-        if (url2.startsWith('http') && (await downloadFile(url2, mp3Path, { signal: this.cb.signal }))) {
+        if (trustedAudioUrl(url2) && (await downloadFile(url2, mp3Path, { signal: this.cb.signal }))) {
           await writeLrc(lrcPath, EMPTY_LRC)
           return true
         }
@@ -580,7 +600,7 @@ export class PlatformEngine {
       if (!audio) {
         audio = `https://app.pd.nf.migu.cn/MIGUM3.0/v1.0/content/sub/listenSong.do?channel=mx&copyrightId=${copyrightId}&contentId=${contentId}&toneFlag=${q}&resourceType=E&userId=15548614588710179085069&netType=00`
       }
-      if (audio && (await downloadFile(audio, mp3Path, { signal: this.cb.signal }))) {
+      if (trustedAudioUrl(audio) && (await downloadFile(audio, mp3Path, { signal: this.cb.signal }))) {
         let lyric = ''
         try {
           const url2 = `https://app.c.nf.migu.cn/MIGUM3.0/strategy/pc/listen/v1.0?scene=&netType=01&resourceType=2&copyrightId=${copyrightId}&contentId=${contentId}&toneFlag=PQ`
@@ -674,7 +694,7 @@ export class PlatformEngine {
         { signal: this.cb.signal, timeoutMs: 10_000 }
       )
       const url2 = data.data?.url ?? ''
-      if (url2.startsWith('http') && (await downloadFile(url2, mp3Path, { signal: this.cb.signal }))) {
+      if (trustedAudioUrl(url2) && (await downloadFile(url2, mp3Path, { signal: this.cb.signal }))) {
         await writeLrc(lrcPath, data.data?.lyric || EMPTY_LRC)
         return true
       }
@@ -700,7 +720,7 @@ export class PlatformEngine {
           }
         }
         audioUrl = audioUrl.replace(/\\u002F/g, '/')
-        if (audioUrl && (await downloadFile(audioUrl, mp3Path, { signal: this.cb.signal }))) {
+        if (trustedAudioUrl(audioUrl) && (await downloadFile(audioUrl, mp3Path, { signal: this.cb.signal }))) {
           await writeLrc(lrcPath, EMPTY_LRC)
           return true
         }

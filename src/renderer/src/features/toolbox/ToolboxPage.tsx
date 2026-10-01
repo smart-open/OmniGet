@@ -659,9 +659,10 @@ export function ToolboxPage() {
                     <h3 className="text-xs text-text-2">处理动态</h3>
                     <span className="num text-[10px] text-text-3">{toolJobs.length}</span>
                     <button
-                      onClick={() =>
+                      onClick={() => {
                         setJobs((prev) => prev.filter((j) => j.tool !== activeTool))
-                      }
+                        toast('处理记录已清空', 'info')
+                      }}
                       className="ml-auto rounded-ctl px-1.5 py-0.5 text-[10px] text-text-3 transition-colors hover:bg-surface-2 hover:text-text-1"
                       title="清空当前工具的处理记录"
                     >

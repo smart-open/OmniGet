@@ -68,6 +68,8 @@ export class YtDlpAdapter {
     string,
     { args: string[]; shortVideo: boolean; attempt: number }
   >()
+  /** M9：taskId → 实际产物绝对路径（--print after_move:filepath 回传） */
+  private outputFiles = new Map<string, string[]>()
 
   setSink(cb: (e: TaskEvent) => void): void {
     this.sink = cb
@@ -158,7 +160,16 @@ export class YtDlpAdapter {
     await ensureVerified('ytdlp')
     if (this.ffmpegOk === null) this.ffmpegOk = await this.supervisor.ffmpegAvailable()
     const opts = this.videoOpts.get(task.id) ?? {}
-    const isPlaylist = (selection?.indexes?.length ?? 0) > 1
+    // H8 修复：合集任务判定不能只看 indexes.length > 1——只勾选 1 项时原实现走
+    // else 分支且无 --no-playlist，yt-dlp 对合集 URL 默认下载全部条目
+    let paramsPlaylist = false
+    try {
+      paramsPlaylist = (JSON.parse(task.params ?? '') as { playlist?: boolean }).playlist === true
+    } catch {
+      // 非 JSON 视为单视频
+    }
+    const indexes = selection?.indexes ?? []
+    const isPlaylist = indexes.length > 1 || paramsPlaylist
     const isShort = this.shortVideo.has(task.id)
     // P1 加固：settings 落库为 JSON 串，读取必须反序列化（带引号会让 --cookies 静默失效）
     const rawCookie = getSettingParsed<string | null>('ytdlp.cookieFile')
@@ -176,6 +187,8 @@ export class YtDlpAdapter {
       if (opts.embedThumbnail && this.ffmpegOk) args.push('--embed-thumbnail')
     }
     args.push('--newline', '--no-mtime')
+    // M9：回传最终产物路径（--print 默认 --simulate，需 --no-simulate 才会真下载）
+    args.push('--no-simulate', '--print', 'after_move:filepath')
     args.push(
       '--progress-template',
       'download:@P|%(progress.downloaded_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s'
@@ -186,13 +199,18 @@ export class YtDlpAdapter {
       args.push('--ffmpeg-location', enginesDir())
     }
     if (cookieFile) args.push('--cookies', cookieFile)
-    if (isPlaylist) {
-      // M3-4/8：N–M 集选择 + 上传者分目录 + 元数据 JSON/封面落盘
-      args.push('--playlist-items', dedupeRanges(selection?.indexes ?? []))
+    if (isPlaylist && indexes.length > 0) {
+      // M3-4/8：N–M 集选择 + 上传者分目录 + 元数据 JSON/封面落盘（单选 1 项同样带 --playlist-items）
+      args.push('--playlist-items', dedupeRanges(indexes))
       args.push('-o', join(task.saveDir, '%(uploader)s/%(title)s.%(ext)s'))
       args.push('--write-info-json', '--write-thumbnail')
+    } else if (isPlaylist) {
+      // 合集但无勾选信息：维持 yt-dlp 默认（全集合下载）
+      args.push('-o', join(task.saveDir, '%(uploader)s/%(title)s.%(ext)s'))
     } else {
       // M4-11：全局命名模板（{{title}}/{{uploader}}/{{date}}/{{index:N}}）
+      // H8：单视频显式 --no-playlist，防合集 URL 拖全家桶
+      args.push('--no-playlist')
       const { toYtDlpOutputTemplate, getNamingTemplate } = await import('../naming')
       args.push('-o', join(task.saveDir, toYtDlpOutputTemplate(getNamingTemplate())))
     }
@@ -209,6 +227,9 @@ export class YtDlpAdapter {
     args: string[],
     ctx: { shortVideo: boolean; video: VideoSelection; attempt: number }
   ): void {
+    // M9 修复：记录 yt-dlp 实际输出路径——完整性探测/delogo 不再依赖"目录内最新文件"，
+    // 多任务并发下载到同一保存目录时不会错拿别的任务刚完成的产物
+    if (!this.outputFiles.has(task.id)) this.outputFiles.set(task.id, [])
     this.supervisor.spawnTask(task.id, args, {
       isUserPaused: () => this.userPaused.has(task.id),
       onLine: (line) => this.parseProgress(task, line),
@@ -219,7 +240,14 @@ export class YtDlpAdapter {
   }
 
   private parseProgress(task: Task, line: string): void {
-    if (!line.startsWith('@P|')) return
+    if (!line.startsWith('@P|')) {
+      // --print after_move:filepath 的产物路径行（绝对路径即记录）
+      if (/^(?:[a-zA-Z]:[\\/]|\/).+\.\w{1,5}$/.test(line)) {
+        const list = this.outputFiles.get(task.id)
+        if (list && !list.includes(line)) list.push(line)
+      }
+      return
+    }
     const [, downloaded, total, speed] = line.split('|')
     this.emit({
       taskId: task.id,
@@ -246,8 +274,10 @@ export class YtDlpAdapter {
     }
 
     if (cls === 'ok') {
+      // M9：优先用 yt-dlp 回传的真实产物路径，缺省回退"目录内最新文件"
+      const tracked = this.outputFiles.get(task.id) ?? []
       // M4-12：完成文件完整性探测（ffprobe 读元数据，失败返回提示文案）
-      const integrityMsg = await this.verifyIntegrity(task)
+      const integrityMsg = await this.verifyIntegrity(task, tracked)
       // M3-6：wm_level 回填
       let wmLevel = ctx.video.delogo ? 'post' : ctx.shortVideo ? 'direct' : null
       let message = integrityMsg
@@ -255,7 +285,7 @@ export class YtDlpAdapter {
       // P3 修复：此前 integrity/delogo/主完成各 emit 一次 completed → 系统通知刷 2~3 条；合并为一条
       if (ctx.shortVideo && ctx.video.delogo && this.ffmpegOk) {
         try {
-          await this.delogoLatest(task)
+          await this.delogoLatest(task, tracked)
           wmLevel = 'post'
           message = message ?? 'delogo 完成'
         } catch (err) {
@@ -318,26 +348,30 @@ export class YtDlpAdapter {
   }
 
   /** 终态（completed/failed）清理：防长期运行 Map 只增不减（paused 保留参数供 resume） */
-  private cleanupTaskState(taskId: string): void {
+  private cleanupTaskState(taskId: string, keepPauseMark = false): void {
     this.argsByTask.delete(taskId)
     this.videoOpts.delete(taskId)
     this.shortVideo.delete(taskId)
-    this.userPaused.delete(taskId)
+    if (!keepPauseMark) this.userPaused.delete(taskId)
+    this.outputFiles.delete(taskId)
     this.running.delete(taskId) // P3：remove 路径进程可能已死、onExit 不会再触发，防 Set 残留
     this.supervisor.dropTask(taskId)
   }
 
-  /** M3-7 L3：对保存目录最新视频文件做 delogo（右上角 15%×8%），产出 _nowm 副本 */
-  private async delogoLatest(task: Task): Promise<void> {
+  /** M3-7 L3：对本任务产物视频做 delogo（右上角 15%×8%），产出 _nowm 副本 */
+  private async delogoLatest(task: Task, tracked: string[] = []): Promise<void> {
     const { readdir } = await import('fs/promises')
     const { spawn } = await import('child_process')
     const { toolPath } = await import('../orchestrator/binaries')
 
-    const entries = await readdir(task.saveDir)
-    const video = await newestVideo(
-      entries.filter((f) => /\.(mp4|mkv|webm|mov)$/i.test(f) && !f.includes('_nowm')),
-      task.saveDir
-    )
+    let video: string | null = tracked.filter((f) => /\.(mp4|mkv|webm|mov)$/i.test(f) && !f.includes('_nowm')).pop() ?? null
+    if (!video) {
+      const entries = await readdir(task.saveDir)
+      video = await newestVideo(
+        entries.filter((f) => /\.(mp4|mkv|webm|mov)$/i.test(f) && !f.includes('_nowm')),
+        task.saveDir
+      )
+    }
     if (!video) return
     const out = video.replace(/(\.\w+)$/, '_nowm$1')
     await new Promise<void>((resolve, reject) => {
@@ -361,16 +395,19 @@ export class YtDlpAdapter {
   }
 
   /** M4-12：ffprobe 完整性探测（可探测项失败 → 返回标黄提示文案，不判失败） */
-  private async verifyIntegrity(task: Task): Promise<string | undefined> {
+  private async verifyIntegrity(task: Task, tracked: string[] = []): Promise<string | undefined> {
     try {
       const { readdir } = await import('fs/promises')
       const { spawn } = await import('child_process')
       const { toolPath } = await import('../orchestrator/binaries')
-      const entries = await readdir(task.saveDir)
-      const video = await newestVideo(
-        entries.filter((f) => /\.(mp4|mkv|webm|mov)$/i.test(f)),
-        task.saveDir
-      )
+      let video: string | null = tracked.filter((f) => /\.(mp4|mkv|webm|mov)$/i.test(f)).pop() ?? null
+      if (!video) {
+        const entries = await readdir(task.saveDir)
+        video = await newestVideo(
+          entries.filter((f) => /\.(mp4|mkv|webm|mov)$/i.test(f)),
+          task.saveDir
+        )
+      }
       if (!video) return
       const probe = toolPath('ffprobe')
       const out = await new Promise<string>((resolve) => {
@@ -413,9 +450,12 @@ export class YtDlpAdapter {
   }
 
   remove(task: Task): void {
-    this.userPaused.delete(task.id)
-    this.supervisor.pause(task.id)
-    this.cleanupTaskState(task.id)
+    // L3 修复：先标记 userPaused 再暂停——exit 走 paused 分支，不对已删除任务 emit
+    // failed（可能覆盖回收站状态）；暂停标记由 exit 分支延迟删除。进程已死时立即清除防残留
+    this.userPaused.add(task.id)
+    const paused = this.supervisor.pause(task.id)
+    if (!paused) this.userPaused.delete(task.id)
+    this.cleanupTaskState(task.id, true)
   }
 
   isRunning(taskId: string): boolean {

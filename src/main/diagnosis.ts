@@ -25,21 +25,26 @@ const PATTERNS: Array<{
   },
   {
     kind: 'tls',
-    re: /SSL|certificate|TLS|handshake/i,
+    // M12 修复：锚定 TLS 语义关键词（原先裸 SSL/certificate/TLS 会命中含这些词的
+    // 文件名/路径，如 "openssl.conf"，造成误归因）
+    re: /\b(SSL|TLS)[\s:,-]|\bhandshake\b|\bcertificate verify failed\b|\bCERTIFICATE_ERROR\b|\bsslverif/i,
     message: 'TLS/证书握手失败（站点证书异常或被拦截）。可尝试更新引擎或检查系统时间。',
     exitAction: 'update-engine'
+  },
+  {
+    kind: 'risk',
+    // M12 修复：429/403 仅匹配 "HTTP xxx" 归因语境，不再命中任意含 403 的文本。
+    // M1 修复：必须排在 http 模式之前——yt-dlp 的 "HTTP Error 429: Too Many Requests"
+    // 会被 http 的 /HTTP Error (\d{3})/ 先短路，risk 模式的 429/403 分支沦为死代码
+    re: /HTTP (Error )?4(29|03)|sign in to confirm|频率|风控|verify you.re a human|not a bot|Too Many Requests|Forbidden \(?403/i,
+    message: '触发平台风控（频率/登录验证）。建议降低并发或配置 cookie 后重试。',
+    exitAction: 'retry'
   },
   {
     kind: 'http',
     re: /HTTP Error (\d{3})|Requested format is not available/i,
     message: 'HTTP 请求失败或格式不可用。可尝试更新引擎（站点可能已改版）。',
     exitAction: 'update-engine'
-  },
-  {
-    kind: 'risk',
-    re: /429|403|sign in to confirm|频率|风控|verify you.re a human|not a bot/i,
-    message: '触发平台风控（频率/登录验证）。建议降低并发或配置 cookie 后重试。',
-    exitAction: 'retry'
   },
   {
     kind: 'disk',

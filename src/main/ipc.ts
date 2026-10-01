@@ -1,7 +1,7 @@
 // IPC handler 注册表（T0-3 + M1 接入真实编排，§6.1 白名单）
 
 import { app, ipcMain, BrowserWindow, shell } from 'electron'
-import { stat } from 'fs/promises'
+import { stat, realpath } from 'fs/promises'
 import { isAbsolute } from 'path'
 import {
   IPC_CHANNELS,
@@ -15,6 +15,7 @@ import {
   type ToolCreateInput
 } from '@shared/types'
 import { getDb, getSetting, getSettingParsed, setSetting } from './db'
+import { validateSaveDir } from './save-dir'
 import { createLogger } from './logger'
 import type { TaskManager } from './task/manager'
 import type { MusicAdapter } from './music/adapter'
@@ -69,21 +70,33 @@ function windows(): Electron.BrowserWindow[] {
 }
 
 export function broadcastTasks(payload: unknown): void {
-  for (const win of windows()) win.webContents.send(IPC_CHANNELS.eventTasks, payload)
+  for (const win of windows()) {
+    if (win.isDestroyed()) continue // quit 竞态：迭代中窗口可能已销毁
+    win.webContents.send(IPC_CHANNELS.eventTasks, payload)
+  }
 }
 
 export function broadcastEngineHealth(payload: unknown): void {
-  for (const win of windows()) win.webContents.send(IPC_CHANNELS.eventEngines, payload)
+  for (const win of windows()) {
+    if (win.isDestroyed()) continue
+    win.webContents.send(IPC_CHANNELS.eventEngines, payload)
+  }
 }
 
 /** M2-4 降级黄条等通知广播（§4.4：降级必须告警，不静默） */
 export function broadcastNotices(payload: unknown): void {
-  for (const win of windows()) win.webContents.send(IPC_CHANNELS.eventNotices, payload)
+  for (const win of windows()) {
+    if (win.isDestroyed()) continue
+    win.webContents.send(IPC_CHANNELS.eventNotices, payload)
+  }
 }
 
 /** M4-13 工具箱事件广播 */
 export function broadcastToolEvents(payload: unknown): void {
-  for (const win of windows()) win.webContents.send('event:tools', payload)
+  for (const win of windows()) {
+    if (win.isDestroyed()) continue
+    win.webContents.send('event:tools', payload)
+  }
 }
 
 export function registerIpcHandlers(): void {
@@ -110,6 +123,17 @@ export function registerIpcHandlers(): void {
     // 几乎都在 %USERPROFILE%\Downloads，主用例恒失败。改为只拦系统目录与高敏子目录。
     const p = String(path ?? '').trim()
     if (!/\.torrent$/i.test(p)) throw new Error('仅支持解析 .torrent 文件')
+    // M1 加固：只收绝对路径；拒绝 UNC——\\server\share 会触发 SMB 出站认证（NTLM 凭据面）
+    if (!isAbsolute(p)) throw new Error('仅支持解析本机绝对路径的 .torrent 文件')
+    if (/^\/\//.test(p.replace(/\\/g, '/'))) throw new Error('不支持解析网络路径中的文件')
+    // M1 加固：大小预检——readFileSync + bencode 全量同步解码跑在主进程事件循环上，
+    // 被攻破的渲染层传大文件会卡死 UI 并撑爆内存（.torrent 实际普遍 <5MB）
+    const sizeErr: string | null = await stat(p)
+      .then((info) =>
+        info.size > 64 * 1024 * 1024 ? '种子文件超过 64MB，疑似非种子文件，已拒绝解析' : null
+      )
+      .catch(() => null) // stat 失败（不存在/权限）：放行由后续读取自然报错
+    if (sizeErr) throw new Error(sizeErr)
     const profile = (process.env.USERPROFILE ?? process.env.HOME ?? '').replace(/\\/g, '/')
     const blocked = [
       process.env.SystemRoot ?? 'C:\\Windows',
@@ -139,8 +163,20 @@ export function registerIpcHandlers(): void {
       .filter(Boolean)
       .map((d) => d.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase())
     const norm = p.replace(/\\/g, '/').toLowerCase()
+    // realpath 解析：symlink/junction 与 Windows 8.3 短名可绕过字面路径黑名单，
+    // 先解析真实路径再用同一黑名单校验（解析失败则按原路径继续，文件读取时会自然报错）
+    let realNorm = norm
+    try {
+      const real = await realpath(p)
+      realNorm = real.replace(/\\/g, '/').toLowerCase()
+    } catch {
+      // 保持原路径口径
+    }
     // 目录本身与子路径一并拒绝（防 C:\Windows 本体绕过）
-    if (blocked.some((d) => norm === d || norm.startsWith(d + '/'))) {
+    if (
+      blocked.some((d) => norm === d || norm.startsWith(d + '/')) ||
+      blocked.some((d) => realNorm === d || realNorm.startsWith(d + '/'))
+    ) {
       throw new Error('不允许解析系统或敏感目录中的文件')
     }
     const info = parseTorrentFile(p)
@@ -164,10 +200,8 @@ export function registerIpcHandlers(): void {
       if (!taskManager) throw new Error('任务系统尚未就绪，请稍候')
       await taskManager.control(input)
     } catch (err) {
-      // 操作失败必须给用户可见反馈（不允许静默无响应）
-      broadcastNotices([
-        { level: 'warning', message: err instanceof Error ? err.message : String(err) }
-      ])
+      // 失败必须让 invoke reject：渲染层各调用点已有 catch/toastError（假成功比无反馈更糟）
+      throw err instanceof Error ? err : new Error(String(err))
     }
   })
 
@@ -177,9 +211,7 @@ export function registerIpcHandlers(): void {
       if (!taskManager) throw new Error('任务系统尚未就绪，请稍候')
       await taskManager.retryTask(taskId)
     } catch (err) {
-      broadcastNotices([
-        { level: 'warning', message: err instanceof Error ? err.message : String(err) }
-      ])
+      throw err instanceof Error ? err : new Error(String(err))
     }
   })
 
@@ -322,9 +354,7 @@ export function registerIpcHandlers(): void {
       if (!taskManager) throw new Error('任务系统尚未就绪，请稍候')
       await taskManager.restoreFromTrash(taskId)
     } catch (err) {
-      broadcastNotices([
-        { level: 'warning', message: err instanceof Error ? err.message : String(err) }
-      ])
+      throw err instanceof Error ? err : new Error(String(err))
     }
   })
   ipcMain.handle('task:purge', async (_e, taskId: string) => {
@@ -336,9 +366,7 @@ export function registerIpcHandlers(): void {
       // 彻底清除 = 删除任务文件（精确删除）+ 移除记录
       await taskManager.control({ taskId, action: 'remove', withFiles: true })
     } catch (err) {
-      broadcastNotices([
-        { level: 'warning', message: err instanceof Error ? err.message : String(err) }
-      ])
+      throw err instanceof Error ? err : new Error(String(err))
     }
   })
   ipcMain.handle('task:purgeRecord', async (_e, taskId: string) => {
@@ -348,9 +376,7 @@ export function registerIpcHandlers(): void {
       if (!isTrashed(taskId)) throw new Error('任务不在回收站，无法删除')
       purgeTask(taskId)
     } catch (err) {
-      broadcastNotices([
-        { level: 'warning', message: err instanceof Error ? err.message : String(err) }
-      ])
+      throw err instanceof Error ? err : new Error(String(err))
     }
   })
 
@@ -416,7 +442,9 @@ export function registerIpcHandlers(): void {
     try {
       return raw === null ? null : (JSON.parse(raw) as unknown)
     } catch {
-      return raw
+      // L3 修复：解析失败回退返回原始串会让调用方拿到两种形态——统一返回 null
+      //（渲染层各调用点已按 null 兜底处理默认值）
+      return null
     }
   })
   // P2 加固：设置键白名单——渲染层被攻破时不得借此改写主进程仲裁的敏感配置
@@ -435,6 +463,7 @@ export function registerIpcHandlers(): void {
     'download.videoPresets',
     'naming.template',
     'engines.mirror',
+    'engines.mirrorHosts',
     'engines.autoFetch',
     'ytdlp.cookieFile'
   ])
@@ -448,6 +477,19 @@ export function registerIpcHandlers(): void {
       if (v && !/^https:\/\//i.test(v)) {
         throw new Error('引擎分发源必须是 https:// 地址')
       }
+    }
+    if (k === 'engines.mirrorHosts') {
+      // 仅接受合法主机名/域名（分发域白名单扩展项），拒绝 URL/IP 字面量等脏值
+      const arr = Array.isArray(value) ? value : []
+      if (!arr.every((h) => typeof h === 'string' && /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/i.test(h))) {
+        throw new Error('镜像域名列表格式不合法（仅接受主机名）')
+      }
+    }
+    if (k === 'download.saveDir' && typeof value === 'string' && value.trim()) {
+      // H1 修复：saveDir 与任务创建共用同一防线——此前零校验，被攻破的渲染层
+      //（或 bridge token 持有者）可把落盘目录指到自启动目录实现持久化代码执行
+      const err = validateSaveDir(value)
+      if (err) throw new Error(err)
     }
     setSetting(k, JSON.stringify(value ?? null))
   })

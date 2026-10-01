@@ -49,5 +49,8 @@ export function toYtDlpOutputTemplate(template: string): string {
   let rendered = renderNamingTemplate(mapped, {})
   // 防穿越：模板存于 settings，`..` 可把 yt-dlp -o 输出逃出 saveDir
   rendered = rendered.replace(/\.{2,}/g, '.').replace(/^[\\/]+/, '').replace(/[\\/]+$/, '')
+  // L2 加固：中和模板中段的路由分隔符——`..` 折叠挡不住 `a/b/c` 式目录膨胀
+  //（不能穿越但可在 saveDir 下制造任意深度子目录）；`\` 同理
+  rendered = rendered.replace(/[\\/]/g, '_')
   return `${rendered || DEFAULT_TEMPLATE}.%(ext)s`
 }

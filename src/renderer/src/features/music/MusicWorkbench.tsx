@@ -44,6 +44,7 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
   const audioRef = useRef<HTMLAudioElement | null>(null)
   /** P2 修复：试听竞态守卫——await 期间再点别处时，过期回调用序号自弃 */
   const previewSeq = useRef(0)
+  const batchInfoTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // P2 修复：离开音乐页时停止试听（此前 Audio 随页面卸载继续播放且无法控制）
   useEffect(() => {
@@ -51,6 +52,7 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
       previewSeq.current++
       audioRef.current?.pause()
       audioRef.current = null
+      if (batchInfoTimer.current) clearTimeout(batchInfoTimer.current)
     }
   }, [])
 
@@ -177,7 +179,8 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
         ? `已入队 ${done - failed}/${done} 个任务，${failed} 个失败`
         : `已入队 ${done} 个任务，可在任务列表观察进度`
     )
-    setTimeout(() => setBatchInfo(''), 4000)
+    if (batchInfoTimer.current) clearTimeout(batchInfoTimer.current)
+    batchInfoTimer.current = setTimeout(() => setBatchInfo(''), 4000)
   }
 
   const degradedSearch = result?.degraded.length ?? 0

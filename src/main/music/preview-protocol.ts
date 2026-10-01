@@ -3,12 +3,13 @@
 // 工具箱剪辑编辑器（本地媒体）复用同一协议：omniget-preview://local/<URL 编码的绝对路径>，
 // 支持 Range 请求（视频/音频可拖动试听）。
 
-import { protocol } from 'electron'
+import { app, protocol } from 'electron'
 import { createReadStream } from 'fs'
 import { stat } from 'fs/promises'
 import { extname, isAbsolute } from 'path'
 import { Readable } from 'stream'
 import { createLogger } from '../logger'
+import { getSettingParsed } from '../db'
 import { getMusicEngine } from './engine'
 import { openStream } from './http'
 
@@ -57,21 +58,67 @@ export function registerPreviewScheme(): void {
 
 /** 本地媒体流（Range 支持：<video>/<audio> 拖动进度必需）。
  * P3 加固：扩展名白名单之外再挡系统/敏感目录——防被攻破的渲染层把该协议当
- * 全盘媒体文件枚举读取通道（媒体类用户文件不在此列，正常剪辑试听不受影响） */
+ * 全盘媒体文件枚举读取通道（媒体类用户文件不在此列，正常剪辑试听不受影响）
+ * M8 修复：盘符泛化（不再硬编码 c:）、拒绝 UNC/网络路径、userData 白名单豁免
+ * （此前 AppData/Roaming 整目录被禁导致应用自身产物反而无法预览） */
 function isSensitivePath(p: string): boolean {
   const norm = p.replace(/\\/g, '/').toLowerCase()
+  // UNC / 网络路径（\\server\share）一律拒绝
+  if (/^\/\//.test(norm)) return true
   const profile = (process.env.USERPROFILE ?? process.env.HOME ?? '').replace(/\\/g, '/')
-  const blocked = [
-    'c:/windows',
-    'c:/program files',
-    'c:/program files (x86)',
+  const blocked: string[] = [
+    // Windows 系统目录：任意盘符泛化（x:/windows、x:/program files*）
+    '/windows',
+    '/program files',
+    '/program files (x86)',
+    '/programdata',
     '/usr', '/etc', '/bin', '/sbin', '/boot', '/proc', '/sys', '/dev',
     profile ? `${profile}/.ssh` : '',
     profile ? `${profile}/.gnupg` : '',
-    profile ? `${profile}/AppData/Roaming` : '',
+    profile ? `${profile}/.aws` : '',
+    profile ? `${profile}/.kube` : '',
     profile ? `${profile}/Library/Keychains` : ''
   ].filter(Boolean)
-  return blocked.some((d) => norm === d || norm.startsWith(`${d}/`))
+  if (blocked.some((d) => norm === d || norm.startsWith(`${d}/`))) return true
+  // Windows 盘符前缀剥离后再比对（c:/windows → /windows）
+  const stripped = norm.replace(/^\/[a-z]:/, '')
+  if (stripped !== norm && blocked.some((d) => stripped === d || stripped.startsWith(`${d}/`))) {
+    return true
+  }
+  // 豁免：应用自身数据目录下的媒体产物（工具箱输出等）——须位于敏感目录检查之后
+  try {
+    const userData = app.getPath('userData').replace(/\\/g, '/').toLowerCase().replace(/\/+$/, '')
+    if (norm === userData || norm.startsWith(`${userData}/`)) return false
+  } catch {
+    // app 未就绪（单测环境）——按原口径继续
+  }
+  // AppData/Roaming 与 AppData/Local/Temp 仍禁（userData 豁免优先）
+  const roamBlock = [
+    profile ? `${profile}/appdata/roaming` : '',
+    profile ? `${profile}/appdata/local/temp` : ''
+  ].filter(Boolean)
+  return roamBlock.some((d) => norm === d || norm.startsWith(`${d}/`))
+}
+
+/** M4：纯文本产物允许的目录白名单（userData / 系统下载 / 用户配置下载目录） */
+function isAppArtifactPath(p: string): boolean {
+  const norm = p.replace(/\\/g, '/').toLowerCase().replace(/\/+$/, '')
+  const candidates = new Set<string>()
+  try {
+    candidates.add(app.getPath('userData').replace(/\\/g, '/').toLowerCase().replace(/\/+$/, ''))
+    candidates.add(app.getPath('downloads').replace(/\\/g, '/').toLowerCase().replace(/\/+$/, ''))
+  } catch {
+    // app 未就绪（单测）：userData 缺失则只认下载目录口径
+  }
+  try {
+    const saveDir = getSettingParsed<string>('download.saveDir')
+    if (typeof saveDir === 'string' && saveDir.trim()) {
+      candidates.add(saveDir.trim().replace(/\\/g, '/').toLowerCase().replace(/\/+$/, ''))
+    }
+  } catch {
+    // db 未就绪：忽略
+  }
+  return [...candidates].some((root) => norm === root || norm.startsWith(`${root}/`))
 }
 
 async function serveLocalMedia(path: string, request: Request): Promise<Response> {
@@ -80,6 +127,12 @@ async function serveLocalMedia(path: string, request: Request): Promise<Response
     const type = LOCAL_MEDIA_TYPES[extname(path).toLowerCase()]
     if (!type) return new Response('unsupported media type', { status: 415 })
     if (isSensitivePath(path)) return new Response('forbidden', { status: 403 })
+    // M4 加固：纯文本扩展（.txt/.srt/.md5 等）收窄到应用产物目录——媒体文件
+    // 全盘可读尚属试听语义所需，但文本可外泄任意笔记/凭据文件，仅允许
+    // userData / 系统下载目录 / 用户配置的下载目录三处
+    if (type.startsWith('text/') && !isAppArtifactPath(path)) {
+      return new Response('forbidden', { status: 403 })
+    }
     const info = await stat(path)
     if (!info.isFile()) return new Response('not found', { status: 404 })
     const size = info.size
@@ -87,8 +140,17 @@ async function serveLocalMedia(path: string, request: Request): Promise<Response
     const rangeHeader = request.headers.get('range')
     const rangeMatch = rangeHeader ? /bytes=(\d*)-(\d*)/.exec(rangeHeader) : null
     if (rangeMatch) {
-      let start = rangeMatch[1] ? parseInt(rangeMatch[1], 10) : 0
-      let end = rangeMatch[2] ? Math.min(parseInt(rangeMatch[2], 10), size - 1) : size - 1
+      // L5 修复：suffix range（bytes=-N）语义为"文件末尾 N 字节"，此前被解析成 0..N
+      let start: number
+      let end: number
+      if (!rangeMatch[1] && rangeMatch[2]) {
+        const suffix = parseInt(rangeMatch[2], 10)
+        start = Number.isFinite(suffix) ? Math.max(0, size - suffix) : 0
+        end = size - 1
+      } else {
+        start = rangeMatch[1] ? parseInt(rangeMatch[1], 10) : 0
+        end = rangeMatch[2] ? Math.min(parseInt(rangeMatch[2], 10), size - 1) : size - 1
+      }
       if (!Number.isFinite(start) || start < 0 || start > end || start >= size) {
         return new Response(null, {
           status: 416,
@@ -132,6 +194,23 @@ export function registerPreviewHandler(): void {
       if (url.host === 'local') {
         const p = decodeURIComponent(url.pathname.replace(/^\/+/, ''))
         return serveLocalMedia(p, request)
+      }
+      // 远程封面代理（omniget-preview://remote?src=<https 图片直链>）：
+      // 封面经主进程转发，渲染层不再直连第三方域暴露 IP（与试听链口径一致）
+      if (url.host === 'remote') {
+        const src = url.searchParams.get('src') ?? ''
+        if (!/^https:\/\//i.test(src)) return new Response('bad request', { status: 400 })
+        const { isInternalUrl } = await import('../net-guard')
+        if (await isInternalUrl(src)) return new Response('forbidden', { status: 403 })
+        const upstream = await openStream(src).catch(() => null)
+        if (!upstream?.ok || !upstream.body) return new Response('upstream error', { status: 502 })
+        const type = /^image\//i.test(upstream.contentType)
+          ? upstream.contentType
+          : 'image/jpeg'
+        return new Response(upstream.body as ReadableStream, {
+          status: 200,
+          headers: { 'Content-Type': type, 'Cache-Control': 'max-age=3600' }
+        })
       }
       if (url.host !== 'music') return new Response('not found', { status: 404 })
       const platform = url.searchParams.get('platform') ?? 'netease'

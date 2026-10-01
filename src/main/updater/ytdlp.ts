@@ -69,6 +69,13 @@ async function downloadTo(url: string, dest: string): Promise<void> {
 }
 
 export async function updateYtDlp(): Promise<UpdateResult> {
+  // H5 修复：热更与按需补齐/重复触发可能并发替换同一二进制，串行排队防互踩
+  return ytdlpUpdateChain.then(() => runUpdateYtDlp())
+}
+
+let ytdlpUpdateChain: Promise<unknown> = Promise.resolve()
+
+async function runUpdateYtDlp(): Promise<UpdateResult> {
   const target = binaryPath('ytdlp')
   const backup = `${target}.bak`
   try {

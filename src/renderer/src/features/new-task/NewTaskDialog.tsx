@@ -637,11 +637,11 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
                   transition={{ duration: 0.2 }}
                   className="mt-4"
                 >
-                  {/* 预览卡片（§4.3.2 防下错）：封面 + 标题 + 时长 */}
+                  {/* 预览卡片（§4.3.2 防下错）：封面 + 标题 + 时长（封面经主进程代理，不直连第三方域） */}
                   <div className="flex gap-3 rounded-panel border border-border p-3">
                     {parsed.coverUrl && (
                       <img
-                        src={parsed.coverUrl}
+                        src={`omniget-preview://remote?src=${encodeURIComponent(parsed.coverUrl)}`}
                         alt=""
                         className="h-16 w-28 shrink-0 rounded object-cover"
                       />

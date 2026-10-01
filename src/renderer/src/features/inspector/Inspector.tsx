@@ -14,7 +14,7 @@ import {
   X
 } from '@phosphor-icons/react'
 import type { Task, TaskFile } from '@shared/types'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { FILE_CATEGORIES, fileCategory } from '@shared/file-category'
 import { confirmAction, toast, toastError } from '../../lib/feedback'
 import { formatBytes } from '../new-task/fileTree'
@@ -43,6 +43,7 @@ export function Inspector({
 }) {
   const [files, setFiles] = useState<TaskFile[]>([])
   const [copied, setCopied] = useState(false)
+  const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [cat, setCat] = useState<'all' | 'video' | 'music' | 'image' | 'doc' | 'other'>('all')
 
   // 打开时拉文件清单
@@ -101,10 +102,19 @@ export function Inspector({
       ?.writeText(task.source)
       .then(() => {
         setCopied(true)
-        setTimeout(() => setCopied(false), 1200)
+        if (copiedTimer.current) clearTimeout(copiedTimer.current)
+        copiedTimer.current = setTimeout(() => setCopied(false), 1200)
       })
       .catch((err) => toastError('复制来源', err))
   }
+
+  // 卸载清理定时器（防关闭抽屉后 setState）
+  useEffect(
+    () => () => {
+      if (copiedTimer.current) clearTimeout(copiedTimer.current)
+    },
+    []
+  )
 
   return (
     <AnimatePresence>
@@ -119,7 +129,7 @@ export function Inspector({
         {/* 头部：layoutId 共享元素（行标题 → 抽屉标题） */}
         <div className="flex h-11 shrink-0 items-center gap-2 border-b border-border px-4">
           <motion.span layoutId={`task-title-${task.id}`} className="flex-1 truncate text-sm font-medium">
-            {task.name}
+            {task.name || task.source || '(解析中)'}
           </motion.span>
           <button
             onClick={onClose}
@@ -150,8 +160,8 @@ export function Inspector({
             </div>
             <div className="meter">
               <div
-                className="will-transform h-full rounded-full bg-accent"
-                style={{ width: `${pct}%`, opacity: running ? 1 : 0.55 }}
+                className="h-full origin-left rounded-full bg-accent"
+                style={{ transform: `scaleX(${Math.max(0, Math.min(1, pct / 100))})`, opacity: running ? 1 : 0.55 }}
               />
             </div>
             <div className="num mt-2 flex justify-between text-[11px] text-text-3">

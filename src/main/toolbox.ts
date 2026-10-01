@@ -2,12 +2,13 @@
 // type='tool' 任务走统一队列/状态机；独立信号量（默认 2 并发，不计入下载并发）
 // 产物默认落 源目录/工具箱输出/<工具名>/
 
-import { spawn, type ChildProcess } from 'child_process'
+import { type ChildProcess } from 'child_process'
 import { mkdir, rm, stat, writeFile } from 'fs/promises'
 import { basename, extname, join } from 'path'
 import type { ToolCreateInput, ToolEvent } from '@shared/types'
 import { createLogger } from './logger'
 import { toolPath, ensureVerified } from './orchestrator/binaries'
+import { spawnTreeAware, terminateTree } from './orchestrator/proc'
 
 const log = createLogger('toolbox')
 
@@ -702,6 +703,9 @@ export class ToolboxRunner {
   private procs = new Map<string, { proc: ChildProcess; output: string; tool: string }>()
   /** node 运行时任务（纯 JS compute 无法强杀，登记取消标记 + 产物路径） */
   private nodeTasks = new Map<string, { output: string; cancelled: boolean; tool: string }>()
+  /** L3 修复：取消标记——terminateTree（组信号/taskkill）不置 proc.killed，
+   * exit 判定取消改用本集合（跨平台口径一致） */
+  private cancelled = new Set<string>()
 
   onEvent(cb: (e: ToolEvent) => void): () => void {
     this.listeners.add(cb)
@@ -717,10 +721,21 @@ export class ToolboxRunner {
     const entry = this.procs.get(taskId)
     if (entry) {
       this.procs.delete(taskId)
-      entry.proc.kill()
-      // 半成品清理：ffmpeg 单文件产物；demucs 为目录产物 → recursive 兼容两者
-      import('fs/promises').then(({ rm }) =>
-        rm(entry.output, { recursive: true, force: true }).catch(() => {})
+      // L3 修复：先落取消标记（terminateTree 不置 proc.killed，Unix 上组信号
+      // SIGTERM 终止后 exit 判定取消必须靠本标记，而非「ffmpeg 退出码 null」误导）
+      this.cancelled.add(taskId)
+      // M7 修复：树终止 + 等 exit 后再删半成品——Windows 上 ffmpeg 尚持句柄时
+      // 立即 rm 会 EBUSY 被静默吞掉，产物残留
+      terminateTree(entry.proc, 3000)
+      const exited = new Promise<void>((resolve) => {
+        if (entry.proc.exitCode !== null || entry.proc.signalCode !== null) resolve()
+        else entry.proc.once('exit', () => resolve())
+      })
+      void exited.then(() =>
+        // 半成品清理：ffmpeg 单文件产物；demucs 为目录产物 → recursive 兼容两者
+        import('fs/promises').then(({ rm }) =>
+          rm(entry.output, { recursive: true, force: true }).catch(() => {})
+        )
       )
       log.info(`tool task ${taskId} cancelled, partial output removed: ${entry.output}`)
       return true
@@ -918,7 +933,7 @@ export class ToolboxRunner {
     return new Promise((resolve, reject) => {
       let proc: ChildProcess
       try {
-        proc = spawn(exe, args, { windowsHide: true })
+        proc = spawnTreeAware(exe, args)
       } catch (err) {
         reject(this.demucsMissingHint(err))
         return
@@ -939,6 +954,11 @@ export class ToolboxRunner {
       })
       proc.on('exit', (code) => {
         this.procs.delete(taskId)
+        // L3：取消用 cancelled 集合判定（与 ffmpeg 路径口径一致）
+        if (this.cancelled.delete(taskId)) {
+          reject(new Error('任务已取消'))
+          return
+        }
         if (code === 0) {
           resolve(outPath)
         } else {
@@ -971,7 +991,8 @@ export class ToolboxRunner {
     await ensureVerified('ffmpeg') // TOFU 强制校验
     const ffmpeg = toolPath('ffmpeg')
     return new Promise((resolve, reject) => {
-      const proc = spawn(ffmpeg, args, { windowsHide: true })
+      const proc = spawnTreeAware(ffmpeg, args)
+      // 先登记进程表再由调用方 emit running（收窄 cancel 返回 false 但进程照跑的窗口）
       this.procs.set(taskId, { proc, output, tool })
       let stderrTail = ''
       proc.stderr?.on('data', (d: Buffer) => {
@@ -985,8 +1006,8 @@ export class ToolboxRunner {
       })
       proc.on('exit', (code) => {
         this.procs.delete(taskId)
-        // 取消（kill）：不报「退出码」误导用户
-        if (proc.killed) {
+        // 取消（L3：跨平台用 cancelled 集合判定，不依赖 proc.killed）：不报「退出码」误导用户
+        if (this.cancelled.delete(taskId) || proc.killed) {
           reject(new Error('任务已取消'))
           return
         }

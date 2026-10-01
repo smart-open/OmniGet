@@ -184,7 +184,13 @@ export function setAdapterScriptEnabled(id: string, enabled: boolean): void {
   const dir = adapterScriptsDir()
   const file = join(dir, `${id}.json`)
   if (!existsSync(file)) throw new Error(`脚本清单不存在：${id}`)
-  const raw = JSON.parse(readFileSync(file, 'utf8')) as Partial<ScriptManifest>
+  // L8 修复：用户手改的坏 JSON 不应裸抛 SyntaxError——给出可读文案
+  let raw: Partial<ScriptManifest>
+  try {
+    raw = JSON.parse(readFileSync(file, 'utf8')) as Partial<ScriptManifest>
+  } catch {
+    throw new Error(`脚本清单 ${id}.json 不是合法 JSON，请修复后重试`)
+  }
   raw.enabled = enabled
   writeFileSync(file, JSON.stringify(raw, null, 2), 'utf8')
   loadAll()

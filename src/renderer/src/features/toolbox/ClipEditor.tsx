@@ -206,13 +206,19 @@ export function ClipEditor({
     draw()
   }, [draw])
 
+  // ResizeObserver 常驻（经 ref 读取最新 draw）——原实现依赖 [draw]，cur 每 250ms
+  // 变化一次会导致 observer 每帧 disconnect/observe，纯浪费
+  const drawRef = useRef(draw)
+  useEffect(() => {
+    drawRef.current = draw
+  }, [draw])
   useEffect(() => {
     const wrap = wrapRef.current
     if (!wrap) return
-    const ro = new ResizeObserver(() => draw())
+    const ro = new ResizeObserver(() => drawRef.current())
     ro.observe(wrap)
     return () => ro.disconnect()
-  }, [draw])
+  }, [])
 
   // ── 播放控制 ─────────────────────────────────────────────────────
   function togglePlay(): void {

@@ -62,6 +62,9 @@ function legacyDataDir(): string | null {
   return null
 }
 
+/** 迁移失败记录（L5：bootstrap 后广播到 UI，不再只有 console 留痕） */
+export const legacyMigrationErrors: string[] = []
+
 /** 一次性迁移：旧 omniget.db / dht.dat → data/（目标缺失才拷贝）。
  * fingerprints.json 不迁移：TOFU 信任锚定安装身份，旧目录指纹对新 sidecar 无意义 */
 function migrateFromLegacy(legacy: string, target: string): void {
@@ -76,6 +79,7 @@ function migrateFromLegacy(legacy: string, target: string): void {
         // 迁移失败不阻塞启动（新库从零开始），但必须留痕——用户视角是历史数据"消失"
         // eslint-disable-next-line no-console
         console.error(`[env] 旧数据迁移失败: ${from} → ${to}`, err)
+        legacyMigrationErrors.push(`${name}（${err instanceof Error ? err.message : String(err)}）`)
       }
     }
   }

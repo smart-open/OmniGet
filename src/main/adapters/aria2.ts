@@ -150,14 +150,29 @@ export class Aria2Adapter implements EngineAdapter {
 
   /** HTTP 直链 HEAD 探测（M1-7）：大小/文件名嗅探；带超时防挂起 */
   private async parseHttp(task: Task): Promise<ParseOutput> {
+    // M3 修复：拒绝内网/回环目标——主进程代发探测并回显响应头不得成为内网探测通道
+    const { isInternalUrl } = await import('../net-guard')
+    if (await isInternalUrl(task.source)) {
+      throw makeError('PARSE_FAILED', {
+        message: '该链接指向内网/回环地址，不允许探测与下载。'
+      })
+    }
     const res = await fetch(task.source, {
       method: 'HEAD',
       redirect: 'follow',
       signal: AbortSignal.timeout(HTTP_PROBE_TIMEOUT_MS)
     })
     if (!res.ok) {
-      throw makeError('HTTP_TIMEOUT', {
+      // L1 修复：404/403 等非超时状态不再一律归因为"超时"，与诊断五类口径一致
+      const timedOut = [408, 425, 429].includes(res.status) || res.status >= 500
+      throw makeError(timedOut ? 'HTTP_TIMEOUT' : 'PARSE_FAILED', {
         message: `直链探测失败（HTTP ${res.status}）。请检查链接是否有效后重试。`
+      })
+    }
+    // 重定向后的最终地址同样不得落在内网（防公网 302 跳内网）
+    if (res.url && res.url !== task.source && (await isInternalUrl(res.url))) {
+      throw makeError('PARSE_FAILED', {
+        message: '该链接重定向至内网/回环地址，已中止探测。'
       })
     }
     const len = Number(res.headers.get('content-length') ?? 0)
@@ -326,12 +341,20 @@ export class Aria2Adapter implements EngineAdapter {
     await this.rpc().call('unpause', task.engineGid)
   }
 
-  /** 仅移除引擎侧任务；文件删除由管理器按 task_files 精确执行（B6：禁止整目录 rm） */
+  /** 仅移除引擎侧任务；文件删除由管理器按 task_files 精确执行（B6：禁止整目录 rm）。
+   * M6 修复：顺带清理 .aria2 控制文件——remove 后 gid 已销毁，控制文件永久残留，
+   * 配合 --continue=true 下次同名任务可能复用脏状态 */
   async remove(task: Task): Promise<void> {
-    if (!task.engineGid) return
-    await this.rpc().call('remove', task.engineGid).catch(() => {
-      // 已完成任务的 gid 已销毁，忽略
-    })
+    if (task.engineGid) {
+      await this.rpc().call('remove', task.engineGid).catch(() => {
+        // 已完成任务的 gid 已销毁，忽略
+      })
+    }
+    const { getTaskFiles } = await import('../task/store')
+    const { rm } = await import('fs/promises')
+    for (const f of getTaskFiles(task.id)) {
+      await rm(join(task.saveDir, `${f.path}.aria2`), { force: true }).catch(() => {})
+    }
   }
 
   /** 确认勾选（磁力暂停态）：changeOption(select-file) + 改 dir + seed-ratio（§4.2 Step3） */

@@ -2,6 +2,7 @@
 // 迁移策略：字典键按「分区.条目」组织，存量页面按改动节奏逐步收敛到 t()；
 // 缺键时回退 zh-CN，再回退键名（开发期可见，防漏译）。
 import { create } from 'zustand'
+import { toastError } from './lib/feedback'
 
 export type LocaleId = 'zh-CN' | 'en'
 
@@ -157,7 +158,10 @@ export const useI18n = create<I18nState>((set, get) => ({
   locale: 'zh-CN',
   setLocale: (locale) => {
     set({ locale })
-    void window.omniget.settingsSet('ui.locale', locale)
+    // UX 硬性标准：持久化失败必须可见反馈（此前 fire-and-forget，重启后语言回退且无提示）
+    window.omniget
+      .settingsSet('ui.locale', locale)
+      .catch((err) => toastError('保存语言设置', err))
   },
   t: (key, vars) => {
     const raw = DICTS[get().locale][key] ?? DICTS['zh-CN'][key] ?? key

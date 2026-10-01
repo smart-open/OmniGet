@@ -71,16 +71,21 @@ async function loadFingerprints(): Promise<FingerprintStore> {
     return JSON.parse(await readFile(fingerprintsFile(), 'utf8')) as FingerprintStore
   } catch (err) {
     // ⚠ 区分「首启无指纹库」（正常 TOFU 登记）与「指纹库损坏/不可读」——
-    // 后者若当空库处理等于静默重置信任基线，篡改的二进制会被放行
+    // 后者若当空库处理等于静默重置信任基线，篡改的二进制会被放行。
+    // H7 修复：损坏/不可读时 fail-closed——拒绝启动所有 sidecar 引擎，
+    // 由用户显式删除指纹库文件后重新登记（UI 告警文案给出恢复路径）
     const code = (err as NodeJS.ErrnoException).code
     if (code === 'ENOENT') {
       log.info('fingerprints.json 不存在（首次运行，TOFU 将登记初始指纹）')
-    } else {
-      log.error('TOFU 指纹库读取失败——按空库处理会重置信任基线，请检查文件权限/完整性', {
-        error: String(err)
-      })
+      return {}
     }
-    return {}
+    log.error('TOFU 指纹库损坏/不可读——fail-closed 拒绝启动引擎（删除该文件可重置 TOFU 基线）', {
+      error: String(err)
+    })
+    throw makeError('ENGINE_FINGERPRINT_STORE_CORRUPT', {
+      message:
+        '引擎指纹库损坏，为防止被篡改的引擎被执行已拒绝启动。如确认本机安全，可删除 userData 下的 fingerprints.json 后重启应用重新登记。'
+    })
   }
 }
 
@@ -109,10 +114,8 @@ export async function checkBinary(name: SidecarBinary): Promise<BinaryCheckResul
   const store = await loadFingerprints()
   const known = store[name]
   if (known === undefined) {
-    // TOFU：首次运行，记录指纹
-    store[name] = digest
-    await mkdir(userDataDir(), { recursive: true })
-    await writeFile(fingerprintsFile(), JSON.stringify(store, null, 2), 'utf8')
+    // TOFU：首次运行，记录指纹（走 H2 互斥：并发登记不互相覆写丢条目）
+    await recordFingerprint(name, digest)
     log.info(`TOFU fingerprint recorded for ${name}`, { sha256: digest })
     return { ok: true, path, sha256: digest }
   }
@@ -126,11 +129,29 @@ export async function checkBinary(name: SidecarBinary): Promise<BinaryCheckResul
   return { ok: true, path, sha256: digest }
 }
 
-export async function recordFingerprint(name: SidecarBinary, digest: string): Promise<void> {
+// H2 修复：指纹文件读-改-写互斥（promise 链串行化）——启动期引擎自动补齐、
+// aria2/ytdlp 的 checkBinary 与两条热更链并发登记时，整体覆写会丢掉对方刚写入
+// 的条目 → 下次启动走 TOFU 首次登记分支，当前二进制被静默重新登记放行
+let fingerprintChain: Promise<void> = Promise.resolve()
+
+function enqueueFingerprintWrite(fn: () => Promise<void>): Promise<void> {
+  const next = fingerprintChain.then(fn, fn)
+  // 链尾吞错：单次写失败不阻断后续登记（调用方各自处理自身异常）
+  fingerprintChain = next.catch(() => {})
+  return next
+}
+
+async function writeFingerprintEntry(name: SidecarBinary, digest: string): Promise<void> {
+  // 临界区内重读（而非沿用调用方快照）+ 按 key 合并，最大化保留并发写入方
   const store = await loadFingerprints()
   store[name] = digest
+  await mkdir(userDataDir(), { recursive: true })
   await writeFile(fingerprintsFile(), JSON.stringify(store, null, 2), 'utf8')
   verifiedCache.delete(name) // 热更换了新指纹，进程内缓存失效
+}
+
+export function recordFingerprint(name: SidecarBinary, digest: string): Promise<void> {
+  return enqueueFingerprintWrite(() => writeFingerprintEntry(name, digest))
 }
 
 // 进程内已校验缓存（mtime+size+内容短指纹命中即视为已过 TOFU，避免每次 spawn 全量重哈希）。

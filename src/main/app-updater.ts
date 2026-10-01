@@ -6,6 +6,14 @@ import { createLogger } from './logger'
 
 const log = createLogger('app-updater')
 
+/** 复查定时器句柄（模块级持有：可测试/可清理，而非匿名 setInterval 失联） */
+let recheckTimer: NodeJS.Timeout | null = null
+
+export function stopAppUpdaterTimer(): void {
+  if (recheckTimer) clearInterval(recheckTimer)
+  recheckTimer = null
+}
+
 export function startAppUpdater(): void {
   // 仅打包态启用（dev 无签名产物与发布通道）
   if (!process.resourcesPath || process.env.NODE_ENV === 'development') {
@@ -39,7 +47,8 @@ export function startAppUpdater(): void {
 
       await autoUpdater.checkForUpdatesAndNotify()
       // 每 4 小时复查
-      setInterval(
+      stopAppUpdaterTimer()
+      recheckTimer = setInterval(
         () =>
           void autoUpdater
             .checkForUpdatesAndNotify()

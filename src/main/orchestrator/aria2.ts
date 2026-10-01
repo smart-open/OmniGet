@@ -2,13 +2,13 @@
 // spawn（--enable-rpc --rpc-secret）+ WS JSON-RPC 客户端 + 心跳 + 指数退避重启
 // （1s→30s，连续 5 次失败标记离线）。
 
-import { spawn, type ChildProcess } from 'child_process'
+import type { ChildProcess } from 'child_process'
 import { randomBytes } from 'crypto'
 import WebSocket from 'ws'
 import { createLogger } from '../logger'
 import { binaryPath, checkBinary, type SidecarBinary } from './binaries'
 import { defaultGlobalOptions, toSpawnArgs } from '../aria2/options'
-import { terminateTree } from './proc'
+import { spawnTreeAware, terminateTree } from './proc'
 
 const log = createLogger('aria2')
 
@@ -181,48 +181,57 @@ export class Aria2Supervisor {
   }
 
   private async spawnAndConnect(): Promise<void> {
-    this.restarting = true
-    try {
-      // P3 加固：secret 写文件注入（不出现在命令行；aria2 启动后即读走）
-      const { writeFile } = await import('fs/promises')
-      const { join } = await import('path')
-      const { userDataDir } = await import('../env')
-      const secretFile = join(userDataDir(), 'aria2-rpc-secret')
-      await writeFile(secretFile, this.secret, 'utf8')
-      const args = toSpawnArgs(this.globalOptions, secretFile, this.rpcPort)
-      this.proc = spawn(binaryPath('aria2c'), args, {
-        stdio: ['ignore', 'ignore', 'pipe'],
-        windowsHide: true
-      })
-      this.proc.stderr?.on('data', (d: Buffer) => log.debug(`[aria2c] ${String(d).trim()}`))
-      this.proc.on('exit', (code) => {
-        log.warn(`aria2c exited (code=${code})`)
+    // P3 加固：secret 写文件注入（不出现在命令行；aria2 启动后即读走）
+    const { writeFile, unlink } = await import('fs/promises')
+    const { join } = await import('path')
+    const { userDataDir } = await import('../env')
+    const secretFile = join(userDataDir(), 'aria2-rpc-secret')
+    // M1 加固：secret 文件仅属主可读写（Linux/macOS 同机低权用户不可读），用后即删
+    await writeFile(secretFile, this.secret, { encoding: 'utf8', mode: 0o600 })
+    const args = toSpawnArgs(this.globalOptions, secretFile, this.rpcPort)
+    const proc = spawnTreeAware(binaryPath('aria2c'), args, {
+      stdio: ['ignore', 'ignore', 'pipe']
+    })
+    this.proc = proc
+    proc.stderr?.on('data', (d: Buffer) => log.debug(`[aria2c] ${String(d).trim()}`))
+    proc.on('exit', (code) => {
+      // H1 修复：exit 回调必须校验进程身份——旧进程的 exit 事件（Windows taskkill
+      // 有延迟）可能在重启流程 spawn 出新进程后才迟到，若无身份校验会误关新 client、
+      // 误停心跳并再次触发 scheduleRestart（terminateTree 指向健康新进程）→ 重启风暴
+      if (this.proc !== proc) return
+      log.warn(`aria2c exited (code=${code})`)
+      this.proc = null
+      if (this.client === client) {
         this.client?.close()
         this.client = null
         this.stopHeartbeat()
-        if (!this.stopped) void this.scheduleRestart()
-      })
+      }
+      if (!this.stopped) void this.scheduleRestart()
+    })
 
-      this.client = new Aria2RpcClient(this.rpcPort, this.secret, () => {
-        // B5：进程存活但 WS 断开 → 触发重启路径（scheduleRestart 内部有幂等防护）
-        if (!this.stopped) {
-          log.warn('aria2 rpc websocket closed unexpectedly')
-          void this.scheduleRestart()
-        }
-      })
+    const client = new Aria2RpcClient(this.rpcPort, this.secret, () => {
+      // B5：进程存活但 WS 断开 → 触发重启路径（scheduleRestart 内部有幂等防护）
+      if (!this.stopped && this.proc === proc) {
+        log.warn('aria2 rpc websocket closed unexpectedly')
+        void this.scheduleRestart()
+      }
+    })
+    this.client = client
+    try {
       await this.waitForRpc()
-      await this.client.call('changeGlobalOption', {
-        ...this.globalOptions,
-        'rpc-listen-port': undefined
-      })
-      this.backoffMs = 1000
-      this.consecutiveFailures = 0
-      this.startHeartbeat()
-      log.info(`aria2 online at rpc port ${this.rpcPort}`)
-      this.events.onOnline(this.rpcPort)
     } finally {
-      this.restarting = false
+      // M1：RPC 就绪后 secret 已被 aria2 读取，删除落盘残留（失败不阻断）
+      void unlink(secretFile).catch(() => {})
     }
+    await client.call('changeGlobalOption', {
+      ...this.globalOptions,
+      'rpc-listen-port': undefined
+    })
+    this.backoffMs = 1000
+    this.consecutiveFailures = 0
+    this.startHeartbeat()
+    log.info(`aria2 online at rpc port ${this.rpcPort}`)
+    this.events.onOnline(this.rpcPort)
   }
 
   private waitForRpc(): Promise<void> {
@@ -267,31 +276,41 @@ export class Aria2Supervisor {
 
   /** 指数退避重启：1s→2s→4s→…上限 30s；连续 5 次失败标记离线 */
   private async scheduleRestart(): Promise<void> {
+    // H1 修复：restarting 标志贯穿整个重启周期（含退避等待与重试），而非只在
+    // spawnAndConnect 内短暂为真——否则 WS 断开与进程退出双重触发可穿透幂等防护，
+    // 并发双 spawn 抢占同一 rpc 端口
     if (this.restarting || this.stopped) return
     this.restarting = true
     try {
-      this.consecutiveFailures++
-      if (this.consecutiveFailures >= 5) {
-        log.error('aria2 offline: 5 consecutive failures')
-        this.events.onOffline()
-        // 保持退避继续尝试恢复（UI 红点已亮）
+      for (;;) {
+        if (this.stopped) return
+        this.consecutiveFailures++
+        if (this.consecutiveFailures >= 5) {
+          log.error('aria2 offline: 5 consecutive failures')
+          this.events.onOffline()
+          // 保持退避继续尝试恢复（UI 红点已亮）
+        }
+        // 先终止残留进程（B5：WS 断开但进程存活时，必须释放端口再重生）
+        if (this.proc && this.proc.exitCode === null) {
+          terminateTree(this.proc, 3000)
+          this.proc = null
+        }
+        const delay = this.backoffMs
+        this.backoffMs = Math.min(this.backoffMs * 2, 30_000)
+        log.info(`restarting aria2c in ${delay}ms (failure #${this.consecutiveFailures})`)
+        await new Promise((r) => setTimeout(r, delay))
+        if (this.stopped) return
+        try {
+          await this.spawnAndConnect()
+          return
+        } catch (err) {
+          // spawn/connect 失败：继续退避循环（此前 finally 提前清标志 + 递归触发
+          // 时 restarting 仍为 true 会被幂等守卫吞掉，重启实际丢失）
+          log.error('aria2 restart failed', err)
+        }
       }
-      // 先终止残留进程（B5：WS 断开但进程存活时，必须释放端口再重生）
-      if (this.proc && this.proc.exitCode === null) {
-        terminateTree(this.proc, 3000)
-        this.proc = null
-      }
-      const delay = this.backoffMs
-      this.backoffMs = Math.min(this.backoffMs * 2, 30_000)
-      log.info(`restarting aria2c in ${delay}ms (failure #${this.consecutiveFailures})`)
-      await new Promise((r) => setTimeout(r, delay))
-      if (this.stopped) return
-      await this.spawnAndConnect()
-    } catch (err) {
-      log.error('aria2 restart failed', err)
+    } finally {
       this.restarting = false
-      if (!this.stopped) void this.scheduleRestart()
-      return
     }
   }
 

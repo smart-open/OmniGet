@@ -8,19 +8,32 @@ const log = createLogger('stats')
 
 let timer: NodeJS.Timeout | null = null
 
-/** 全量重算（启动/跨天）：统计页只读本表，不扫全量任务（§5 口径） */
+/** 全量重算（启动/跨天）：统计页只读本表，不扫全量任务（§5 口径）
+ * H5 修复：① 全程事务（原先 DELETE+INSERT 非事务，中途崩溃留空表）；
+ * ② 保留历史 peak_speed_bps（原重算只回填完成量，每日峰值直接归零） */
 export function recomputeDailyStats(): void {
   const db = getDb()
-  db.exec(`
-    DELETE FROM daily_stats;
-    INSERT INTO daily_stats (day, completed_count, completed_bytes)
-    SELECT date(completed_at / 1000, 'unixepoch', 'localtime') AS day,
-           COUNT(*)                         AS completed_count,
-           COALESCE(SUM(total_bytes), 0)    AS completed_bytes
-    FROM tasks
-    WHERE status = 'completed' AND completed_at IS NOT NULL
-    GROUP BY day;
-  `)
+  db.transaction(() => {
+    // 先备份已有峰值（采样值无法从 tasks 反推，只能从旧表继承）
+    const peaks = db
+      .prepare('SELECT day, peak_speed_bps FROM daily_stats WHERE peak_speed_bps > 0')
+      .all() as Array<{ day: string; peak_speed_bps: number }>
+    db.exec('DELETE FROM daily_stats')
+    db.exec(`
+      INSERT INTO daily_stats (day, completed_count, completed_bytes)
+      SELECT date(completed_at / 1000, 'unixepoch', 'localtime') AS day,
+             COUNT(*)                         AS completed_count,
+             COALESCE(SUM(total_bytes), 0)    AS completed_bytes
+      FROM tasks
+      WHERE status = 'completed' AND completed_at IS NOT NULL
+      GROUP BY day;
+    `)
+    const merge = db.prepare(
+      `INSERT INTO daily_stats (day, peak_speed_bps) VALUES (?, ?)
+       ON CONFLICT(day) DO UPDATE SET peak_speed_bps = MAX(peak_speed_bps, excluded.peak_speed_bps)`
+    )
+    for (const p of peaks) merge.run(p.day, p.peak_speed_bps)
+  })()
   log.info('daily_stats recomputed')
 }
 

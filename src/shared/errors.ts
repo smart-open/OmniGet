@@ -24,6 +24,11 @@ export const ERROR_CODES = {
     message: '引擎文件校验失败，已拒绝启动以保护系统安全。请重新安装 OmniGet。',
     exitHint: '重新安装'
   },
+  ENGINE_FINGERPRINT_STORE_CORRUPT: {
+    kind: 'engine',
+    message: '引擎指纹库损坏，为防止被篡改的引擎被执行已拒绝启动。删除 fingerprints.json 后重启可重新登记。',
+    exitHint: '查看帮助'
+  },
   ENGINE_PORT_OCCUPIED: {
     kind: 'engine',
     message: '本地端口被占用，已自动改用备用端口；若任务异常请检查防火墙设置。',

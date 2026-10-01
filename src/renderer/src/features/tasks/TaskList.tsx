@@ -72,6 +72,7 @@ export function TaskList({
 }) {
   const tasks = useTasks((s) => s.tasks)
   const loading = useTasks((s) => s.loading)
+  const loadError = useTasks((s) => s.loadError)
   const loadedFilter = useTasks((s) => s.loadedFilter)
   const load = useTasks((s) => s.load)
   const selectedTaskId = useTasks((s) => s.selectedTaskId)
@@ -225,6 +226,20 @@ export function TaskList({
 
   // ── 空态（构成式插画 + 一个动作按钮）───────────────────────────────
   if (list.length === 0) {
+    // M11：加载失败且无数据可展示时给明确错误态（不得静默当作"没有任务"）
+    if (loadError) {
+      return (
+        <main className="h-full overflow-y-auto">
+          <div className="flex h-full flex-col items-center justify-center gap-3">
+            <p className="text-sm text-text-2">任务列表加载失败</p>
+            <p className="text-xs text-text-3">{loadError}</p>
+            <Button size="xs" variant="outline" onClick={() => void load(loadedFilter)}>
+              重试
+            </Button>
+          </div>
+        </main>
+      )
+    }
     // 搜索无匹配（库里有任务但被查询过滤掉）
     if (tasks.size > 0 && query.trim() !== '') {
       return (

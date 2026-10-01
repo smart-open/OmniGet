@@ -2,6 +2,7 @@
 
 import { app } from 'electron'
 import { basename, dirname, join } from 'path'
+import { validateSaveDir } from '../save-dir'
 import type {
   Task,
   TaskEvent,
@@ -124,9 +125,11 @@ export class TaskManager {
       const task = getTask(e.taskId) as TaskExt | null
       // P2 加固：回收站/已删除任务的事件不得复活广播（remove 后轮询仍会回一帧 removed→failed）
       if (!task || isTrashed(task.id)) continue
+      let justCompleted = false
       if (e.status && e.status !== task.status) {
         try {
           this.transition(task, e.status)
+          justCompleted = e.status === 'completed'
         } catch (err) {
           if (err instanceof IllegalTransitionError) {
             log.debug(`skip illegal engine transition ${err.from} -> ${err.to} for ${task.id}`)
@@ -142,6 +145,10 @@ export class TaskManager {
         // M3-6：wm_level 回填（direct|fallback|post）
         ...(e.wmLevel ? { wmLevel: e.wmLevel } : {})
       })
+      if (justCompleted) {
+        // H5：此刻 totalBytes 已是引擎最终值，记账才准确
+        this.recordCompletionBytes(e.totalBytes ?? task.totalBytes ?? 0)
+      }
       // P1 加固：yt-dlp 单视频完成时产物落 task_files（此前 video/music 无 task_files，
       // 回收站「删除（含文件）」对这两类任务一个文件都不删）
       if (e.status === 'completed' && task.engine === 'ytdlp') {
@@ -164,14 +171,14 @@ export class TaskManager {
   private persistYtdlpProduct(task: TaskExt, e: TaskEvent): void {
     if (getTaskFiles(task.id).length > 0) return
     void (async () => {
-      const { readdir } = await import('fs/promises')
+      const { readdir, stat } = await import('fs/promises')
+      const { join } = await import('path')
       const entries = await readdir(task.saveDir).catch(() => [] as string[])
       const videos = entries.filter((f) => /\.(mp4|mkv|webm|mov|flv|ts)$/i.test(f) && !f.endsWith('.part'))
       if (videos.length === 0) return
-      const { stat } = await import('fs/promises')
       let best: { path: string; m: number } | null = null
       for (const f of videos) {
-        const m = await stat(`${task.saveDir}/${f}`).then((s) => s.mtimeMs).catch(() => 0)
+        const m = await stat(join(task.saveDir, f)).then((s) => s.mtimeMs).catch(() => 0)
         if (!best || m > best.m) best = { path: f, m }
       }
       if (!best) return
@@ -179,7 +186,10 @@ export class TaskManager {
       saveTaskFiles(task.id, [
         { path: best.path, size, selected: true, downloaded: size }
       ])
-    })()
+    })().catch((err) => {
+      // 修复：saveTaskFiles 同步异常（如退出阶段 DB 已关闭）不得逃逸为 unhandledRejection
+      log.warn(`persistYtdlpProduct failed for ${task.id}`, err)
+    })
   }
 
   // ── R2：全局并发上限（download.maxConcurrent，0=不限）───────────────
@@ -260,6 +270,12 @@ export class TaskManager {
 
   // ── 新建任务（§7.5 流程状态机）─────────────────────────────────────
 
+  /** H9 修复：渲染层传入的 saveDir 必须校验——实现收敛到 save-dir 模块
+   *（IPC settingsSet('download.saveDir') 与任务创建共用同一防线，含自启动目录拦截） */
+  private validateSaveDir(dir: string): string | null {
+    return validateSaveDir(dir)
+  }
+
   async createTask(input: {
     source: string
     threads: number
@@ -286,6 +302,8 @@ export class TaskManager {
     if (!saveDir) {
       return { kind: 'failed', error: '请先设置保存目录（设置 → 下载，或对话框内选择）' }
     }
+    const dirErr = this.validateSaveDir(saveDir)
+    if (dirErr) return { kind: 'failed', error: dirErr }
     // R7：按类型自动归档（opt-in，设置 download.autoArchive）——创建时路由到分类子目录
     if (getSettingParsed<boolean>('download.autoArchive') === true) {
       const mediaExt = /\.(mp4|mkv|webm|avi|mov|flv|ts|mp3|flac|m4a|wav|ogg|opus|aac)(\?|#|$)/i
@@ -570,8 +588,11 @@ export class TaskManager {
         }
         if (input.withFiles) {
           // B6：只删除任务文件（task_files 记录的相对路径），禁止整目录 rm
-          await this.deleteTaskFiles(task)
+          // M2 修复：先 purge 记录后删文件——中途崩溃最多残留孤儿文件（无害可再清），
+          // 而非「记录在但文件已删」的矛盾状态
+          const files = getTaskFiles(task.id)
           purgeTask(task.id)
+          await this.deleteTaskFiles(task, files)
         } else {
           softDeleteTask(task.id) // 回收站：默认保留文件（§4.5）
         }
@@ -585,11 +606,12 @@ export class TaskManager {
     }
   }
 
-  /** B6：按 task_files 精确删除任务文件；目录内无其他文件时顺带清理空目录 */
-  private async deleteTaskFiles(task: Task): Promise<void> {
+  /** B6：按 task_files 精确删除任务文件；目录内无其他文件时顺带清理空目录。
+   * files 可由调用方预捕获（M2：purge 记录后 task_files 已清空，需传入快照） */
+  private async deleteTaskFiles(task: Task, fileList?: TaskFile[]): Promise<void> {
     const { rm, readdir } = await import('fs/promises')
     const { join, dirname } = await import('path')
-    const files = getTaskFiles(task.id)
+    const files = fileList ?? getTaskFiles(task.id)
     const saveDir = task.saveDir.replace(/\\/g, '/').replace(/\/+$/, '')
     const dirs = new Set<string>()
     // 大小写口径跟文件系统走：win32/macOS 不敏感，Linux 敏感（防止 /data/Foo 被误判为 saveDir 内）
@@ -713,6 +735,8 @@ export class TaskManager {
       this.pushEvent({ taskId, status: 'queued' })
       // 音乐/工具失败重试：立即重泵对应队列（否则任务卡 queued 直到引擎重启）
       if (task.engine === 'music') this.pumpMusic()
+      // H6 修复：tool 引擎此前无任何重新提交路径，failed→queued 后永久卡死
+      if (task.engine === 'tool') void this.runToolTask(task)
       return
     }
     // R2：过并发闸门（排队时任务停在 queued，槽位释放后自动启动）
@@ -783,47 +807,70 @@ export class TaskManager {
       downloadedBytes: 0,
       speedBps: 0,
       threads: 0,
+      // H6 修复：持久化工具输入——否则重试时 tool/params 丢失，failed 永远无法重新提交
+      params: JSON.stringify({ ...input, saveDir: input.saveDir ?? '' }),
       createdAt: Date.now()
     }
     insertTask(task)
     this.pushEvent({ taskId: task.id, status: 'queued' })
+    void this.runToolTask(task)
+    return { taskId: task.id }
+  }
 
+  /** 工具任务执行体（创建与重试共用）。调用时任务应为 queued 状态 */
+  private async runToolTask(task: TaskExt): Promise<void> {
     // M4-12/M4-13：工具任务 running 中断标记 failed（ffmpeg 中间产物不续传，§4.5）
-    void (async () => {
+    try {
+      let input: { tool: string; sourcePath: string; params: Record<string, unknown>; saveDir?: string }
       try {
-        this.transition(task, 'running')
-        this.pushEvent({ taskId: task.id, status: 'running' })
-        const output = await toolbox.submit(
-          {
-            tool: input.tool,
+        input = JSON.parse(task.params ?? '') as typeof input
+      } catch {
+        throw new Error('工具任务参数缺失，无法重试（请重新创建任务）')
+      }
+      this.transition(task, 'running')
+      this.pushEvent({ taskId: task.id, status: 'running' })
+      const output = await toolbox.submit(
+        {
+          tool: input.tool,
           sourcePath: input.sourcePath,
           params: input.params,
           // 缺省回退：源文件所在目录（而非文件本身——那会让 mkdir 失败）
           saveDir: input.saveDir || dirname(input.sourcePath)
         },
-          task.id
-        )
-        this.transition(task, 'completed')
-        // saveDir 归位产物所在目录：任务列表「打开目录」直达工具产物（此前指向源文件/下载目录）
-        updateTaskFields(task.id, {
-          name: `工具箱：${input.tool} → ${output}`,
-          saveDir: dirname(output),
-          error: null
-        })
-        this.pushEvent({ taskId: task.id, status: 'completed' })
-        log.info(`tool task ${task.id} completed → ${output}`)
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        try {
-          this.transition(task, 'failed')
-        } catch {
-          // 已失败
-        }
-        updateTaskFields(task.id, { error: message })
-        this.pushEvent({ taskId: task.id, status: 'failed', error: message })
+        task.id
+      )
+      this.transition(task, 'completed')
+      // saveDir 归位产物所在目录：任务列表「打开目录」直达工具产物（此前指向源文件/下载目录）
+      updateTaskFields(task.id, {
+        name: `工具箱：${input.tool} → ${output}`,
+        saveDir: dirname(output),
+        error: null
+      })
+      // H5：以产物实际大小记账
+      const { stat } = await import('fs/promises')
+      const size = await stat(output).then((s) => s.size).catch(() => 0)
+      // M3 修复：产物落 task_files——否则「彻底删除（含文件）」对工具任务只删记录，
+      // 工具箱输出目录下的产物永久残留
+      saveTaskFiles(task.id, [
+        { path: basename(output), size, selected: true, downloaded: size }
+      ])
+      this.recordCompletionBytes(size)
+      this.pushEvent({ taskId: task.id, status: 'completed' })
+      log.info(`tool task ${task.id} completed → ${output}`)
+    } catch (err) {
+      // M3 修复：任务已被 purge/移入回收站（toolbox.cancel 异步生效后本 catch 迟到）
+      // 不得复活记录或把回收站任务广播成 failed
+      const fresh = getTask(task.id) as TaskExt | null
+      if (!fresh || isTrashed(task.id)) return
+      const message = err instanceof Error ? err.message : String(err)
+      try {
+        this.transition(fresh, 'failed')
+      } catch {
+        // 已失败
       }
-    })()
-    return { taskId: task.id }
+      updateTaskFields(task.id, { error: message })
+      this.pushEvent({ taskId: task.id, status: 'failed', error: message })
+    }
   }
 
   // ── 内部 ───────────────────────────────────────────────────────────
@@ -833,11 +880,15 @@ export class TaskManager {
     const patch: Parameters<typeof updateTaskFields>[1] = { status: to }
     if (to === 'completed') {
       patch.completedAt = Date.now()
-      // M4-4：完成量/体积当日增量
-      recordCompletion(Date.now(), task.totalBytes)
     }
     updateTaskFields(task.id, patch)
     task.status = to
+  }
+
+  /** M4-4：完成量/体积当日增量。H5 修复：必须在真实字节数回写 DB 之后再记账，
+   * （transition 时刻 totalBytes 往往还是旧值——音乐首发即完成时记 0，完成体积少记） */
+  private recordCompletionBytes(bytes: number): void {
+    recordCompletion(Date.now(), Math.max(0, bytes ?? 0))
   }
 
   private pushEvent(e: TaskEvent): void {
@@ -938,6 +989,11 @@ export class TaskManager {
     // B3：缺省落系统下载目录（app.getPath('downloads')）
     const saveDir =
       input.saveDir?.trim() || app.getPath('downloads')
+    {
+      // H9：音乐任务同样校验（此前直用渲染层传入的任意目录）
+      const dirErr = this.validateSaveDir(saveDir)
+      if (dirErr) throw new Error(dirErr)
+    }
     const task: TaskExt = {
       id: uuidv7(),
       type: 'music',
@@ -1117,6 +1173,8 @@ export class TaskManager {
         error: null,
         name
       })
+      // H5：真实字节数已回写后再记账
+      this.recordCompletionBytes(bytes)
       // P1 加固：音乐产物落 task_files（此前 music 任务无 task_files，
       // 回收站「删除（含文件）」承诺落空，mp3/lrc 残留磁盘）
       const productFiles: TaskFile[] = []
