@@ -10,6 +10,9 @@ import { spawnTreeAware, terminateTree } from './proc'
 
 const log = createLogger('ytdlp')
 
+/** runAux 辅助进程自增序号（进程表 key） */
+let auxSeq = 0
+
 export interface YtDlpRunHandle {
   taskId: string
   kill(signal?: NodeJS.Signals): void
@@ -161,6 +164,43 @@ export class YtDlpSupervisor {
   /** 任务终态/删除时清理（防 errTails 只增不减） */
   dropTask(taskId: string): void {
     this.errTails.delete(taskId)
+  }
+
+  /**
+   * P2 修复：辅助子进程（delogo ffmpeg / 完整性 ffprobe）统一执行器——
+   * 此前适配层直接裸 spawn：既不在 procs 表（killAll 够不到 → 退出留孤儿），
+   * 也无超时（挂死永久阻塞任务完成）。登记 + 树终止 + 超时一次收口。
+   */
+  runAux(
+    bin: string,
+    args: string[],
+    timeoutMs: number
+  ): Promise<{ code: number | null; stdout: string; stderr: string }> {
+    return new Promise((resolve, reject) => {
+      const proc = spawnTreeAware(bin, args)
+      const key = `aux:${++auxSeq}`
+      this.procs.set(key, proc)
+      let stdout = ''
+      let stderr = ''
+      const finish = (): void => {
+        clearTimeout(timer)
+        this.procs.delete(key)
+      }
+      const timer = setTimeout(() => {
+        terminateTree(proc, 2000)
+        reject(new Error(`辅助进程执行超时（${Math.round(timeoutMs / 1000)}s）`))
+      }, timeoutMs)
+      proc.stdout?.on('data', (d: Buffer) => (stdout += String(d)))
+      proc.stderr?.on('data', (d: Buffer) => (stderr += String(d)))
+      proc.on('exit', (code) => {
+        finish()
+        resolve({ code, stdout, stderr })
+      })
+      proc.on('error', (err) => {
+        finish()
+        reject(err)
+      })
+    })
   }
 
   /** 强杀（应用退出，§2.2）：进程树整体终止 */

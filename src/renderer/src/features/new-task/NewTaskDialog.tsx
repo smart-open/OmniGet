@@ -19,7 +19,6 @@ import { FILE_CATEGORIES, fileCategory } from '@shared/file-category'
 import { useTasks } from '../../stores/tasks'
 import {
   buildTree,
-  collectSelected,
   formatBytes,
   nodeState,
   setSubtree,
@@ -76,6 +75,8 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
   const [batchMode, setBatchMode] = useState(false)
   const [batchBusy, setBatchBusy] = useState(false)
   const [notice, setNotice] = useState('')
+  // P3 修复：批量结果配色改由结构化状态驱动（字符串嗅探 "失败 0" 会被错误明细误命中）
+  const [batchFailed, setBatchFailed] = useState(0)
   // R4：参数预设
   const [presets, setPresets] = useState<VideoPreset[]>([])
   const [presetName, setPresetName] = useState('')
@@ -117,6 +118,7 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
       setBatchMode(false)
       setBatchBusy(false)
       setNotice('')
+      setBatchFailed(0)
       setPresetName('')
       setActivePreset(null)
       const sid2 = sessionRef.current
@@ -131,16 +133,32 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, initialSource])
 
+  // P3 修复：Esc 关闭对话框（桌面应用基本预期；此前只能鼠标点关闭）
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open, onClose])
+
   // 分类筛选（视频/音乐/图片/文档/其他）：过滤后重建文件树，全选/反选只作用于过滤集
   const [cat, setCat] = useState<'all' | 'video' | 'music' | 'image' | 'doc' | 'other'>('all')
   const filteredFiles = useMemo(
     () => (cat === 'all' ? files : files.filter((f) => fileCategory(f.path) === cat)),
     [files, cat]
   )
-  const tree = useMemo(
-    () => (filteredFiles.length ? buildTree(filteredFiles) : null),
-    [filteredFiles]
-  )
+  const tree = useMemo(() => {
+    if (!filteredFiles.length) return null
+    // P2 修复：叶子索引必须用全量列表中的原始序号——此前用过滤后列表的
+    // 位置建 index，cat ≠ 'all' 时搜索 `1,3,5-10` 会高亮/选中错误的行
+    const posByPath = new Map(files.map((f, i) => [f.path, i]))
+    return buildTree(
+      filteredFiles,
+      filteredFiles.map((f) => (posByPath.get(f.path) ?? -1) + 1)
+    )
+  }, [filteredFiles, files])
 
   // 搜索框语法命中集实时高亮并映射 select-file（§4.2）
   const match = useMemo(() => {
@@ -148,7 +166,12 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
     return matchSelectSyntax(query, files.map((f) => f.path))
   }, [query, files])
 
-  const selectedPaths = tree ? collectSelected(tree, selected) : []
+  // P1 修复：勾选收集必须基于全量文件集——tree 受分类筛选影响，
+  // collectSelected(filteredTree) 会把其他分类下的已勾选静默排除（少下文件）
+  const selectedPaths = useMemo(
+    () => files.filter((f) => selected.has(f.path)).map((f) => f.path),
+    [files, selected]
+  )
   const selectedBytes = useMemo(() => {
     const byPath = new Map(files.map((f) => [f.path, f.size]))
     return selectedPaths.reduce((s, p) => s + (byPath.get(p) ?? 0), 0)
@@ -162,6 +185,8 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
     }
     if (res.kind === 'started') {
       // 音乐查询：创建即入队，无文件树，直接关框（任务出现在列表中）
+      // UX 硬性标准：成功必须有可见反馈，不得静默关框
+      toast('任务已创建并入队', 'success')
       onClose()
       return
     }
@@ -247,10 +272,13 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
       return
     }
     setBatchBusy(false)
+    setBatchFailed(failed)
     setNotice(
       `批量入队完成：成功 ${started}，失败 ${failed}` +
         (failures.length ? `；${failures.join('；')}` : '')
     )
+    // UX 硬性标准：批量入队全成功也要有可见成功反馈
+    if (failed === 0) toast(`批量入队完成：成功 ${started} 个任务`, 'success')
     void useTasks.getState().load('all')
   }
 
@@ -363,6 +391,8 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
       })
       if (sid !== sessionRef.current) return
       await useTasks.getState().load('all')
+      // UX 硬性标准：成功必须有可见反馈，不得静默关框
+      toast('任务已创建', 'success')
       onClose()
     } catch (err) {
       if (sid !== sessionRef.current) return
@@ -495,7 +525,7 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
               {notice && (
                 <div
                   className={`mt-2 break-words rounded-ctl border px-3 py-2 text-xs ${
-                    notice.includes('失败 0')
+                    batchFailed === 0
                       ? 'border-success/40 bg-success/10 text-success'
                       : 'border-warning/40 bg-warning/10 text-warning'
                   }`}
@@ -551,11 +581,20 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
                       <button
                         className="text-text-3 transition-colors hover:text-accent"
                         onClick={() => {
-                          const next = new Set<string>()
-                          filteredFiles.forEach((f) => {
-                            if (!selected.has(f.path)) next.add(f.path)
+                          // P1 修复：反选基于全量文件集——仅对当前分类内取反，
+                          // 其他分类的已勾选保持不变（此前会整体清空）
+                          setSelected((prev) => {
+                            const next = new Set<string>()
+                            files.forEach((f) => {
+                              const inCat = cat === 'all' || fileCategory(f.path) === cat
+                              if (inCat) {
+                                if (!prev.has(f.path)) next.add(f.path)
+                              } else if (prev.has(f.path)) {
+                                next.add(f.path)
+                              }
+                            })
+                            return next
                           })
-                          setSelected(next)
                         }}
                       >
                         反选

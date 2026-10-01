@@ -265,7 +265,17 @@ export class PlatformEngine {
         if (!trustedAudioUrl(url)) continue
         const size = await fetchToFile(url, part, { signal: this.cb.signal, minBytes: 1024 })
         if (size >= minMb * 1024 * 1024) {
-          await rename(part, mp3Path)
+          // P2 修复：目标已存在（Windows EEXIST/EPERM，如上次任务只留下 mp3）时
+          // rename 抛错会把已到手产物误判为下载失败——目标存在即视为成功并清理 part
+          try {
+            await rename(part, mp3Path)
+          } catch (err) {
+            const exists = await stat(mp3Path)
+              .then(() => true)
+              .catch(() => false)
+            if (!exists) throw err
+            await unlink(part).catch(() => {})
+          }
           return true
         }
         if (size > 0) await unlink(part).catch(() => {})

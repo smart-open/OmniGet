@@ -245,6 +245,9 @@ export function ToolboxPage() {
       .then(setDefs)
       .catch((err) => setDefsError(err instanceof Error ? err.message : String(err)))
     const off = window.omniget.onToolEvents((e: ToolEvent) => {
+      // P3 修复：缺 taskId 的事件直接跳过——空串占位会造成多条 key='' 的
+      // React 重复 key（类型上 ToolEvent.taskId 必填，防御口径应为跳过而非入库）
+      if (!e.taskId) return
       // 以 taskId 归位：多区域剪辑并发提交时进度不再错挂到最近一条
       setJobs((prev) => {
         const idx = prev.findIndex((j) => j.taskId === e.taskId)
@@ -280,6 +283,16 @@ export function ToolboxPage() {
   const toolJobs = jobs.filter(
     (j) => j.tool === activeTool || (isClip && j.tool === 'region-concat')
   )
+
+  // P3 修复：切换工具时清空源文件/附加文件——残留的源文件往往已不符合
+  // 新工具的 accept 类型，直接提交会被主进程拒绝
+  function selectTool(toolId: string): void {
+    if (toolId !== activeTool) {
+      setSourcePath('')
+      setExtraFiles([])
+    }
+    setActiveTool(toolId)
+  }
 
   function pickFile(toolId: string): void {
     const d = defs.find((x) => x.id === toolId)
@@ -462,7 +475,7 @@ export function ToolboxPage() {
                 return (
                   <button
                     key={d.id}
-                    onClick={() => setActiveTool(d.id)}
+                    onClick={() => selectTool(d.id)}
                     title={d.desc}
                     className={`mb-0.5 flex w-full items-center gap-2 rounded-ctl px-2.5 py-2 text-left transition-colors ${
                       isActive

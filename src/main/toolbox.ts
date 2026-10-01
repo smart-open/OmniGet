@@ -36,6 +36,8 @@ export interface ToolDef {
   build: (inputPath: string, outDir: string, params: Record<string, unknown>) => {
     args: string[]
     output: string
+    /** P2 修复：多产物工具（voice-sep 的伴奏+人声两轨）——取消时须逐个清理半成品 */
+    extraOutputs?: string[]
     /** 执行前写入的辅助文件（如 concat 清单） */
     prewrite?: { path: string; content: string }
   }
@@ -231,7 +233,8 @@ export const TOOL_DEFS: ToolDef[] = [
           '-af', 'pan=stereo|c0=c0-c1|c1=c1-c0', '-b:a', '320k', inst,
           '-af', 'pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c1+0.5*c0', '-b:a', '320k', vocal
         ],
-        output: inst
+        output: inst,
+        extraOutputs: [vocal]
       }
     }
   },
@@ -709,12 +712,18 @@ export class ToolboxRunner {
   private queue: Array<() => void> = []
   private listeners = new Set<(e: ToolEvent) => void>()
   /** 运行中的 ffmpeg 进程（按任务 id 索引，支持取消） */
-  private procs = new Map<string, { proc: ChildProcess; output: string; tool: string }>()
+  private procs = new Map<
+    string,
+    { proc: ChildProcess; output: string; tool: string; extraOutputs: string[] }
+  >()
   /** node 运行时任务（纯 JS compute 无法强杀，登记取消标记 + 产物路径） */
   private nodeTasks = new Map<string, { output: string; cancelled: boolean; tool: string }>()
   /** L3 修复：取消标记——terminateTree（组信号/taskkill）不置 proc.killed，
    * exit 判定取消改用本集合（跨平台口径一致） */
   private cancelled = new Set<string>()
+  /** P1 修复：排队中（等待信号量）的任务登记——此前 cancel 对排队任务恒 false，
+   * 删除任务后 ffmpeg/node 照常执行，软删任务还会被"复活"为 completed */
+  private queuedTasks = new Map<string, { tool: string; cancelled: boolean }>()
 
   onEvent(cb: (e: ToolEvent) => void): () => void {
     this.listeners.add(cb)
@@ -741,9 +750,13 @@ export class ToolboxRunner {
         else entry.proc.once('exit', () => resolve())
       })
       void exited.then(() =>
-        // 半成品清理：ffmpeg 单文件产物；demucs 为目录产物 → recursive 兼容两者
+        // 半成品清理：ffmpeg 单/多产物（voice-sep 为伴奏+人声两轨）；demucs 为目录产物 → recursive 兼容
         import('fs/promises').then(({ rm }) =>
-          rm(entry.output, { recursive: true, force: true }).catch(() => {})
+          Promise.all(
+            [entry.output, ...entry.extraOutputs].map((p) =>
+              rm(p, { recursive: true, force: true }).catch(() => {})
+            )
+          )
         )
       )
       log.info(`tool task ${taskId} cancelled, partial output removed: ${entry.output}`)
@@ -765,7 +778,45 @@ export class ToolboxRunner {
       log.info(`tool(node) task ${taskId} cancelled`)
       return true
     }
+    // P1 修复：排队中的任务——标记取消，起跑复核（acquireSlot）会放弃执行
+    const queued = this.queuedTasks.get(taskId)
+    if (queued) {
+      queued.cancelled = true
+      log.info(`tool task ${taskId} cancelled while queued`)
+      return true
+    }
     return false
+  }
+
+  /**
+   * P1 修复：信号量获取 + 排队取消复核。
+   * 排队期间任务可被 cancel() 标记；拿到额度后复核，已取消则移交额度并返回 false，
+   * 调用方必须直接放弃执行（不得触碰 this.active）。
+   */
+  private async acquireSlot(taskId: string, tool: string): Promise<boolean> {
+    const entry = { tool, cancelled: false }
+    if (taskId) this.queuedTasks.set(taskId, entry)
+    try {
+      if (this.active >= MAX_TOOL_CONCURRENT) {
+        await new Promise<void>((r) => this.queue.push(r))
+      } else {
+        this.active++
+      }
+    } finally {
+      if (taskId) this.queuedTasks.delete(taskId)
+    }
+    if (entry.cancelled) {
+      // 排队期间被取消：移交额度给下一个排队者
+      this.active--
+      const next = this.queue.shift()
+      if (next) {
+        this.active++
+        next()
+      }
+      this.emit({ taskId, tool, status: 'failed', message: '任务已取消' })
+      return false
+    }
+    return true
   }
 
   async submit(input: ToolCreateInput, taskId = ''): Promise<string> {
@@ -788,11 +839,7 @@ export class ToolboxRunner {
     }
     // T5：node 运行时工具（纯 JS，不经 ffmpeg CLI）
     if (def.runtime === 'node' && def.compute) {
-      if (this.active >= MAX_TOOL_CONCURRENT) {
-        await new Promise<void>((r) => this.queue.push(r))
-      } else {
-        this.active++
-      }
+      if (!(await this.acquireSlot(taskId, input.tool))) throw new Error('任务已取消')
       this.emit({ taskId, tool: input.tool, status: 'running', message: '处理中' })
       // 登记 node 任务（支持取消）；output 置空——取消时只删真实产物，
       // 严禁 rm 整个 outDir（会连带删除历史产物）
@@ -841,21 +888,17 @@ export class ToolboxRunner {
       })
       throw err
     }
-    const { args, output, prewrite } = built
+    const { args, output, prewrite, extraOutputs } = built
     if (prewrite) {
       await writeFile(prewrite.path, prewrite.content, 'utf8')
     }
     log.info(`tool ${input.tool} → ${output}`)
 
     // 信号量：≤2 并发（§4.7，不计入下载并发）；排队者额度由释放方同步移交
-    if (this.active >= MAX_TOOL_CONCURRENT) {
-      await new Promise<void>((r) => this.queue.push(r))
-    } else {
-      this.active++
-    }
+    if (!(await this.acquireSlot(taskId, input.tool))) throw new Error('任务已取消')
     this.emit({ taskId, tool: input.tool, status: 'running', message: '处理中' })
     try {
-      await this.runFfmpeg(args, output, taskId, input.tool)
+      await this.runFfmpeg(args, output, taskId, input.tool, extraOutputs ?? [])
       const size = await stat(output).then((s) => s.size).catch(() => 0)
       this.emit({ taskId, tool: input.tool, status: 'completed', message: output, bytes: size })
       log.info(`tool ${input.tool} completed: ${output} (${size} bytes)`)
@@ -910,11 +953,7 @@ export class ToolboxRunner {
     }
 
     // 排队者额度由释放方同步移交（同 submit）
-    if (this.active >= MAX_TOOL_CONCURRENT) {
-      await new Promise<void>((r) => this.queue.push(r))
-    } else {
-      this.active++
-    }
+    if (!(await this.acquireSlot(taskId, input.tool))) throw new Error('任务已取消')
     this.emit({ taskId, tool: input.tool, status: 'running', message: '正在检测 Demucs 运行时…' })
     try {
       const output = await this.runDemucs(exe, args, join(outDir, model, baseName(input.sourcePath)), taskId)
@@ -947,7 +986,7 @@ export class ToolboxRunner {
         reject(this.demucsMissingHint(err))
         return
       }
-      this.procs.set(taskId, { proc, output: outPath, tool: 'stem-demucs' })
+      this.procs.set(taskId, { proc, output: outPath, tool: 'stem-demucs', extraOutputs: [] })
       let stderrTail = ''
       proc.stderr?.on('data', (d: Buffer) => {
         stderrTail = (stderrTail + String(d)).slice(-2000)
@@ -995,14 +1034,15 @@ export class ToolboxRunner {
     args: string[],
     output: string,
     taskId: string,
-    tool: string
+    tool: string,
+    extraOutputs: string[] = []
   ): Promise<void> {
     await ensureVerified('ffmpeg') // TOFU 强制校验
     const ffmpeg = toolPath('ffmpeg')
     return new Promise((resolve, reject) => {
       const proc = spawnTreeAware(ffmpeg, args)
       // 先登记进程表再由调用方 emit running（收窄 cancel 返回 false 但进程照跑的窗口）
-      this.procs.set(taskId, { proc, output, tool })
+      this.procs.set(taskId, { proc, output, tool, extraOutputs })
       let stderrTail = ''
       proc.stderr?.on('data', (d: Buffer) => {
         const text = String(d)

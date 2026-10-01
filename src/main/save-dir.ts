@@ -11,6 +11,9 @@ export function validateSaveDir(dir: string): string | null {
   const d = (dir ?? '').trim()
   if (!d) return '保存目录为空'
   if (!isAbsolute(d)) return '保存目录必须是绝对路径'
+  // P3 修复：拒绝 UNC 路径——下载落盘到网络共享会触发 SMB 出站认证（凭据面），
+  // 与读取侧 taskParseFile 的 UNC 拒绝对称
+  if (/^\\\\/.test(d)) return '不允许 UNC 网络路径作为保存目录'
   if (d.includes('\0')) return '保存目录包含非法字符'
   const norm = d.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
   const profile = (process.env.USERPROFILE ?? process.env.HOME ?? '').replace(/\\/g, '/').toLowerCase()
@@ -46,5 +49,7 @@ export function validateSaveDir(dir: string): string | null {
 
 /** 剥离盘符前缀（c:/windows → /windows），用于任意盘符的系统目录比对 */
 function strippedOfDrive(norm: string): string {
-  return norm.replace(/^\/[a-z]:/, '')
+  // 兼容 'c:/x'（norm 产出形态）与 '/c:/x' 两种形态——旧正则只匹配后者，
+  // 导致 C:\Windows 等路径漏判（回归测试已锁定）
+  return norm.replace(/^\/?[a-z]:/, '')
 }

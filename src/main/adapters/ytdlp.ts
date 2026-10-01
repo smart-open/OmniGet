@@ -365,7 +365,6 @@ export class YtDlpAdapter {
   /** M3-7 L3：对本任务产物视频做 delogo（右上角 15%×8%），产出 _nowm 副本 */
   private async delogoLatest(task: Task, tracked: string[] = []): Promise<void> {
     const { readdir } = await import('fs/promises')
-    const { spawn } = await import('child_process')
     const { toolPath } = await import('../orchestrator/binaries')
 
     let video: string | null = tracked.filter((f) => /\.(mp4|mkv|webm|mov)$/i.test(f) && !f.includes('_nowm')).pop() ?? null
@@ -378,31 +377,28 @@ export class YtDlpAdapter {
     }
     if (!video) return
     const out = video.replace(/(\.\w+)$/, '_nowm$1')
-    await new Promise<void>((resolve, reject) => {
-      const proc = spawn(
-        toolPath('ffmpeg'),
-        [
-          '-y',
-          '-i',
-          video,
-          '-vf',
-          'delogo=x=iw*0.85:y=ih*0.02:w=iw*0.15:h=ih*0.08',
-          '-c:a',
-          'copy',
-          out
-        ],
-        { windowsHide: true }
-      )
-      proc.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg exit ${code}`))))
-      proc.on('error', reject)
-    })
+    // P2 修复：改走 supervisor.runAux——登记进进程表（退出 killAll 可杀）+ 超时兜底
+    const res = await this.supervisor.runAux(
+      toolPath('ffmpeg'),
+      [
+        '-y',
+        '-i',
+        video,
+        '-vf',
+        'delogo=x=iw*0.85:y=ih*0.02:w=iw*0.15:h=ih*0.08',
+        '-c:a',
+        'copy',
+        out
+      ],
+      30 * 60_000
+    )
+    if (res.code !== 0) throw new Error(`ffmpeg exit ${res.code}`)
   }
 
   /** M4-12：ffprobe 完整性探测（可探测项失败 → 返回标黄提示文案，不判失败） */
   private async verifyIntegrity(task: Task, tracked: string[] = []): Promise<string | undefined> {
     try {
       const { readdir } = await import('fs/promises')
-      const { spawn } = await import('child_process')
       const { toolPath } = await import('../orchestrator/binaries')
       let video: string | null = tracked.filter((f) => /\.(mp4|mkv|webm|mov)$/i.test(f)).pop() ?? null
       if (!video) {
@@ -413,16 +409,15 @@ export class YtDlpAdapter {
         )
       }
       if (!video) return
-      const probe = toolPath('ffprobe')
-      const out = await new Promise<string>((resolve) => {
-        const proc = spawn(probe, [
-          '-v', 'error', '-show_entries', 'format=duration', '-of', 'json', video
-        ], { windowsHide: true })
-        let stdout = ''
-        proc.stdout?.on('data', (d: Buffer) => (stdout += String(d)))
-        proc.on('exit', (code) => resolve(code === 0 ? stdout : ''))
-        proc.on('error', () => resolve(''))
-      })
+      // P2 修复：改走 supervisor.runAux——登记 + 超时（探测挂死此前会永久阻塞）
+      const out = await this.supervisor
+        .runAux(
+          toolPath('ffprobe'),
+          ['-v', 'error', '-show_entries', 'format=duration', '-of', 'json', video],
+          30_000
+        )
+        .then((r) => (r.code === 0 ? r.stdout : ''))
+        .catch(() => '')
       const duration = Number((JSON.parse(out || '{}') as { format?: { duration?: string } }).format?.duration ?? 0)
       if (duration <= 0) {
         return '完整性探测未通过：文件可能损坏，点击重试可重新下载。'

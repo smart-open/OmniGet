@@ -5,7 +5,8 @@ import { create } from 'zustand'
 export type NoticeLevel = 'success' | 'warning' | 'info'
 
 export interface ToastItem {
-  id: number
+  /** P3 修复：UUID 前缀字符串——原 Date.now()+Math.random() 同毫秒极小概率碰撞 */
+  id: string
   level: NoticeLevel
   message: string
 }
@@ -13,13 +14,14 @@ export interface ToastItem {
 interface ToastState {
   toasts: ToastItem[]
   push: (message: string, level?: NoticeLevel) => void
-  dismiss: (id: number) => void
+  dismiss: (id: string) => void
 }
 
 export const useToasts = create<ToastState>((set, get) => ({
   toasts: [],
   push: (message, level = 'info') => {
-    const id = Date.now() + Math.random()
+    // P3 修复：Date.now()+Math.random() 同毫秒极小概率碰撞，改用 UUID 前缀
+    const id = crypto.randomUUID()
     set((s) => ({ toasts: [...s.toasts.slice(-4), { id, level, message }] }))
     setTimeout(() => get().dismiss(id), 3500)
   },

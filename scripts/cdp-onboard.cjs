@@ -40,8 +40,10 @@ async function main() {
   })
   await new Promise((r) => ws.on('open', r))
   // 1) 重置向导标记（写库留足时间）
+  // P2 修复：必须传布尔 false——字符串 'false' 会被双重序列化成真值（AGENT.md 记载的坑），
+  // 此前本脚本的重置静默不生效、向导弹不出来
   await send('Runtime.evaluate', {
-    expression: "window.omniget.settingsSet('onboarded', 'false')"
+    expression: "window.omniget.settingsSet('onboarded', false)"
   })
   await new Promise((r) => setTimeout(r, 1000))
   // 2) 重载（App 挂载时读到 false → 弹向导）

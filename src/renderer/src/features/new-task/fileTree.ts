@@ -14,9 +14,12 @@ export interface TreeNode {
 
 export type CheckState = 'checked' | 'unchecked' | 'indeterminate'
 
-export function buildTree(files: TaskFile[]): TreeNode {
+export function buildTree(files: TaskFile[], globalIndexes?: number[]): TreeNode {
   const root: TreeNode = { name: '', path: '', isLeaf: false, size: 0, children: [] }
   files.forEach((f, i) => {
+    // globalIndexes[i] = 该文件在全量列表中的 1-based 序号——分类筛选重建树时
+    // 叶子索引仍须映射回全量序号（select-file 按 task_files 顺序解释）
+    const leafIndex = globalIndexes ? (globalIndexes[i] ?? i + 1) : i + 1
     const parts = f.path.split('/')
     let cur: TreeNode = root
     for (let d = 0; d < parts.length; d++) {
@@ -31,7 +34,7 @@ export function buildTree(files: TaskFile[]): TreeNode {
         name: parts[d] ?? '',
         path,
         isLeaf: isLast,
-        index: isLast ? i + 1 : undefined,
+        index: isLast ? leafIndex : undefined,
         size: isLast ? f.size : 0,
         children: []
       }

@@ -287,10 +287,19 @@ export function registerIpcHandlers(): void {
     }
     // L-5 加固：仅允许高亮任务保存目录内的产物——被攻破的渲染层不得借
     // showItemInFolder 定位任意系统文件（隐藏/系统位置）。大小写口径随文件系统
+    // P2 修复：先 realpath 规范化再比对——否则 `D:\任务\..\..\机密\x.txt`
+    // 仍以任务目录前缀开头，可绕过包含判定（与 taskParseFile 同口径）
     const { listTasks } = await import('./task/store')
+    const { realpath } = await import('fs/promises')
     const norm = (x: string): string => x.replace(/\\/g, '/').replace(/\/+$/, '')
     const fold = (x: string): string => (process.platform === 'linux' ? norm(x) : norm(x).toLowerCase())
-    const target = fold(p)
+    let real = p
+    try {
+      real = await realpath(p)
+    } catch {
+      // 文件不存在时保持原路径，后续 stat 仍会拒绝
+    }
+    const target = fold(real)
     const inside = listTasks({}).some((t) => {
       if (!t.saveDir) return false
       const base = fold(t.saveDir)

@@ -19,11 +19,11 @@ import { createLogger } from './logger'
 import { runtimeBase } from './env'
 import { startStatsScheduler, stopStatsScheduler } from './stats'
 import { startScheduler } from './scheduler'
-import { startBridge } from './bridge'
+import { startBridge, stopBridge } from './bridge'
 import { toolbox } from './toolbox'
 import { broadcastToolEvents } from './ipc'
 import { refreshTrackers, joinedTrackers } from './trackers'
-import { startAppUpdater } from './app-updater'
+import { startAppUpdater, stopAppUpdaterTimer } from './app-updater'
 import {
   clipboardWatchEnabled,
   createTray,
@@ -249,11 +249,20 @@ async function bootstrap(): Promise<void> {
     quitCleanupStarted = true
     e.preventDefault()
     markQuitting()
-    manager.stopPolling()
-    stopStatsScheduler()
-    getYtDlpSupervisor().killAll()
-    // 音乐任务 abort 全部网络请求，避免遗留 .part 文件
-    getMusicEngine().shutdown()
+    // P2 修复：同步清理段包 try/catch——任一抛错会让本函数中断，
+    // 而 quitCleanupStarted 已置位，后续 before-quit 恒走 preventDefault，
+    // supervisor.shutdown().finally(app.exit) 链不会启动 → 应用永久无法退出
+    try {
+      manager.stopPolling()
+      stopStatsScheduler()
+      getYtDlpSupervisor().killAll()
+      // 音乐任务 abort 全部网络请求，避免遗留 .part 文件
+      getMusicEngine().shutdown()
+      stopAppUpdaterTimer()
+      stopBridge()
+    } catch (err) {
+      log.error('before-quit 同步清理失败（继续退出）', { error: String(err) })
+    }
     void supervisor
       .shutdown()
       .catch(() => {})

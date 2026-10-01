@@ -125,7 +125,11 @@ export const useTasks = create<TasksState>()((set, get) => ({
         downloadedBytes: e.downloadedBytes ?? prev.downloadedBytes,
         totalBytes: e.totalBytes || prev.totalBytes,
         speedBps: e.speedBps ?? prev.speedBps,
-        error: e.error ?? prev.error
+        // P3 修复：任务重试/恢复成功（进入非 failed 状态）时清除旧错误文案，
+        // 否则红色错误一直残留到下次全量 load
+        error:
+          e.error ??
+          (e.status !== undefined && e.status !== 'failed' ? undefined : prev.error)
       })
       if (e.message !== undefined) stageById[e.taskId] = e.message
       // P2 加固：终态任务的阶段文案已无消费方，删除防 stageById 无界增长

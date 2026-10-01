@@ -99,46 +99,50 @@ export class Aria2Adapter implements EngineAdapter {
     })) as string
 
     // 等 metadata：轮询 tellStatus 直到 status=complete
-    const deadline = Date.now() + METADATA_TIMEOUT_MS
-    while (Date.now() < deadline) {
-      // A3：任务在解析期间被删除/回收 → 立即移除暂停态 gid 并退出，
-      // 防 90s 窗口内 aria2 侧任务泄漏（此时 DB 的 engineGid 尚未落库，remove 路径够不到它）
-      if (isAborted?.()) {
-        await this.rpc().call('remove', gid).catch(() => {})
-        cleanupMetadataDir(metaDir)
-        throw new Error('任务已删除')
-      }
-      const st = (await this.rpc().call('tellStatus', gid)) as Aria2Status
-      // B1：元数据下载阶段 files 只有 <name>.torrent 本体，过滤之（BEP-9 勾选面板只呈现真实内容文件）
-      const files = this.statusToFiles(st).filter((f) => !f.path.endsWith('.torrent'))
-      if (st.status === 'complete' && files.length > 0) {
-        const name = st.bittorrent?.info?.name ?? files[0]?.path.split('/')[0] ?? task.source
-        const ih = normalizeInfohash(st.infoHash ?? infohash ?? '')
-        cleanupMetadataDir(metaDir) // P3：元数据已解析入任务树，临时目录即弃
-        return {
-          name,
-          files,
-          totalBytes: files.reduce((s, f) => s + f.size, 0),
-          infohash: ih || undefined,
-          magnet: ih ? generateMagnet(ih, name, []) : undefined,
-          pendingGid: gid // 保留暂停态 gid，确认勾选时 changeOption+unpause
+    // P2 修复：轮询体内 tellStatus RPC 异常（aria2 重启/超时）此前直接上抛，
+    // pause 态 gid 与 metaDir 均泄漏——统一收口到 finally
+    let succeeded = false
+    try {
+      const deadline = Date.now() + METADATA_TIMEOUT_MS
+      while (Date.now() < deadline) {
+        // A3：任务在解析期间被删除/回收 → 立即移除暂停态 gid 并退出，
+        // 防 90s 窗口内 aria2 侧任务泄漏（此时 DB 的 engineGid 尚未落库，remove 路径够不到它）
+        if (isAborted?.()) {
+          throw new Error('任务已删除')
         }
+        const st = (await this.rpc().call('tellStatus', gid)) as Aria2Status
+        // B1：元数据下载阶段 files 只有 <name>.torrent 本体，过滤之（BEP-9 勾选面板只呈现真实内容文件）
+        const files = this.statusToFiles(st).filter((f) => !f.path.endsWith('.torrent'))
+        if (st.status === 'complete' && files.length > 0) {
+          const name = st.bittorrent?.info?.name ?? files[0]?.path.split('/')[0] ?? task.source
+          const ih = normalizeInfohash(st.infoHash ?? infohash ?? '')
+          succeeded = true
+          return {
+            name,
+            files,
+            totalBytes: files.reduce((s, f) => s + f.size, 0),
+            infohash: ih || undefined,
+            magnet: ih ? generateMagnet(ih, name, []) : undefined,
+            pendingGid: gid // 保留暂停态 gid，确认勾选时 changeOption+unpause
+          }
+        }
+        if (st.status === 'error' || st.status === 'removed') {
+          // P3 修复：error/removed ≠ 超时——此前一律抛 METADATA_TIMEOUT，
+          // "链接无效/无种"也被文案包装成"超时（90s）"，出口动作误导
+          throw makeError('METADATA_TIMEOUT', {
+            message: `磁力元数据获取失败${st.errorMessage ? `（${st.errorMessage}）` : ''}。请确认链接有效或有可用节点，或改用 .torrent 文件创建任务`
+          })
+        }
+        await sleep(1000)
       }
-      if (st.status === 'error' || st.status === 'removed') {
-        // P3 修复：error/removed ≠ 超时——此前一律抛 METADATA_TIMEOUT，
-        // "链接无效/无种"也被文案包装成"超时（90s）"，出口动作误导
-        cleanupMetadataDir(metaDir)
+      // 超时
+      throw makeError('METADATA_TIMEOUT')
+    } finally {
+      if (!succeeded) {
         await this.rpc().call('remove', gid).catch(() => {})
-        throw makeError('METADATA_TIMEOUT', {
-          message: `磁力元数据获取失败${st.errorMessage ? `（${st.errorMessage}）` : ''}。请确认链接有效或有可用节点，或改用 .torrent 文件创建任务`
-        })
+        cleanupMetadataDir(metaDir)
       }
-      await sleep(1000)
     }
-    // 超时：移除暂停态任务
-    await this.rpc().call('remove', gid).catch(() => {})
-    cleanupMetadataDir(metaDir)
-    throw makeError('METADATA_TIMEOUT')
   }
 
   /** .torrent：本地解析零引擎依赖（§4.2） */
@@ -171,9 +175,13 @@ export class Aria2Adapter implements EngineAdapter {
     })
     if (!res.ok) {
       // L1 修复：404/403 等非超时状态不再一律归因为"超时"，与诊断五类口径一致
-      const timedOut = [408, 425, 429].includes(res.status) || res.status >= 500
+      // P3 修复：429 是限流而非超时，单独文案（diagnosis.ts 中 429 归 risk 类）
+      const timedOut = [408, 425].includes(res.status) || res.status >= 500
       throw makeError(timedOut ? 'HTTP_TIMEOUT' : 'PARSE_FAILED', {
-        message: `直链探测失败（HTTP ${res.status}）。请检查链接是否有效后重试。`
+        message:
+          res.status === 429
+            ? '直链探测失败（HTTP 429）：请求过于频繁被服务端限流，请稍后重试。'
+            : `直链探测失败（HTTP ${res.status}）。请检查链接是否有效后重试。`
       })
     }
     // 重定向后的最终地址同样不得落在内网（防公网 302 跳内网）
@@ -185,9 +193,15 @@ export class Aria2Adapter implements EngineAdapter {
     const len = Number(res.headers.get('content-length') ?? 0)
     const cd = res.headers.get('content-disposition') ?? ''
     const m = /filename\*?=(?:UTF-8'')?"?([^";]+)/i.exec(cd)
-    const urlName = decodeURIComponent(
-      new URL(res.url || task.source).pathname.split('/').pop() ?? ''
-    )
+    // P3 修复：畸形百分号编码（如 /b%c/x.mp4）会抛 URIError 裸异常，回退原始路径
+    const rawName = new URL(res.url || task.source).pathname.split('/').pop() ?? ''
+    const urlName = (() => {
+      try {
+        return decodeURIComponent(rawName)
+      } catch {
+        return rawName
+      }
+    })()
     const name = sanitizeFilename(m?.[1] || urlName || 'download')
     return {
       name,
@@ -250,16 +264,23 @@ export class Aria2Adapter implements EngineAdapter {
           'bt-save-metadata': 'true',
           pause: 'true'
         })) as string
-        const ready = await this.waitMagnetMetadata(gid)
-        if (!ready) {
-          await this.rpc().call('remove', gid).catch(() => {})
-          throw makeError('METADATA_TIMEOUT')
+        // P2 修复：waitMagnetMetadata 的 RPC 异常此前直接上抛，pause 态 gid 泄漏
+        // （此时 engineGid 尚未落库，管理器 remove 路径够不到它）——finally 统一移除
+        let ok = false
+        try {
+          const ready = await this.waitMagnetMetadata(gid)
+          if (!ready) {
+            throw makeError('METADATA_TIMEOUT')
+          }
+          if (selection?.paths?.length) {
+            await this.applySelectionByPath(gid, selection.paths, task.threads, task.saveDir, task.seedRatio ?? 0)
+          }
+          await this.rpc().call('unpause', gid)
+          ok = true
+          return gid
+        } finally {
+          if (!ok) await this.rpc().call('remove', gid).catch(() => {})
         }
-        if (selection?.paths?.length) {
-          await this.applySelectionByPath(gid, selection.paths, task.threads, task.saveDir, task.seedRatio ?? 0)
-        }
-        await this.rpc().call('unpause', gid)
-        return gid
       }
 
       return (await this.rpc().call('addUri', [task.source], opts)) as string

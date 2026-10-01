@@ -23,6 +23,9 @@ export function Onboarding({ open, onClose }: { open: boolean; onClose: () => vo
     ]
     if (saveDir) writes.push(window.omniget.settingsSet('download.saveDir', saveDir))
     applyTheme(theme)
+    // P3 修复：广播主题变更——否则侧栏主题标签保持旧值（如"随系统"）直到重启。
+    // detail 形状与 SettingsPage 一致（直接传 ThemeId）
+    window.dispatchEvent(new CustomEvent('app:theme-changed', { detail: theme }))
     onClose()
     await Promise.all(writes).catch((err) => toastError('保存向导设置', err))
   }

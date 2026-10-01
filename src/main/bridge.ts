@@ -289,3 +289,16 @@ export function startBridge(manager: TaskManager): void {
 export function getBridgeInfo(): { port: number; token: string; running: boolean } {
   return { ...info }
 }
+
+/** P3 修复：退出时显式关闭 HTTP server（此前依赖 app.exit 强杀，与生命周期口径不一致） */
+export function stopBridge(): void {
+  if (!server) return
+  const s = server
+  server = null
+  info = { port: 0, token: '', running: false }
+  try {
+    s.close()
+  } catch {
+    // ignore
+  }
+}

@@ -11,12 +11,10 @@ interface BDict { [key: string]: BencodeValue }
 type BencodeValue = number | Buffer | BencodeValue[] | BDict
 
 function decodeStr(buf: Buffer): string {
-  // 脏字段容错：解码失败不中断（§4.2 兼容细节）
-  try {
-    return buf.toString('utf8')
-  } catch {
-    return buf.toString('utf8').replace(/\uFFFD/g, '')
-  }
+  // P3 修复：Buffer.toString('utf8') 永不抛错（非法序列替换为 U+FFFD），
+  // 此前 try/catch 是死代码，注释声称的"脏字段容错"从未生效——
+  // 现在主路径即做 FFFD 替换清理
+  return buf.toString('utf8').replace(/\uFFFD/g, '')
 }
 
 export interface TorrentInfo {

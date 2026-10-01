@@ -285,10 +285,14 @@ export class Aria2Supervisor {
       for (;;) {
         if (this.stopped) return
         this.consecutiveFailures++
-        if (this.consecutiveFailures >= 5) {
+        // P3 修复：只在首次跨过阈值时广播（状态沿触发）——此前每轮退避
+        // 都重复 onOffline → broadcastHealth 反复刷新
+        if (this.consecutiveFailures === 5) {
           log.error('aria2 offline: 5 consecutive failures')
           this.events.onOffline()
           // 保持退避继续尝试恢复（UI 红点已亮）
+        } else if (this.consecutiveFailures > 5) {
+          log.error(`aria2 offline: ${this.consecutiveFailures} consecutive failures`)
         }
         // 先终止残留进程（B5：WS 断开但进程存活时，必须释放端口再重生）
         if (this.proc && this.proc.exitCode === null) {

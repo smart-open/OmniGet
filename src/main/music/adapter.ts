@@ -5,6 +5,9 @@
 import { randomUUID } from 'crypto'
 import type { MusicSearchInput, MusicSearchResult, ServiceEvent } from '@shared/types'
 import { getMusicEngine } from './engine'
+import { createLogger } from '../logger'
+
+const log = createLogger('music-adapter')
 
 export interface MusicDownloadRequest {
   artist?: string
@@ -55,7 +58,11 @@ export class LocalMusicAdapter implements MusicAdapter {
   async download(req: MusicDownloadRequest): Promise<string> {
     const jobId = randomUUID().replace(/-/g, '')
     const byId = Boolean(req.neteaseId)
-    void this.runJob(jobId, req, byId)
+    // P3 修复：runJob 虽有内层兜底，但任何遗漏（emit 之外的字段访问抛错）
+    // 都会成为 unhandledRejection——补 .catch 留痕成本极低
+    void this.runJob(jobId, req, byId).catch((err) => {
+      log.error(`music job ${jobId} crashed: ${err instanceof Error ? err.message : String(err)}`)
+    })
     return jobId
   }
 

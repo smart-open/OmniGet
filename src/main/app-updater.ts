@@ -9,6 +9,19 @@ const log = createLogger('app-updater')
 /** 复查定时器句柄（模块级持有：可测试/可清理，而非匿名 setInterval 失联） */
 let recheckTimer: NodeJS.Timeout | null = null
 
+/** P3 修复配套：语义化版本比较（latest > current 才算有更新） */
+function isVersionNewer(latest: string, current: string): boolean {
+  if (!latest) return false
+  const parse = (v: string): number[] =>
+    v.replace(/^v/i, '').split(/[-+.]/).slice(0, 3).map((n) => Number(n) || 0)
+  const a = parse(latest)
+  const b = parse(current)
+  for (let i = 0; i < 3; i++) {
+    if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) > (b[i] ?? 0)
+  }
+  return latest !== current // 前三段相同但预发布串不同 → 视为有更新
+}
+
 export function stopAppUpdaterTimer(): void {
   if (recheckTimer) clearInterval(recheckTimer)
   recheckTimer = null
@@ -82,8 +95,9 @@ export async function checkForAppUpdateNow(): Promise<{
     const info = result?.updateInfo
     const latest = String(info?.version ?? '')
     const current = autoUpdater.currentVersion.format()
+    // P3 修复：latest !== current 会把"版本回退"也当更新——语义必须是"有更新"
     return {
-      ok: latest !== '' && latest !== current,
+      ok: isVersionNewer(latest, current),
       version: latest || undefined
     }
   } catch (err) {

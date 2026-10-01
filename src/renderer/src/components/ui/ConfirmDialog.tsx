@@ -56,7 +56,7 @@ export function ConfirmDialog() {
               </Button>
               <Button
                 size="sm"
-                variant={pending.danger ? 'primary' : 'primary'}
+                variant="primary"
                 className={pending.danger ? '!bg-danger hover:!bg-danger/85' : undefined}
                 onClick={() => answer(true)}
               >

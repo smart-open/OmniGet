@@ -2,7 +2,7 @@
 // 虚拟滚动（10k+ 行）、行 hover 浮出图标操作、3px 进度条 scaleX 动效（禁 width 动画）。
 // 首载 stagger 仅前 10 行（§7.8）；空态/骨架/错误三态齐备（§7.1 原则 4）。
 
-import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import {
@@ -95,14 +95,16 @@ export function TaskList({
   useEffect(() => {
     if (!isTrash) setChecked(new Set())
   }, [isTrash])
-  const toggleChecked = (id: string): void => {
+  // P2 修复：稳定引用——此前 TaskRow 收到的是每次渲染新建的内联闭包，
+  // memo(TaskRow) 被击穿，每个事件批次所有可见行全量重渲染
+  const toggleChecked = useCallback((id: string): void => {
     setChecked((prev) => {
       const next = new Set(prev)
       if (next.has(id)) next.delete(id)
       else next.add(id)
       return next
     })
-  }
+  }, [])
   /** 批量执行器：P1 修复——任一 IPC 失败不得让 busy 永久卡死或静默无反馈 */
   const runBatch = async (
     ids: string[],
@@ -321,6 +323,16 @@ export function TaskList({
         )}
       </div>
 
+      {/* P3 修复：有存量数据时 loadError 此前被静默吞掉——过期数据须同时明示加载失败 */}
+      {loadError && (
+        <div className="mx-4 mb-2 flex items-center gap-2 rounded-ctl border border-warning/40 bg-warning/10 px-3 py-1.5 text-[11px] text-warning">
+          <span>列表可能已过期（加载失败：{loadError}）</span>
+          <button className="underline" onClick={() => void load(loadedFilter)}>
+            重试
+          </button>
+        </div>
+      )}
+
       <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
         {virtualizer.getVirtualItems().map((vi) => {
           const task = list[vi.index]
@@ -347,8 +359,8 @@ export function TaskList({
                   selected={selectedTaskId === task.id}
                   pinned={pinned.includes(task.id)}
                   checked={checked.has(task.id)}
-                  onCheck={() => toggleChecked(task.id)}
-                  onSelect={() => select(task.id)}
+                  onCheck={toggleChecked}
+                  onSelect={select}
                 />
               </div>
             </div>
@@ -376,8 +388,9 @@ const TaskRow = memo(function TaskRow({
   selected: boolean
   pinned: boolean
   checked: boolean
-  onCheck: () => void
-  onSelect: () => void
+  /** 回调带 id 参数：父层传稳定引用（useCallback / zustand action），memo 不被内联闭包击穿 */
+  onCheck: (id: string) => void
+  onSelect: (id: string) => void
 }) {
   const togglePin = useTasks((s) => s.togglePin)
   const pct =
@@ -460,7 +473,7 @@ const TaskRow = memo(function TaskRow({
       }`}
       // P2 修复：回收站行禁止选中打开 Inspector——对已删任务显示暂停/移入回收站
       // 等操作会调 engine control 打出无意义错误
-      onClick={isTrash ? undefined : onSelect}
+      onClick={isTrash ? undefined : () => onSelect(task.id)}
     >
       {/* 首行 */}
       <div className="flex items-center gap-2.5">
@@ -468,7 +481,7 @@ const TaskRow = memo(function TaskRow({
           <input
             type="checkbox"
             checked={checked}
-            onChange={onCheck}
+            onChange={() => onCheck(task.id)}
             onClick={(e) => e.stopPropagation()}
             className="shrink-0"
           />

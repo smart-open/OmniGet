@@ -41,4 +41,11 @@ const child = spawn(electronBinary, args, {
   cwd: root,
   env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
 })
+// P3 修复：Electron 二进制缺失/损坏时 spawn 会发 'error' 事件——
+// 无监听会以 uncaught exception 崩溃而非打印指引
+child.on('error', (err) => {
+  console.error('无法启动测试进程（Electron 二进制缺失或损坏？）：', err.message)
+  console.error('修复方法见 AGENT.md §6（Electron 二进制手动放置步骤）')
+  process.exit(1)
+})
 child.on('exit', (code) => process.exit(code ?? 1))

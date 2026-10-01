@@ -1,7 +1,7 @@
 // 任务管理器（M1-1/M1-11，§4.5）：编排、状态机驱动、持久化恢复、事件广播。
 
 import { app } from 'electron'
-import { basename, dirname, join } from 'path'
+import { basename, dirname, isAbsolute, join } from 'path'
 import { validateSaveDir } from '../save-dir'
 import type {
   Task,
@@ -457,6 +457,10 @@ export class TaskManager {
   }): Promise<void> {
     const task = getTask(input.taskId) as TaskExt | null
     if (!task) throw new Error('任务不存在或已删除')
+    // P3 修复：threads 钳制到 1–64（与 createTask 同口径）——渲染层可传任意整数
+    // 入库并透传给 aria2 split
+    const threads = Math.min(64, Math.max(1, Math.floor(Number(input.threads) || 16)))
+    input = { ...input, threads }
 
     // P2 加固：全不选的提交此前会走"未传 select-file"分支 → aria2 静默全量下载。
     // 主进程兜底拦截（渲染层按钮已禁用，此处防其他调用方）
@@ -638,6 +642,9 @@ export class TaskManager {
         } else {
           softDeleteTask(task.id) // 回收站：默认保留文件（§4.5）
         }
+        // P3 修复：删除运行中任务时速度快照表此前只增不减（removed→failed 事件
+        // 被 isTrashed 守卫拦截，currentEvents.delete 永不执行）
+        this.currentEvents.delete(task.id)
         // R2：移除释放并发槽
         this.pumpStarts()
         break
@@ -698,6 +705,10 @@ export class TaskManager {
         void this.recoverEngineTasks()
       } else if (task.engine === 'music') {
         this.pumpMusic()
+      } else if (task.engine === 'tool') {
+        // P2 修复：tool 引擎此前无恢复泵——恢复后永远停在"排队中"。
+        // runToolTask 起跑复核要求 status==='queued'，上一步已归位
+        void this.runToolTask(task)
       }
     }
   }
@@ -839,6 +850,16 @@ export class TaskManager {
     params: Record<string, unknown>
     saveDir?: string
   }): Promise<{ taskId: string }> {
+    // P2 修复：tool 任务此前是唯一未接入 saveDir 校验的 IPC 入口（H1/H9 口径统一），
+    // sourcePath 同样要求绝对路径并拒绝 UNC（与读取侧 taskParseFile 对称）
+    const sp = String(input.sourcePath ?? '').trim()
+    if (!sp) throw new Error('请先选择源文件')
+    if (sp.includes('\0')) throw new Error('源文件路径包含非法字符')
+    if (!isAbsolute(sp)) throw new Error('源文件路径必须是绝对路径')
+    if (/^\\\\/.test(sp)) throw new Error('不支持 UNC 网络路径作为源文件')
+    const effectiveSaveDir = input.saveDir || dirname(sp)
+    const saveErr = validateSaveDir(effectiveSaveDir)
+    if (saveErr) throw new Error(saveErr)
     const task: TaskExt = {
       id: uuidv7(),
       type: 'tool',
@@ -886,7 +907,11 @@ export class TaskManager {
         },
         task.id
       )
-      this.transition(task, 'completed')
+      // P1 修复：终态转移前复核——ffmpeg 产物写盘期间任务被删除（含文件）时，
+      // 不得把回收站任务"复活"为 completed 或向已 purge 的任务写 task_files（FK 异常）
+      const freshDone = getTask(task.id) as TaskExt | null
+      if (!freshDone || isTrashed(task.id)) return
+      this.transition(freshDone, 'completed')
       // saveDir 归位产物所在目录：任务列表「打开目录」直达工具产物（此前指向源文件/下载目录）
       updateTaskFields(task.id, {
         name: `工具箱：${input.tool} → ${output}`,

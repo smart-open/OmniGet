@@ -180,7 +180,10 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
     }
     setBatchBusy(false)
     if (failed > 0) {
-      toast(`批量入队：成功 ${done - failed} 个，失败 ${failed} 个（无法解析或平台不支持）`, 'warning')
+      toast(`批量导入：成功 ${done - failed} 个，失败 ${failed} 个（无法解析或平台不支持）`, 'warning')
+    } else {
+      // UX 硬性标准：全部成功也要有可见成功反馈（batchInfo 4s 消失不算持久反馈）
+      toast(`已入队 ${done} 个任务`, 'success')
     }
     setBatchInfo(
       failed > 0

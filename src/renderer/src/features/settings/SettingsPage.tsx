@@ -368,7 +368,7 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
         window.omniget
           .getEngineStatus()
           .then(setEngineList)
-          .catch(() => {})
+          .catch(() => flash('引擎状态刷新失败（显示的可能为旧状态）'))
         if (r.installed.length > 0) flash(`已安装：${r.installed.join('、')}`)
         else if (r.failed.length > 0)
           flash(`更新失败：${r.failed.map((f) => `${f.name}（${f.error}）`).join('；')}`)

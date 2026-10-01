@@ -105,7 +105,11 @@ export default function App() {
   const engines = useTasks((s) => s.engines)
   const globalSpeedBps = useTasks((s) => s.globalSpeedBps)
   const speedHistory = useTasks((s) => s.speedHistory)
-  const tasks = useTasks((s) => s.tasks)
+  // P2 修复：App 不再订阅整个 tasks Map（每个进度批次都会换新 Map 引用，
+  // 侧栏/顶栏/状态栏全量重渲染）——只按 id 选取当前选中任务
+  const selectedTask = useTasks((s) =>
+    s.selectedTaskId ? (s.tasks.get(s.selectedTaskId) ?? null) : null
+  )
   const reload = useTasks((s) => s.load)
 
   useEffect(() => wireTaskEvents(), [])
@@ -172,6 +176,14 @@ export default function App() {
   const selectedTaskId = useTasks((s) => s.selectedTaskId)
   const select = useTasks((s) => s.select)
 
+  // P2 修复：进入非任务视图时清空选中——Space/Delete 快捷键不再作用于
+  // 用户当前看不见的后台任务（selRef 跨视图残留曾导致误暂停/误删）
+  useEffect(() => {
+    if (['music', 'health', 'settings', 'stats', 'toolbox'].includes(active)) {
+      select(null)
+    }
+  }, [active, select])
+
   // M4-8 首次启动向导
   useEffect(() => {
     void window.omniget.settingsGet('onboarded').then((v) => {
@@ -191,16 +203,21 @@ export default function App() {
   }, [])
 
   // 快捷键全集（§7.9）：新建/搜索/帮助/分组 1-6/Space 暂停/Delete 回收站（键位可自定义）。
-  // P3 修复：tasks/selectedTaskId 每个事件批次都会换新引用——经 ref 中转避免每批重挂监听器
-  const tasksRef = useRef(tasks)
-  tasksRef.current = tasks
+  // selectedTaskId 经 ref 中转避免事件批次重挂监听器；任务详情改用 getState() 按需读取
   const selRef = useRef(selectedTaskId)
   selRef.current = selectedTaskId
   useEffect(() => {
     const keys = effectiveKeys(keymap)
     const onKey = (e: KeyboardEvent): void => {
-      const tag = (e.target as HTMLElement)?.tagName
+      const target = e.target as HTMLElement | null
+      const tag = target?.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+      // P2 修复：焦点在按钮/链接/可编辑元素上时全局快捷键必须让位——
+      // 否则 Space 会误暂停后台任务且抑制按钮自身激活，Delete 会弹出
+      // 用户无感知的「移入回收站」确认框
+      if (target?.closest?.('button,[role="button"],a,[contenteditable="true"],[contenteditable=""]')) {
+        return
+      }
       // 模态期间屏蔽全局快捷键（确认框/新建任务/帮助/向导/产物预览等弹层——防穿透误触发后台任务操作）
       if (isConfirmActive() || isAnyModalOpen() || dialogOpen || showHelp || onboarding) return
       const k = eventToKey(e)
@@ -228,7 +245,7 @@ export default function App() {
           const sel = selRef.current
           if (!sel) return
           e.preventDefault()
-          const t = tasksRef.current.get(sel)
+          const t = useTasks.getState().tasks.get(sel)
           if (!t) return
           // P3 修复：completed/failed/parsing 等状态不可暂停——守卫后再发，防无意义报错
           if (t.status !== 'running' && t.status !== 'queued' && t.status !== 'paused') return
@@ -241,7 +258,7 @@ export default function App() {
           const sel = selRef.current
           if (!sel) return
           e.preventDefault()
-          const t = tasksRef.current.get(sel)
+          const t = useTasks.getState().tasks.get(sel)
           // 移入回收站属删除类操作：二次确认（可恢复，用轻量确认）
           void confirmAction({
             title: '移入回收站',
@@ -493,7 +510,7 @@ export default function App() {
           </div>
           {active !== 'music' && active !== 'settings' && (
             <Inspector
-              task={selectedTaskId ? (tasks.get(selectedTaskId) ?? null) : null}
+              task={selectedTask}
               onClose={() => select(null)}
               onChanged={() => void reload(active)}
             />

@@ -4,7 +4,9 @@
 // 用法：node scripts/fetch-sidecars.mjs [--force]
 //   win:    yt-dlp.exe（yt-dlp 官方）+ aria2c（q3aql/aria2-static-build）+ ffmpeg（BtbN/FFmpeg-Builds）
 //   linux:  同源静态构建
-//   darwin: yt-dlp_macos + aria2（q3aql）+ ffmpeg（osxp builds）
+//   darwin-arm64: yt-dlp_macos + aria2（q3aql）+ ffmpeg（BtbN macos-arm64 构建）
+//   darwin-x64:   ffmpeg/ffprobe 改用 ffbinaries——BtbN 不发布 macOS x64 构建，
+//                 此前该平台 fetch 必失败（mac x64 dmg 出包链路走不通，P2 修复）
 // 全部经官方/高星发布源；aria2/ffmpeg 的镜像源失效时会明确报错而非静默出空包。
 
 import { mkdir, chmod, rename, unlink } from 'node:fs/promises'
@@ -36,8 +38,10 @@ function download(url, dest) {
 }
 
 function unzip(zip, toDir) {
+  // P3 修复：Windows 10+ 自带 bsdtar（可解 zip），避免 PowerShell Expand-Archive
+  // 单引号插值在路径含引号字符时炸掉的问题；类 Unix 用 unzip -o
   if (process.platform === 'win32') {
-    const r = spawnSync('powershell', ['-NoProfile', '-Command', `Expand-Archive -Force '${zip}' '${toDir}'`], { timeout: 300_000 })
+    const r = spawnSync('tar', ['-xf', zip, '-C', toDir], { timeout: 300_000 })
     if (r.status !== 0) throw new Error(`unzip failed: ${zip}`)
   } else {
     const r = spawnSync('unzip', ['-o', zip, '-d', toDir], { timeout: 300_000 })
@@ -118,8 +122,35 @@ async function fetchAria2() {
   await place(found, bin)
 }
 
+/** P2 修复：darwin-x64 的 ffmpeg/ffprobe 来源——BtbN 无 macOS x64 资产，
+ * 改用 ffbinaries（macos-64 zip 内含可执行单文件，API 稳定、HTTPS 直链） */
+async function fetchFfmpegDarwinX64() {
+  const metaRes = spawnSync('curl', ['-sSL', 'https://ffbinaries.com/api/v1/version/latest'], {
+    encoding: 'utf8',
+    timeout: 60_000
+  })
+  if (metaRes.status !== 0) throw new Error('ffbinaries API unreachable: https://ffbinaries.com')
+  const meta = JSON.parse(metaRes.stdout)
+  for (const tool of ['ffmpeg', 'ffprobe']) {
+    if (!(await need(tool))) continue
+    const url = meta?.bin?.['macos-64']?.[tool]
+    if (!url) throw new Error(`ffbinaries ${meta.version ?? 'latest'} 缺少 macos-64 ${tool} 资产`)
+    console.log(`${tool} (ffbinaries ${meta.version}) …`)
+    const tmp = join(tmpdir(), `ffb-${tool}.zip`)
+    await unlink(tmp).catch(() => {})
+    download(url, tmp)
+    const ex = join(tmpdir(), `ffb-x-${tool}-${Date.now()}`)
+    await mkdir(ex, { recursive: true })
+    unzip(tmp, ex)
+    const found = findFile(ex, new RegExp(`^${tool}$`, 'i'))
+    if (!found) throw new Error(`解包后未找到 ${tool}`)
+    await place(found, tool)
+  }
+}
+
 async function fetchFfmpeg() {
   const exe = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'
+  if (process.platform === 'darwin' && process.arch === 'x64') return fetchFfmpegDarwinX64()
   if (!(await need(exe))) return
   console.log('ffmpeg (BtbN/FFmpeg-Builds) …')
   const rel = ghLatest('BtbN/FFmpeg-Builds/releases/latest')

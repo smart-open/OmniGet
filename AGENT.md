@@ -4,7 +4,7 @@
 
 ## 1. 项目是什么
 
-**OmniGet**：跨平台桌面下载器（Windows/macOS/Linux），一站式覆盖 BT/磁力（aria2c）、视频（yt-dlp）、音乐（omni-service）、HTTP 直链 + 本地 ffmpeg 工具箱。定位「本地优先、无广告、界面现代」。
+**OmniGet**：跨平台桌面下载器（Windows/macOS/Linux），一站式覆盖 BT/磁力（aria2c）、视频（yt-dlp）、音乐（引擎内嵌主进程，原 omni-service sidecar 已迁除）、HTTP 直链 + 本地 ffmpeg 工具箱。定位「本地优先、无广告、界面现代」。
 
 **权威文档**（本目录 docs/，改动须同步）：
 - `OmniGet-产品技术设计文档.md`（§1–§11 + 附录，所有实现的唯一依据）
@@ -76,7 +76,7 @@ resources/engines/ sidecar 按 <platform> 目录；构建经 extraResources
 ## 7. 验证命令
 
 ```bash
-npm test                  # 39 个单测（状态机/torrent/嗅探/事件合并/搜索语法）
+npm test                  # 47 个单测（状态机/torrent/嗅探/事件合并/搜索语法等；以 npm test 实际输出为准）
 npm run typecheck         # tsconfig.node + tsconfig.web 双严格检查
 npm run build             # 三端构建
 npx tsx --tsconfig tsconfig.node.json scripts/e2e-aria2.ts   # aria2 真实端到端
@@ -96,7 +96,7 @@ npm run dev               # GUI 冒烟（看日志：aria2 online / tray created
 - **三主题**：dark 科技黑 / oled 纯黑（新增，tokens.css `data-theme='oled'`）/ light 浅色，侧栏按钮循环切换
 - **统计页**：修复 ipc snake_case→camelCase 未映射（NaN/空根因）；新增「库实时总览」（任务总数/进行中/累计已下载，不依赖完成记录）+ 空数据引导；柱状图改 CSS 列布局（h-28 限高、数量常显、悬浮详情）
 - **提示文案全面中文化（2026-09-30）**：用户可见错误/通知一律「中文 + 关键代码标识」——清扫主进程全部 throw 点（ipc『task manager not ready』×6、『only ytdlp updates supported』、manager『task not found』、aria2 RPC 六处、omni-service 三处、yt-dlp 超时、ports、torrent『invalid torrent』、toolbox『unknown tool/ffmpeg exit』、music HTTP 错误、updater 四处）；状态机 IllegalTransitionError 文案中文化；内部日志（log.error）保留技术格式；引擎原生英文 stderr 由 diagnosis.ts 五类归因转中文。⚠ 打包注意：主进程禁用运行时 `require('./xxx')`（Rollup 不重写 → MODULE_NOT_FOUND，defaultSaveDir 曾踩坑），一律顶层静态 import
-- **打包矩阵扩展（用户口径）**：win = nsis + zip(portable) + msi（x64）；mac = dmg ×（x64/arm64/universal）；linux = AppImage + deb。CI 打包后重命名（版本号取自 package.json）：`OmniGet_{v}_x64-setup.exe / {v}_x64_portable.zip / {v}_x64_zh-CN.msi / {v}_x64.dmg / {v}_aarch64.dmg / {v}_universal.dmg / {v}_x64.AppImage / {v}_x64.deb`；win 的 .exe.blockmap 在 CI 丢弃（electron-updater 差量下载自动回退整包）。⚠ electron-builder 25 schema：`signAndEditExecutable` 只在 win 级（nsis 级会校验失败）；zip 无选项块；msi 本地受 winCodeSign 软链特权限制、CI 管理员环境可构建；mac/linux 包缺对应平台 sidecar 时 CI 有告警（引擎降级提示）
+- **打包矩阵扩展（用户口径）**：win = nsis + zip(portable) + msi（x64）；mac = dmg ×（x64/arm64，**不产出 universal**——无法捆绑平台化 sidecar，见 electron-builder.yml 与 README）；linux = AppImage + deb。CI 打包后重命名（版本号取自 package.json）：`OmniGet_{v}_x64-setup.exe / {v}_x64_portable.zip / {v}_x64_zh-CN.msi / {v}_x64.dmg / {v}_aarch64.dmg / {v}_x64.AppImage / {v}_x64.deb`；win 的 .exe.blockmap 在 CI 丢弃（electron-updater 差量下载自动回退整包）。⚠ electron-builder 25 schema：`signAndEditExecutable` 只在 win 级（nsis 级会校验失败）；zip 无选项块；msi 本地受 winCodeSign 软链特权限制、CI 管理员环境可构建；mac/linux 包缺对应平台 sidecar 时 CI 有告警（引擎降级提示）
 - **底栏引擎灯**：aria2 红/绿；ytdlp·music 按需拉起，离线=待机灰（不再常红）
 - **工具箱分类**：ToolDef.category（audio/video/common），分组标题+卡片（名称/概述/处理按钮），ipc 透传 category+desc
 - 新建任务按钮浅底（accent-soft）；空态 CTA 美化（主色胶囊+Plus 图标）
@@ -152,7 +152,7 @@ npm run dev               # GUI 冒烟（看日志：aria2 online / tray created
 - 收口演示项：磁力 `dc9e7581…` GUI 全链路、10k 60fps、mac/Linux 清单、五平台各一次成功
 - Windows 冒烟清理命令（Stop-Process/taskkill）需审批，脚本化时注意
 
-## 9. 审查与修复记录
+## 10. 审查与修复记录
 
 **音乐链路 + 日志专项（2026-10-01 下午，用户反馈"牡丹亭 fetch failed"）**：typecheck 双端 + 39/39 单测。修复——
 1. **P1 下载/试听全链必败根因**：`downloadNeteaseAudio` 镜像 fetcher 无 try/catch——第一个镜像（cenguigui）不可达即 `fetch failed` 整任务失败，后 3 个镜像永不尝试；试听只走 haitangw 单镜像。修复：下载/试听均改四镜像（cenguigui→haitangw→rrvenn→toubiec）逐个容错回退 + 逐镜像日志
@@ -215,7 +215,7 @@ npm run dev               # GUI 冒烟（看日志：aria2 online / tray created
 - **对话框**：framer-motion `AnimatePresence` + spring(100,20) scale 0.96→1；雷达动画（`radar-ring`，三处之二）；range 滑杆 accent 化（`--fill` 变量）；分区化布局
 - **Token 扩展**：`--accent-soft`（激活底色）、`--shadow-float/--shadow-pop`（随主题的色调化阴影，禁纯黑投影）
 
-## 9. 审查与修复记录（2026-09-29 全量修复完成）
+## 11. 审查与修复记录（2026-09-29 全量修复完成）
 
 首轮全面审查发现 P1×3 / P2×8 / P3×9 问题，已全部修复：
 
@@ -223,4 +223,4 @@ npm run dev               # GUI 冒烟（看日志：aria2 online / tray created
 - **P2**：托盘退出改 app.quit()（原 app.exit() 跳过 before-quit 致 aria2c 孤儿）；WS 断开自愈（onClose→scheduleRestart，重启前先杀残留进程释放端口）；删除任务只删 task_files 记录文件（原 rm 整个 saveDir）；infohash 查重过滤回收站；文件树改相对路径（§5）；磁力元数据落临时目录；dev CSP 放行 ws://；文件名 sanitize（`shared/sanitize.ts`，parseHttp/parseTorrent/statusToFiles 统一接入）；HEAD 探测 10s 超时；标题栏按平台区分
 - **P3**：resume 先引擎后状态；catch 内转移守卫；completed 任务勾选 = §4.5 增量补下（re-add + 秒校验）；对话框「选择 .torrent」+ 拖拽（webUtils 桥，Electron 32+ 无 File.path）；BT 滑杆显示 peers 上限语义；下完即停勾选 + seedRatio 落库；单任务重试 retryTask；默认目录读系统 Downloads
 
-**测试基建**：`npm test` 现经 `scripts/run-tests.js` 用 **Electron-as-Node** 跑（better-sqlite3 是 Electron ABI，纯 Node 无法加载）；Electron 内置 Node 20 的 --test 不展开 glob，运行器自行递归收集 `src/main/**/*.test.ts`。32/32 通过（新增 sanitize 7 例 + store/DB 层 5 例）。
+**测试基建**：`npm test` 现经 `scripts/run-tests.js` 用 **Electron-as-Node** 跑（better-sqlite3 是 Electron ABI，纯 Node 无法加载）；Electron 内置 Node 20 的 --test 不展开 glob，运行器自行递归收集 `src/main/**/*.test.ts`。47/47 通过（sanitize 7 例 + store/DB 层 5 例 + 音乐调度/信号量/竞态回归等）。

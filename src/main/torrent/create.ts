@@ -51,7 +51,9 @@ async function walkDir(dir: string, base: string, out: SourceFile[]): Promise<vo
       await walkDir(abs, base, out)
     } else if (e.isFile()) {
       const st = await stat(abs)
-      if (!st.isFile() || st.size === 0) continue // 空文件无法分片，跳过
+      if (!st.isFile()) continue
+      // P3 修复：零字节文件保留（length=0 条目）——此前静默丢弃会导致
+      // 做种方与接收方目录不一致；分片生成器对 0 字节文件自然跳过
       out.push({ abs, rel: [basename(base), ...relative(base, abs).split(/[\\/]/)], size: st.size })
     }
   }

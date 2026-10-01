@@ -36,6 +36,16 @@ export function HelpOverlay({ open, onClose }: { open: boolean; onClose: () => v
       .catch(() => setRows(ACTIONS.map(({ desc, fallback }) => ({ keys: fallback, desc }))))
   }, [open])
 
+  // P3 修复：Esc 关闭帮助面板（App 在面板打开期间屏蔽全局按键，需面板自行处理）
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open, onClose])
+
   return (
     <AnimatePresence>
       {open && (
