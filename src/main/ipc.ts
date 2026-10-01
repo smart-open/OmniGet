@@ -285,6 +285,21 @@ export function registerIpcHandlers(): void {
       broadcastNotices([{ level: 'warning', message: '打开目录失败：产物路径无效' }])
       return
     }
+    // L-5 加固：仅允许高亮任务保存目录内的产物——被攻破的渲染层不得借
+    // showItemInFolder 定位任意系统文件（隐藏/系统位置）。大小写口径随文件系统
+    const { listTasks } = await import('./task/store')
+    const norm = (x: string): string => x.replace(/\\/g, '/').replace(/\/+$/, '')
+    const fold = (x: string): string => (process.platform === 'linux' ? norm(x) : norm(x).toLowerCase())
+    const target = fold(p)
+    const inside = listTasks({}).some((t) => {
+      if (!t.saveDir) return false
+      const base = fold(t.saveDir)
+      return target === base || target.startsWith(base + '/')
+    })
+    if (!inside) {
+      broadcastNotices([{ level: 'warning', message: '打开目录失败：路径不在任务产物目录内' }])
+      return
+    }
     try {
       const info = await stat(p)
       if (!info.isFile()) throw new Error('产物不存在或已被移动')
@@ -437,7 +452,14 @@ export function registerIpcHandlers(): void {
   })
 
   // settings
+  // 读取黑名单：与写白名单对称——渲染层被攻破时不得借 settingsGet 拖走敏感值
+  //（bridge.token 可驱动全部 Web API；凭据类路径由各自专用 IPC 按需返回）
+  const RENDERER_READ_BLOCKED_SETTINGS = new Set<string>(['bridge.token'])
   ipcMain.handle(IPC_CHANNELS.settingsGet, (_e, key: string) => {
+    const k = String(key ?? '')
+    if (RENDERER_READ_BLOCKED_SETTINGS.has(k)) {
+      throw new Error(`设置项 ${k} 由系统管理，不可读取`)
+    }
     const raw = getSetting(key)
     try {
       return raw === null ? null : (JSON.parse(raw) as unknown)
@@ -463,7 +485,8 @@ export function registerIpcHandlers(): void {
     'download.videoPresets',
     'naming.template',
     'engines.mirror',
-    'engines.mirrorHosts',
+    // engines.mirrorHosts 主进程独占（渲染层无 UI，仅配置文件/主进程可写）——
+    // 信任锚不得与被保护对象同置于渲染层可写面，否则 SHA256 校验失去独立锚点
     'engines.autoFetch',
     'ytdlp.cookieFile'
   ])
@@ -476,13 +499,6 @@ export function registerIpcHandlers(): void {
       const v = typeof value === 'string' ? value.trim() : ''
       if (v && !/^https:\/\//i.test(v)) {
         throw new Error('引擎分发源必须是 https:// 地址')
-      }
-    }
-    if (k === 'engines.mirrorHosts') {
-      // 仅接受合法主机名/域名（分发域白名单扩展项），拒绝 URL/IP 字面量等脏值
-      const arr = Array.isArray(value) ? value : []
-      if (!arr.every((h) => typeof h === 'string' && /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/i.test(h))) {
-        throw new Error('镜像域名列表格式不合法（仅接受主机名）')
       }
     }
     if (k === 'download.saveDir' && typeof value === 'string' && value.trim()) {

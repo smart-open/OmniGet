@@ -214,6 +214,12 @@ export class MusicEngine {
         const renamed = await this.applyNaming(out.mp3Path, out.lrcPath ?? '', artist ?? '', song ?? '')
         out.mp3Path = renamed.mp3
         out.lrcPath = renamed.lrc
+        // M-5：rename 阶段不可中断——改名成功后再次复核取消状态，
+        // 并用改名后的路径清理（否则清的是改名前路径，产物复活成孤儿）
+        if (this.isCancelled(job)) {
+          await this.cleanupArtifacts({ mp3Path: out.mp3Path, lrcPath: out.lrcPath })
+          return this.cancelledResult()
+        }
         out.bytes = await stat(out.mp3Path).then((s) => s.size).catch(() => 0)
       }
       job.status = out.success ? 'completed' : 'failed'

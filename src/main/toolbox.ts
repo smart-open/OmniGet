@@ -519,6 +519,10 @@ export const TOOL_DEFS: ToolDef[] = [
     fields: [],
     build: (input, outDir, params) => {
       const files = parseFilesParam(input, params)
+      // L-2 加固：换行可注入任意 concat 清单指令行（file/duration/流选项）——fail-closed 拒绝
+      if (files.some((f) => /[\r\n]/.test(f))) {
+        throw new Error('文件路径包含换行符，无法生成拼接清单（请重命名文件后重试）')
+      }
       const listPath = join(outDir, `${baseName(input)}_concat.txt`)
       // concat 清单格式：file '<路径>'；单引号转义 ' → '\''
       const content = files
@@ -545,8 +549,13 @@ export const TOOL_DEFS: ToolDef[] = [
     fields: [],
     build: (input, outDir, params) => {
       const sub = String(params.subtitle ?? '')
-      // ffmpeg 滤镜文件名转义：\ → /、: → \:、' → \'
-      const esc = sub.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'")
+      // ffmpeg 滤镜文件名转义：\ → /、: ' , ; [ ] → \x（L-3：未转义 , ; [ ] 可在 -vf
+      // 中注入额外滤镜节点/链分隔符，破坏滤镜语义）
+      const esc = sub
+        .replace(/\\/g, '/')
+        .replace(/:/g, '\\:')
+        .replace(/'/g, "\\'")
+        .replace(/[,;[\]]/g, (ch) => `\\${ch}`)
       const filter = sub.toLowerCase().endsWith('.ass') ? `ass=${esc}` : `subtitles=${esc}`
       const out = join(outDir, `${baseName(input)}_subbed.mp4`)
       // 容器兼容：非 mp4 系源（webm/mkv 的 vorbis/opus）直拷进 mp4 容器会失败 → 转 AAC

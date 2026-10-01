@@ -309,6 +309,13 @@ function createWindow(): void {
     if (/^(https?|mailto):/i.test(url)) void shell.openExternal(url)
     return { action: 'deny' }
   })
+  // M-2：拦截窗口内导航——渲染层被注入后不得把主窗口导航到任意外部页面
+  //（webSecurity 仍开启，但 preload 白名单 API 会暴露给新页面的上下文）
+  win.webContents.on('will-navigate', (e, url) => {
+    if (url === win.webContents.getURL()) return
+    e.preventDefault()
+    if (/^https?:/i.test(url)) void shell.openExternal(url)
+  })
 
   if (process.env.ELECTRON_RENDERER_URL) {
     void win.loadURL(process.env.ELECTRON_RENDERER_URL)

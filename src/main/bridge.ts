@@ -32,14 +32,19 @@ async function probePort(start: number): Promise<number> {
   return start
 }
 
-function json(res: http.ServerResponse, code: number, body: unknown): void {
-  res.writeHead(code, {
+function json(res: http.ServerResponse, code: number, req?: http.IncomingMessage, body?: unknown): void {
+  const headers: Record<string, string | number> = {
     'Content-Type': 'application/json; charset=utf-8',
-    'Access-Control-Allow-Origin': '*',
+    // M-3 收紧：不再通配 *。仅对浏览器扩展来源回显 Origin（扩展 fetch 需要 CORS 应答），
+    // 其余来源不携带 ACAO——任意网页即使拿到 token 也无法跨域读取响应
+    ...(req?.headers.origin?.startsWith('chrome-extension://')
+      ? { 'Access-Control-Allow-Origin': req.headers.origin }
+      : {}),
     'Access-Control-Allow-Headers': 'content-type, x-omniget-token',
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS'
-  })
-  res.end(JSON.stringify(body))
+  }
+  res.writeHead(code, headers)
+  res.end(JSON.stringify(body ?? null))
 }
 
 function readBody(req: http.IncomingMessage): Promise<string> {
@@ -80,9 +85,8 @@ function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(ab, bb)
 }
 
-function authed(req: http.IncomingMessage, url: URL, token: string): boolean {
+function authed(req: http.IncomingMessage, token: string): boolean {
   const header = req.headers['x-omniget-token']
-  const query = url.searchParams.get('token')
   // Host 校验：防 DNS rebinding（回环绑定 + token 仍兜底）。
   // L1 修复：IPv6 字面量形如 [::1]:16820——按括号截取，此前 split(':')[0] 切出 '['
   // 导致 [::1] 分支永远匹配不上且合法请求被误杀
@@ -91,7 +95,8 @@ function authed(req: http.IncomingMessage, url: URL, token: string): boolean {
     ? (/\[[^\]]*\]/.exec(rawHost)?.[0] ?? rawHost)
     : rawHost.split(':')[0]
   if (host && host !== '127.0.0.1' && host !== 'localhost' && host !== '[::1]') return false
-  return (typeof header === 'string' && safeEqual(header, token)) || safeEqual(query ?? '', token) && query !== null
+  // M-3：/api 仅收 header token——query token 会进浏览器历史/Referer
+  return typeof header === 'string' && safeEqual(header, token)
 }
 
 function taskRow(t: {
@@ -124,7 +129,10 @@ async function handle(
   const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`)
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
-      'Access-Control-Allow-Origin': '*',
+      // 与 json() 同口径：仅扩展来源回显 Origin
+      ...(req.headers.origin?.startsWith('chrome-extension://')
+        ? { 'Access-Control-Allow-Origin': req.headers.origin }
+        : {}),
       'Access-Control-Allow-Headers': 'content-type, x-omniget-token',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS'
     })
@@ -132,9 +140,9 @@ async function handle(
     return
   }
 
-  // Web UI 页面（token 经 query 校验后注入页面）
+  // Web UI 页面（token 经 query 校验后注入页面；页面脚本随即剥离 URL 中的 token）
   if (req.method === 'GET' && url.pathname === '/') {
-    if (url.searchParams.get('token') !== token) {
+    if (safeEqual(url.searchParams.get('token') ?? '', token) === false) {
       res.writeHead(401, { 'Content-Type': 'text/plain; charset=utf-8' })
       res.end('需要访问令牌：在 OmniGet 设置 → 远程/扩展 中查看 token，访问 /?token=<token>')
       return
@@ -144,14 +152,16 @@ async function handle(
     return
   }
 
-  if (!authed(req, url, token)) {
-    json(res, 401, { ok: false, error: 'token 不匹配' })
+  // M-3：/api 只收 header token（扩展本就走 header；query token 会进浏览器历史/
+  // Referer，仅保留页面入口这一处 bootstrap 用途）
+  if (!authed(req, token)) {
+    json(res, 401, req, { ok: false, error: 'token 不匹配' })
     return
   }
 
   try {
     if (req.method === 'GET' && url.pathname === '/api/ping') {
-      json(res, 200, { ok: true, app: 'OmniGet', version: app.getVersion() })
+      json(res, 200, req, { ok: true, app: 'OmniGet', version: app.getVersion() })
       return
     }
     if (req.method === 'GET' && url.pathname === '/api/tasks') {
@@ -159,39 +169,39 @@ async function handle(
       const tasks = listTasks({})
         .slice(0, 50)
         .map(taskRow)
-      json(res, 200, { ok: true, counts, tasks })
+      json(res, 200, req, { ok: true, counts, tasks })
       return
     }
     if (req.method === 'POST' && url.pathname === '/api/download') {
       const body = JSON.parse((await readBody(req)) || '{}') as { url?: string }
       const source = String(body.url ?? '').trim()
       if (!source) {
-        json(res, 400, { ok: false, error: '缺少 url' })
+        json(res, 400, req, { ok: false, error: '缺少 url' })
         return
       }
       const saveDir =
         getSettingParsed<string>('download.saveDir') || app.getPath('downloads')
       const result = await manager.createTask({ source, threads: 16, saveDir })
       if (result.kind === 'failed') {
-        json(res, 422, { ok: false, error: result.error })
+        json(res, 422, req, { ok: false, error: result.error })
         return
       }
       // 扩展/远程提交默认全选直接入队（awaiting 类自动确认；http 已在 createTask 直启）
       if (result.kind === 'awaiting' && result.sniff.type !== 'http') {
         await manager.confirmSelection({ taskId: result.taskId, threads: 16 })
       }
-      json(res, 200, { ok: true, taskId: result.kind === 'awaiting' ? result.taskId : result.taskId })
+      json(res, 200, req, { ok: true, taskId: result.taskId })
       return
     }
-    json(res, 404, { ok: false, error: 'not found' })
+    json(res, 404, req, { ok: false, error: 'not found' })
   } catch (err) {
-    json(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) })
+    json(res, 500, req, { ok: false, error: err instanceof Error ? err.message : String(err) })
   }
 }
 
 function renderPage(port: number): string {
   return `<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><title>OmniGet 远程</title>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><title>OmniGet 远程</title>
 <style>
 :root{color-scheme:dark}
 body{font-family:system-ui,sans-serif;background:#0B0C0E;color:#E7E9EC;margin:0;padding:24px;max-width:760px;margin-inline:auto}
@@ -215,6 +225,8 @@ td,th{text-align:left;padding:6px 8px;border-bottom:1px solid #1E2126}
 <tbody id="rows"></tbody></table>
 <script>
 const token = new URLSearchParams(location.search).get('token')
+// M-3：立即剥离 URL 中的 token（replaceState 替换当前历史条目，token 不进历史/后续 Referer）
+try { history.replaceState(null, '', location.pathname) } catch {}
 const H = { 'x-omniget-token': token, 'content-type': 'application/json' }
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]))
@@ -260,7 +272,7 @@ export function startBridge(manager: TaskManager): void {
       void handle(req, res, manager, token, port).catch((err) => {
         log.warn('bridge request failed', err)
         try {
-          json(res, 500, { ok: false, error: 'internal error' })
+          json(res, 500, req, { ok: false, error: 'internal error' })
         } catch {
           // 已响应
         }

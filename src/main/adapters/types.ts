@@ -9,8 +9,9 @@ export interface EngineHealthInfo {
 
 export interface EngineAdapter {
   health(): Promise<EngineHealthInfo>
-  /** 返回文件树/格式列表；磁力走 BEP-9；HTTP 走 HEAD 探测 */
-  parse(task: Task): Promise<ParseOutput>
+  /** 返回文件树/格式列表；磁力走 BEP-9；HTTP 走 HEAD 探测。
+   * isAborted：解析轮询期间由调用方提供的中止探针（任务被删除/回收时提前退出，防 gid 泄漏） */
+  parse(task: Task, isAborted?: () => boolean): Promise<ParseOutput>
   /** 启动任务；selection 提供恢复/re-add 时的勾选回放（相对路径或索引） */
   start(task: Task, selection?: { indexes?: number[]; paths?: string[] }): Promise<string>
   pause(task: Task): Promise<void>

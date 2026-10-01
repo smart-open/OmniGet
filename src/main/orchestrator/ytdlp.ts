@@ -61,12 +61,21 @@ export class YtDlpSupervisor {
     return new Promise((resolve, reject) => {
       const proc = spawnTreeAware(this.bin(), args)
       let out = ''
+      // L-6：stdout 无上限累积会让超大合集 -J JSON（数十 MB）全量驻留内存
+      const MAX_OUT = 64 * 1024 * 1024
       const timer = setTimeout(() => {
         // H3 修复：解析/探测路径同样用树终止——单进程 SIGKILL 不级联 ffmpeg 等子进程
         terminateTree(proc, 2000)
         reject(new Error('yt-dlp 执行超时'))
       }, timeoutMs)
-      proc.stdout?.on('data', (d: Buffer) => (out += String(d)))
+      proc.stdout?.on('data', (d: Buffer) => {
+        out += String(d)
+        if (out.length > MAX_OUT) {
+          clearTimeout(timer)
+          terminateTree(proc, 2000)
+          reject(new Error('yt-dlp 输出超出 64MB 上限（合集过大或站点异常），请减少单次条目数'))
+        }
+      })
       // H3 修复：stderr 必须持续消费（spawn 默认 stdio 下 stderr 为 pipe），
       // 部分站点 stderr 输出量大，64KB 管道写满会阻塞子进程直到被超时误杀
       let errTail = ''

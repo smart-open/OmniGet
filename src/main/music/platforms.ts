@@ -8,6 +8,9 @@ import { randomUUID } from 'crypto'
 import { mkdir, rename, stat, unlink, writeFile } from 'fs/promises'
 import { getJson, postForm, postJson, getText, fetchToFile, downloadFile, hostOf, isTrustedAudioHost } from './http'
 import { HostGate } from './gate'
+import { createLogger } from '../logger'
+
+const log = createLogger('music.platforms')
 import { sanitizeFilename } from '@shared/sanitize'
 
 /**
@@ -117,7 +120,13 @@ async function ensureDir(dir: string): Promise<void> {
 }
 
 async function writeLrc(lrcPath: string, content: string): Promise<void> {
-  await writeFile(lrcPath, content || EMPTY_LRC, 'utf8')
+  try {
+    await writeFile(lrcPath, content || EMPTY_LRC, 'utf8')
+  } catch (err) {
+    // M-2：歌词写盘失败（磁盘满/权限）不得让已成功下载的音频整体失败成孤儿——
+    // mp3 是主产物，歌词为附属；失败留痕后按「无歌词」继续
+    log.warn(`歌词写入失败（忽略，不影响音频产物）: ${lrcPath}`, err)
+  }
 }
 
 // ── 五平台引擎（每次下载任务实例化一个，携带信号量与回调）──────────
@@ -127,7 +136,7 @@ export class PlatformEngine {
 
   private async gate(url: string): Promise<void> {
     const h = hostOf(url)
-    if (h) await this.cb.gate.wait(h)
+    if (h) await this.cb.gate.wait(h, this.cb.signal) // M-5：限速等待可被取消
   }
 
   // ========== 网易云（稳健：原唱校验 + 完整音频 + 时间轴歌词）==========
@@ -315,11 +324,14 @@ export class PlatformEngine {
   /** 歌词回退链：主 ID 官方 → 候选 ID 官方 → 内联镜像 → 占位（与 Python 口径一致） */
   private async neteaseLyricBest(primaryId: string, allIds: string[], lrcPath: string): Promise<void> {
     for (const sid of [primaryId, ...allIds.filter((i) => i !== primaryId)]) {
+      if (this.cb.signal?.aborted) return // M-5：abort 后不再逐个候选快速失败
       if (await this.fetchNeteaseLyric(sid, lrcPath)) return
     }
     for (const sid of allIds) {
+      if (this.cb.signal?.aborted) return
       if (await this.fetchNeteaseLyricInline(sid, lrcPath)) return
     }
+    if (this.cb.signal?.aborted) return
     await writeLrc(lrcPath, EMPTY_LRC)
   }
 

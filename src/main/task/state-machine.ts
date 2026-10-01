@@ -9,10 +9,12 @@ const TRANSITIONS: Record<TaskStatus, readonly TaskStatus[]> = {
   parsing: ['awaiting', 'queued', 'failed'],
   awaiting: ['queued', 'failed'], // 取消 awaiting 任务 = failed（附取消文案）
   queued: ['running', 'paused', 'failed'],
-  running: ['paused', 'verifying', 'completed', 'failed'],
+  // M-4 修复：seeding 成为可达状态——BT 下载完成但仍在做种（aria2 status=active 且
+  // completedLength >= totalLength）时进入 seeding，做种结束（ratio 达标）才 completed
+  running: ['paused', 'verifying', 'seeding', 'completed', 'failed'],
   paused: ['queued', 'running', 'failed'],
   verifying: ['completed', 'failed'],
-  seeding: ['completed'],
+  seeding: ['completed', 'failed'],
   completed: [],
   failed: ['queued'] // 手动/自动重试
 }

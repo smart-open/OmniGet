@@ -129,8 +129,12 @@ export function updateTaskFields(
   }
   for (const [k, col] of Object.entries(map)) {
     if (k in fields) {
+      // undefined = 「本事件未携带该字段」，绝不能落 NULL——否则 yt-dlp 的无字节事件
+      // 会把解析阶段已知的 total_bytes/downloaded 清掉，渲染层进度百分比变 NaN
+      const v = fields[k as keyof typeof fields]
+      if (v === undefined) continue
       sets.push(`${col} = @${k}`)
-      args[k] = fields[k as keyof typeof fields] ?? null
+      args[k] = v ?? null
     }
   }
   if (sets.length === 0) return
@@ -144,6 +148,14 @@ export function getTask(id: string): Task | null {
     | TaskRow
     | undefined
   return row ? rowToTask(row) : null
+}
+
+/** L-3：读取完成时间（仅增量补下回撤记账用，不进 Task 领域类型） */
+export function getTaskCompletedAt(id: string): number | null {
+  const row = getDb()
+    .prepare('SELECT completed_at FROM tasks WHERE id = ?')
+    .get(id) as { completed_at: number | null } | undefined
+  return row?.completed_at ?? null
 }
 
 export function listTasks(filter: {

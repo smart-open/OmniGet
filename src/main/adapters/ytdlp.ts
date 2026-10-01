@@ -234,7 +234,11 @@ export class YtDlpAdapter {
       isUserPaused: () => this.userPaused.has(task.id),
       onLine: (line) => this.parseProgress(task, line),
       onExit: (cls) => {
-        void this.onExit(task, args, ctx, cls)
+        // L-4 兜底：onExit 内含动态 import/健康写入等异步链，任何未捕获异常
+        // 都不得逃逸为 unhandledRejection
+        this.onExit(task, args, ctx, cls).catch((err) =>
+          log.error(`yt-dlp onExit 后处理失败 ${task.id}`, err)
+        )
       }
     })
   }

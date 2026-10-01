@@ -18,6 +18,10 @@ test('seeding 仅从 running/verifying 语义进入且回 completed', () => {
   assertTransition('seeding', 'completed')
 })
 
+test('seeding 可落 failed（M-4：做种中出错不得卡死在非终态）', () => {
+  assertTransition('seeding', 'failed')
+})
+
 test('paused 双向：running → paused → running，paused → queued', () => {
   assertTransition('running', 'paused')
   assertTransition('paused', 'running')

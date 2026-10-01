@@ -50,6 +50,21 @@ export function recordCompletion(completedAt: number, totalBytes: number): void 
     .run(day, totalBytes)
 }
 
+/** L-3 修复：增量补下回撤——completed 任务重新入队时撤销原完成记账。
+ * 不回撤则 daily_stats（增量口径）与 recomputeDailyStats（全量口径，按
+ * status='completed' AND completed_at IS NOT NULL 过滤）出现跨天漂移 */
+export function reverseCompletion(completedAt: number, totalBytes: number): void {
+  const day = new Date(completedAt).toLocaleDateString('sv-SE')
+  getDb()
+    .prepare(
+      `UPDATE daily_stats SET
+         completed_count = MAX(completed_count - 1, 0),
+         completed_bytes = MAX(COALESCE(completed_bytes, 0) - ?, 0)
+       WHERE day = ?`
+    )
+    .run(totalBytes, day)
+}
+
 /** M4-4 峰值速度：轮询采样回填当日 */
 export function samplePeakSpeed(speedBps: number): void {
   if (speedBps <= 0) return

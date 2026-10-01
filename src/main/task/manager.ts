@@ -25,7 +25,7 @@ import type { YtDlpAdapter } from '../adapters/ytdlp'
 import type { ParseOutput } from '../adapters/types'
 import { notifyTaskEvent } from '../integrations/tray'
 import { toolbox } from '../toolbox'
-import { samplePeakSpeed, recordCompletion } from '../stats'
+import { samplePeakSpeed, recordCompletion, reverseCompletion } from '../stats'
 import { recordPlatformOk, recordPlatformDegraded, recordPlatformFailure } from '../health'
 import { getSettingParsed } from '../db'
 import { assertTransition, IllegalTransitionError } from './state-machine'
@@ -34,6 +34,7 @@ import { TaskEventMerger } from './events'
 import {
   findTaskByInfohash,
   getTask,
+  getTaskCompletedAt,
   getTaskFiles,
   insertTask,
   isTrashed,
@@ -107,7 +108,7 @@ export class TaskManager {
 
   private async pollOnce(): Promise<void> {
     try {
-      const active = listTasks({ status: ['queued', 'running', 'paused', 'verifying'] })
+      const active = listTasks({ status: ['queued', 'running', 'paused', 'verifying', 'seeding'] })
       const events = await this.aria2.pollEvents(active)
       for (const e of events) this.merger.push(e)
       // M4-4 峰值速度采样
@@ -254,6 +255,13 @@ export class TaskManager {
           // P3 加固：await 期间状态可能已被轮询改写（如用户刚暂停）——重读复核再转移
           const fresh = getTask(taskId) as TaskExt | null
           if (!fresh) return
+          // M1 修复：用户刚暂停（queued→paused 合法）后，在途引擎调用的迟到报错
+          // 不得把 paused 覆写成 failed——保持暂停态，仅记录错误供展示
+          if (fresh.status === 'paused') {
+            updateTaskFields(taskId, { error: message })
+            log.warn(`start failed after user pause, keep paused: ${taskId}`, message)
+            return
+          }
           try {
             this.transition(fresh, 'failed')
           } catch {
@@ -360,11 +368,22 @@ export class TaskManager {
     this.pushEvent({ taskId: task.id, status: 'parsing' })
 
     try {
-      // M3：按引擎分派解析（video → yt-dlp；其余 → aria2）
+      // M3：按引擎分派解析（video → yt-dlp；其余 → aria2）。
+      // A3：传入中止探针——磁力 metadata 轮询最长 90s，期间任务可能被删除
+      const isAborted = (): boolean => isTrashed(task.id)
       const parsed =
         task.engine === 'ytdlp'
           ? await this.ytdlp!.parse(task)
-          : await this.aria2.parse(task)
+          : await this.aria2.parse(task, isAborted)
+      // A3：解析返回后复核——已删除的任务不得复活写库/转移状态
+      if (isTrashed(task.id)) {
+        if (parsed.pendingGid) {
+          await this.aria2
+            .remove({ ...task, engineGid: parsed.pendingGid })
+            .catch(() => {})
+        }
+        return { kind: 'failed', error: '任务已删除' }
+      }
       // M3-6：短视频任务标记（L1/L2/L3 判定）
       if (task.engine === 'ytdlp' && s.platform && ['douyin', 'kuaishou', 'xiaohongshu', 'xigua', 'weibo'].includes(s.platform)) {
         this.ytdlp?.markShortVideo(task.id)
@@ -408,6 +427,8 @@ export class TaskManager {
       }
       return { kind: 'awaiting', taskId: task.id, parsed, sniff: s }
     } catch (err) {
+      // A3：解析期间任务被删除（含中止探针抛出）→ 不转移状态、不标失败
+      if (isTrashed(task.id)) return { kind: 'failed', error: '任务已删除' }
       const message = err instanceof Error ? err.message : String(err)
       // B9：状态转移失败不得吞掉原始错误
       try {
@@ -451,6 +472,11 @@ export class TaskManager {
       // P1 修复：selection 必须经 selectionFor() 取（indexes+paths 双通道）——
       // 此前只传 paths，.torrent 任务的 select-file 永不注入 → aria2 全量重下。
       log.info(`re-add completed task ${task.id} for incremental download`)
+      // L-3：撤销原完成记账，保持增量 daily_stats 与全量重算口径一致
+      const prevCompletedAt = getTaskCompletedAt(task.id)
+      if (prevCompletedAt) {
+        reverseCompletion(prevCompletedAt, task.totalBytes ?? 0)
+      }
       updateTaskFields(task.id, {
         status: 'queued',
         threads: input.threads,
@@ -543,6 +569,7 @@ export class TaskManager {
           const fresh = getTask(input.taskId) as TaskExt | null
           if (!fresh || (fresh.status !== 'running' && fresh.status !== 'queued')) return
           this.transition(fresh, 'paused')
+          this.merger.drop(fresh.id) // 丢弃窗口内陈旧 running 事件，防止暂停被回放回退
           this.pushEvent({ taskId: fresh.id, status: 'paused' })
           // R2：暂停释放并发槽
           this.pumpStarts()
@@ -562,12 +589,27 @@ export class TaskManager {
             this.pumpMusic()
             break
           } else {
+            if (!task.engineGid) {
+              // 等槽期间被暂停的任务尚未拿到引擎句柄（gid 为空），aria2.resume 会静默
+              // no-op 而状态被写成 running → 无 gid、轮询跳过、queued 泵放弃 = 永久卡死。
+              // 正确语义：退回 queued 并重新过启动闸门（旧 job 可能已被泵丢弃，必须重派）。
+              updateTaskFields(task.id, { status: 'queued' })
+              this.pushEvent({ taskId: task.id, status: 'queued' })
+              this.gateStart(
+                this.runWhenQueued(task.id, async (cur) => {
+                  const gid = await this.aria2.start(cur)
+                  updateTaskFields(cur.id, { engineGid: gid })
+                })
+              )
+              break
+            }
             await this.aria2.resume(task)
           }
           // P2 加固：同 pause——跨 await 后复核状态，防旧快照覆盖终态
           const fresh = getTask(input.taskId) as TaskExt | null
           if (!fresh || fresh.status !== 'paused') return
           this.transition(fresh, 'running')
+          this.merger.drop(fresh.id) // 对称防护：丢弃窗口内陈旧 paused 事件
           this.pushEvent({ taskId: fresh.id, status: 'running' })
         }
         break
@@ -669,8 +711,10 @@ export class TaskManager {
    * - awaiting：凭已存 task_files 恢复勾选面板
    */
   async recoverOnStartup(): Promise<void> {
+    // M-4：seeding 纳入恢复——重启后置回 queued 由引擎 re-add（BT 秒校验后继续做种），
+    // 否则 seeding 任务重启后无人轮询，永久停在「做种中」
     const rows = listTasks({
-      status: ['parsing', 'awaiting', 'queued', 'running', 'paused', 'verifying']
+      status: ['parsing', 'awaiting', 'queued', 'running', 'paused', 'verifying', 'seeding']
     })
     for (const t of rows) {
       try {
@@ -681,7 +725,7 @@ export class TaskManager {
               message: '解析被应用重启中断。请点击重试重新解析。'
             }).message
           })
-        } else if (['queued', 'running', 'paused', 'verifying'].includes(t.status)) {
+        } else if (['queued', 'running', 'paused', 'verifying', 'seeding'].includes(t.status)) {
           updateTaskFields(t.id, { status: 'queued', engineGid: null })
         }
       } catch (err) {
@@ -821,6 +865,9 @@ export class TaskManager {
   private async runToolTask(task: TaskExt): Promise<void> {
     // M4-12/M4-13：工具任务 running 中断标记 failed（ffmpeg 中间产物不续传，§4.5）
     try {
+      // 起跑复核：任务在队列等待期间被删除/回收则放弃，防止状态位复活
+      const cur = getTask(task.id) as TaskExt | null
+      if (!cur || cur.status !== 'queued' || isTrashed(task.id)) return
       let input: { tool: string; sourcePath: string; params: Record<string, unknown>; saveDir?: string }
       try {
         input = JSON.parse(task.params ?? '') as typeof input

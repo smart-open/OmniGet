@@ -79,15 +79,15 @@ export class Aria2Adapter implements EngineAdapter {
 
   // ── parse ──────────────────────────────────────────────────────────
 
-  async parse(task: Task): Promise<ParseOutput> {
-    if (task.type === 'magnet') return this.parseMagnet(task)
+  async parse(task: Task, isAborted?: () => boolean): Promise<ParseOutput> {
+    if (task.type === 'magnet') return this.parseMagnet(task, isAborted)
     if (task.type === 'bt') return this.parseTorrent(task)
     if (task.type === 'http') return this.parseHttp(task)
     throw new Error(`aria2 适配器不支持的任务类型：${task.type}`)
   }
 
   /** 磁力 BEP-9 四步（§4.2）：addUri(pause:true, bt-save-metadata) → 等 metadata → getFiles */
-  private async parseMagnet(task: Task): Promise<ParseOutput> {
+  private async parseMagnet(task: Task, isAborted?: () => boolean): Promise<ParseOutput> {
     const infohash = extractInfohash(task.source)
 
     // D2：元数据落盘到临时目录（不污染用户保存目录）
@@ -101,6 +101,13 @@ export class Aria2Adapter implements EngineAdapter {
     // 等 metadata：轮询 tellStatus 直到 status=complete
     const deadline = Date.now() + METADATA_TIMEOUT_MS
     while (Date.now() < deadline) {
+      // A3：任务在解析期间被删除/回收 → 立即移除暂停态 gid 并退出，
+      // 防 90s 窗口内 aria2 侧任务泄漏（此时 DB 的 engineGid 尚未落库，remove 路径够不到它）
+      if (isAborted?.()) {
+        await this.rpc().call('remove', gid).catch(() => {})
+        cleanupMetadataDir(metaDir)
+        throw new Error('任务已删除')
+      }
       const st = (await this.rpc().call('tellStatus', gid)) as Aria2Status
       // B1：元数据下载阶段 files 只有 <name>.torrent 本体，过滤之（BEP-9 勾选面板只呈现真实内容文件）
       const files = this.statusToFiles(st).filter((f) => !f.path.endsWith('.torrent'))
@@ -419,42 +426,53 @@ export class Aria2Adapter implements EngineAdapter {
       })
       .catch(() => {})
     const events: TaskEvent[] = []
-    for (const task of tasks) {
-      if (task.engine !== 'aria2' || !task.engineGid) continue
-      if (!['queued', 'running', 'paused', 'verifying'].includes(task.status)) continue
-      try {
-        const st = (await this.rpc().call('tellStatus', task.engineGid)) as Aria2Status
-        const statusMap: Record<string, TaskEvent['status']> = {
-          active: 'running',
-          waiting: 'queued',
-          paused: 'paused',
-          complete: 'completed',
-          error: 'failed',
-          removed: 'failed'
+    // L-7：并行轮询——逐任务串行 await 在任务多或 aria2 卡顿时一轮超过 1s，
+    // 会拉长事件窗口（放大合并器回放竞态）
+    await Promise.all(
+      tasks.map(async (task) => {
+        if (task.engine !== 'aria2' || !task.engineGid) return
+        // M-4：seeding 任务继续轮询，做种结束（aria2 报 complete）才落 completed
+        if (!['queued', 'running', 'paused', 'verifying', 'seeding'].includes(task.status)) return
+        try {
+          const st = (await this.rpc().call('tellStatus', task.engineGid)) as Aria2Status
+          // M-4：下载完成但仍在上传（做种）→ seeding（此前一直显示「下载中」，完成时间
+          // 口径偏移到做种结束）。BT 以外任务 totalLength 恒等于 completedLength，不受影响
+          const seeding =
+            st.status === 'active' &&
+            Number(st.totalLength) > 0 &&
+            Number(st.completedLength) >= Number(st.totalLength)
+          const statusMap: Record<string, TaskEvent['status']> = {
+            active: seeding ? 'seeding' : 'running',
+            waiting: 'queued',
+            paused: 'paused',
+            complete: 'completed',
+            error: 'failed',
+            removed: 'failed'
+          }
+          const mapped = statusMap[st.status]
+          // M4-17：aria2 错误结构化归因（五类 + 出口动作）
+          // P3 加固：pollEvents 每秒逐任务调用，归因/健康模块必须静态导入（动态 import 每秒 N 次 Promise 调度开销）
+          const d = diagnose(st.errorMessage ?? '')
+          // Backlog：平台健康面板——aria2 错误写入健康注册表
+          if (st.status === 'error') {
+            recordPlatformFailure('aria2', d.kind, st.errorMessage ?? d.message, 'aria2')
+          }
+          events.push({
+            taskId: task.id,
+            status: mapped,
+            downloadedBytes: Number(st.completedLength),
+            totalBytes: Number(st.totalLength),
+            speedBps: Number(st.downloadSpeed),
+            error:
+              st.status === 'error'
+                ? (st.errorMessage ? `${d.message}（${st.errorMessage}）` : d.message)
+                : undefined
+          })
+        } catch (err) {
+          log.debug(`poll status failed for gid ${task.engineGid}`, err)
         }
-        const mapped = statusMap[st.status]
-        // M4-17：aria2 错误结构化归因（五类 + 出口动作）
-        // P3 加固：pollEvents 每秒逐任务调用，归因/健康模块必须静态导入（动态 import 每秒 N 次 Promise 调度开销）
-        const d = diagnose(st.errorMessage ?? '')
-        // Backlog：平台健康面板——aria2 错误写入健康注册表
-        if (st.status === 'error') {
-          recordPlatformFailure('aria2', d.kind, st.errorMessage ?? d.message, 'aria2')
-        }
-        events.push({
-          taskId: task.id,
-          status: mapped,
-          downloadedBytes: Number(st.completedLength),
-          totalBytes: Number(st.totalLength),
-          speedBps: Number(st.downloadSpeed),
-          error:
-            st.status === 'error'
-              ? (st.errorMessage ? `${d.message}（${st.errorMessage}）` : d.message)
-              : undefined
-        })
-      } catch (err) {
-        log.debug(`poll status failed for gid ${task.engineGid}`, err)
-      }
-    }
+      })
+    )
     return events
   }
 }

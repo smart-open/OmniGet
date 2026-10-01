@@ -8,7 +8,7 @@
 import { watch, existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from 'fs'
 import { join } from 'path'
 import { userDataDir } from '../env'
-import { setScriptHostOverrides } from '../music/http'
+import { setScriptHostOverrides, isMirrorHost } from '../music/http'
 import { createLogger } from '../logger'
 import type { AdapterScriptInfo } from '@shared/types'
 
@@ -143,7 +143,9 @@ function loadAll(): void {
         if (typeof to !== 'string') continue
         const target = to.trim()
         const source = from.toLowerCase().trim()
-        if (target && validHostTarget(target) && source) {
+        // M-1 加固：重写目标必须是已知镜像域——否则本地写入一个 JSON 即可把
+        // 平台 API 流量（含凭据/直链）重定向到任意外部域名
+        if (target && validHostTarget(target) && isMirrorHost(new URL(`http://${target}`).hostname) && source) {
           overrides.set(source, target)
         } else {
           log.warn(`忽略非法 host 重写（${s.id}）：${source} → ${target}`)

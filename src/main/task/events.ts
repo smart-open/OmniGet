@@ -23,6 +23,12 @@ export class TaskEventMerger {
     }
   }
 
+  /** 丢弃某任务窗口内尚未 flush 的合并事件：用户 pause/resume 后，
+   * 陈旧的 running/paused 事件会在 250ms 窗口内把用户刚做的操作回退 */
+  drop(taskId: string): void {
+    this.buffer.delete(taskId)
+  }
+
   private drain(): void {
     this.timer = null
     if (this.buffer.size === 0) return

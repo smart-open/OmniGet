@@ -57,7 +57,9 @@ export async function isInternalUrl(rawUrl: string): Promise<boolean> {
       addrs.some((a) =>
         a.family === 4 ? isPrivateIPv4(a.address) : isPrivateIpLiteral(a.address)
       )
-    resolveCache.set(host, result)
+    // L-7 对齐 engine-fetch 口径：只缓存「确认内网」的判定（内网域恒定）——
+    // 公网判定不落缓存，域名后续被 rebinding 到内网时下一轮探测仍会复核
+    if (result) resolveCache.set(host, result)
     return result
   } catch {
     return true // 解析失败按内网处理（fail-closed）
