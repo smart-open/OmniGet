@@ -28,6 +28,7 @@ const STATUS_LABEL: Record<string, string> = {
   running: '下载中',
   paused: '已暂停',
   verifying: '校验中',
+  seeding: '做种中',
   completed: '已完成',
   failed: '失败'
 }
@@ -44,19 +45,34 @@ export function Inspector({
   const [files, setFiles] = useState<TaskFile[]>([])
   const [copied, setCopied] = useState(false)
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const detailSeq = useRef(0)
   const [cat, setCat] = useState<'all' | 'video' | 'music' | 'image' | 'doc' | 'other'>('all')
 
-  // 打开时拉文件清单
+  // 打开时拉文件清单（P2-1：序号守卫——快速切换任务时旧响应不得覆盖新任务）
   useEffect(() => {
     if (!task) {
       setFiles([])
       return
     }
+    const seq = ++detailSeq.current
     window.omniget
       .getTaskDetail(task.id)
-      .then((d) => setFiles(d?.files ?? []))
-      .catch(() => setFiles([])) // 请求失败不产生 unhandledrejection，文件清单留空
+      .then((d) => {
+        if (seq === detailSeq.current) setFiles(d?.files ?? [])
+      })
+      .catch(() => {
+        if (seq === detailSeq.current) setFiles([]) // 失败留空，不产生 unhandledrejection
+      })
   }, [task?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 卸载清理定时器（防关闭抽屉后 setState）——必须位于 if (!task) 早退之前，
+  // 否则 task 非 null → null 时 Hook 数量变化触发 React "Rendered fewer hooks" 白屏
+  useEffect(
+    () => () => {
+      if (copiedTimer.current) clearTimeout(copiedTimer.current)
+    },
+    []
+  )
 
   if (!task) return null
 
@@ -66,14 +82,15 @@ export function Inspector({
   const failed = task.status === 'failed'
   // 列表过滤已保证 trash 视图不进 Inspector（TaskList 回收站行已禁用 select）
 
-  const control = async (action: 'pause' | 'resume' | 'remove'): Promise<void> => {
+  // 返回操作是否实际生效：remove 取消确认或失败时调用方不应关闭抽屉
+  const control = async (action: 'pause' | 'resume' | 'remove'): Promise<boolean> => {
     if (action === 'remove') {
       const ok = await confirmAction({
         title: '移入回收站',
         message: `「${task.name || task.source}」将被移入回收站，可在回收站中恢复。`,
         confirmLabel: '移入回收站'
       })
-      if (!ok) return
+      if (!ok) return false
     }
     try {
       await window.omniget.controlTask({ taskId: task.id, action })
@@ -81,8 +98,10 @@ export function Inspector({
       if (action === 'pause') toast('任务已暂停', 'success')
       else if (action === 'resume') toast('任务已继续下载', 'success')
       else toast('任务已移入回收站', 'success')
+      return true
     } catch (err) {
       toastError('任务操作', err) // UX 硬性标准：失败必须可见反馈
+      return false
     }
   }
 
@@ -107,14 +126,6 @@ export function Inspector({
       })
       .catch((err) => toastError('复制来源', err))
   }
-
-  // 卸载清理定时器（防关闭抽屉后 setState）
-  useEffect(
-    () => () => {
-      if (copiedTimer.current) clearTimeout(copiedTimer.current)
-    },
-    []
-  )
 
   return (
     <AnimatePresence>
@@ -221,7 +232,12 @@ export function Inspector({
                 {task.saveDir}
               </span>
               <button
-                onClick={() => void window.omniget.openFolder(task.id)}
+                onClick={() =>
+                  // UX 硬性标准：打开目录失败必须可见反馈（目录被移动/删除时用户点击无反应是缺陷）
+                  void window.omniget
+                    .openFolder(task.id)
+                    .catch((err) => toastError('打开目录', err))
+                }
                 className="press shrink-0 text-text-3 hover:text-text-1"
                 aria-label="打开目录"
               >
@@ -317,7 +333,7 @@ export function Inspector({
             <span className="flex-1" />
           )}
           <button
-            onClick={() => void control('remove').then(onClose)}
+            onClick={() => void control('remove').then((ok) => ok && onClose())}
             className="press inline-flex h-8 items-center gap-1.5 rounded-ctl border border-border px-3 text-xs text-text-2 hover:border-danger/40 hover:text-danger"
             aria-label="移入回收站"
           >

@@ -44,12 +44,16 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
   const audioRef = useRef<HTMLAudioElement | null>(null)
   /** P2 修复：试听竞态守卫——await 期间再点别处时，过期回调用序号自弃 */
   const previewSeq = useRef(0)
+  /** P2 修复：搜索竞态守卫——Enter 与按钮在 state 刷新前连点会产生两个在途请求，
+   * 慢的先发后至会覆盖新结果；序号比对让过期响应整体自弃 */
+  const searchSeq = useRef(0)
   const batchInfoTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // P2 修复：离开音乐页时停止试听（此前 Audio 随页面卸载继续播放且无法控制）
   useEffect(() => {
     return () => {
       previewSeq.current++
+      searchSeq.current++ // 作废在途搜索，防止卸载后 setState
       audioRef.current?.pause()
       audioRef.current = null
       if (batchInfoTimer.current) clearTimeout(batchInfoTimer.current)
@@ -58,15 +62,19 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
 
   async function doSearch(): Promise<void> {
     if (!q.trim()) return
+    const seq = ++searchSeq.current
     setSearching(true)
     setSearchError('')
     try {
-      setResult(await window.omniget.musicSearch({ q: q.trim() }))
+      const res = await window.omniget.musicSearch({ q: q.trim() })
+      if (seq !== searchSeq.current) return // 过期响应：新搜索已在途，不得覆盖
+      setResult(res)
     } catch (err) {
+      if (seq !== searchSeq.current) return
       setSearchError(err instanceof Error ? err.message : String(err))
       setResult(null)
     } finally {
-      setSearching(false)
+      if (seq === searchSeq.current) setSearching(false)
     }
   }
 

@@ -10,7 +10,7 @@ export function ConfirmDialog() {
   const answer = useConfirm((s) => s.answer)
   const open = pending !== null
 
-  // Esc = 取消；Enter = 确认
+  // Esc = 取消；Enter = 确认（danger 级除外：删除类操作不得被 Enter 直通，必须显式点击）
   useEffect(() => {
     if (!open) return
     const onKey = (e: KeyboardEvent): void => {
@@ -18,11 +18,11 @@ export function ConfirmDialog() {
       const tag = (e.target as HTMLElement)?.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
       if (e.key === 'Escape') answer(false)
-      else if (e.key === 'Enter') answer(true)
+      else if (e.key === 'Enter' && !pending?.danger) answer(true)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [open, answer])
+  }, [open, answer, pending])
 
   return (
     <AnimatePresence>

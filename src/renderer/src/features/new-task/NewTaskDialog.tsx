@@ -100,6 +100,7 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
       setSniffType(null)
       setFormatId(null)
       setResFilter('all')
+      setCat('all') // 文件分类筛选重置：残留旧分类会让新种子的文件树误显为空
       setAudioOnly(false)
       setEmbedSubs(false)
       setEmbedThumbnail(false)
@@ -650,7 +651,8 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
                       <p className="truncate text-sm">{parsed.name}</p>
                       <p className="num mt-0.5 text-[11px] text-text-3">
                         {parsed.duration
-                          ? `${Math.floor(parsed.duration / 60)}:${String(parsed.duration % 60).padStart(2, '0')}`
+                          ? // 先整体取整再换算：直接 %60 会把小数秒渲染成 "5:4.567"，且 59.7s 进位后出现 "4:60"
+                            `${Math.floor(Math.round(parsed.duration) / 60)}:${String(Math.round(parsed.duration) % 60).padStart(2, '0')}`
                           : ''}{' '}
                         {parsed.totalBytes > 0 && formatBytes(parsed.totalBytes)}
                       </p>
@@ -844,9 +846,12 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
                     />
                     <button
                       onClick={() =>
-                        void window.omniget.pickFolder().then((dir) => {
-                          if (dir) setSaveDir(dir)
-                        })
+                        void window.omniget
+                          .pickFolder()
+                          .then((dir) => {
+                            if (dir) setSaveDir(dir)
+                          })
+                          .catch((err) => toastError('选择文件夹', err))
                       }
                       aria-label="浏览文件夹"
                       title="浏览文件夹"

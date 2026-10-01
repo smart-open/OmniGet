@@ -6,6 +6,7 @@ import { ArrowClockwise, CheckCircle, Warning, XCircle } from '@phosphor-icons/r
 import type { PlatformHealthEntry } from '@shared/types'
 import { useTasks } from '../../stores/tasks'
 import { useI18n } from '../../i18n'
+import { toastError } from '../../lib/feedback'
 
 const STATUS_STYLE: Record<string, { icon: typeof CheckCircle; cls: string }> = {
   ok: { icon: CheckCircle, cls: 'text-success' },
@@ -23,30 +24,29 @@ export function HealthPage() {
   const t = useI18n((s) => s.t)
   const engines = useTasks((s) => s.engines)
   const [entries, setEntries] = useState<PlatformHealthEntry[]>([])
+  const [loadError, setLoadError] = useState('')
 
-  const reload = (): void => {
+  // 统一加载入口：manual=手动刷新（失败额外 toast）；轮询失败仅置内联错误横幅，
+  // 不刷屏（每 10s 一次的定时探测失败不应打扰）
+  const reload = (manual = false): void => {
     window.omniget
       .getPlatformHealth()
-      .then((r) => setEntries(r))
-      .catch(() => {})
+      .then((r) => {
+        setEntries(r)
+        setLoadError('')
+      })
+      .catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err)
+        setLoadError(msg)
+        if (manual) toastError('刷新健康状态', err)
+      })
   }
 
   useEffect(() => {
-    let cancelled = false
-    const reload = (): void => {
-      window.omniget
-        .getPlatformHealth()
-        .then((r) => {
-          if (!cancelled) setEntries(r)
-        })
-        .catch(() => {})
-    }
     reload()
-    const timer = setInterval(reload, 10_000)
-    return () => {
-      cancelled = true
-      clearInterval(timer)
-    }
+    const timer = setInterval(() => reload(), 10_000)
+    return () => clearInterval(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   return (
@@ -56,13 +56,19 @@ export function HealthPage() {
           <h2 className="text-sm font-medium">{t('health.title')}</h2>
           <button
             className="press inline-flex items-center gap-1 text-[11px] text-text-3 hover:text-text-1"
-            onClick={reload}
+            onClick={() => reload(true)}
             title={t('health.autoRefresh')}
           >
             <ArrowClockwise size={12} /> {t('common.refresh')}
           </button>
         </div>
         <p className="mb-4 text-[11px] text-text-3">{t('health.subtitle')}</p>
+        {loadError && (
+          <div className="mb-4 flex items-center gap-2 rounded-panel border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger">
+            <XCircle size={14} weight="fill" className="shrink-0" />
+            健康状态加载失败：{loadError}（将在下次轮询自动重试）
+          </div>
+        )}
 
         {/* 引擎在线状态（aria2 常驻红/绿；ytdlp·music 按需拉起为待机灰） */}
         <h3 className="mb-2 text-xs font-medium text-text-1">{t('health.engines')}</h3>

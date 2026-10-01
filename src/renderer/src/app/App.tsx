@@ -36,6 +36,7 @@ import { HelpOverlay } from '../features/help/HelpOverlay'
 import { Onboarding } from '../features/onboarding/Onboarding'
 import { SpeedSparkline, IconButton, ConfirmDialog } from '../components/ui'
 import { toast, useToasts, confirmAction, isConfirmActive, toastError } from '../lib/feedback'
+import { isAnyModalOpen } from '../lib/modalGate'
 import {
   effectiveKeys,
   eventToKey,
@@ -200,8 +201,8 @@ export default function App() {
     const onKey = (e: KeyboardEvent): void => {
       const tag = (e.target as HTMLElement)?.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
-      // 模态期间屏蔽全局快捷键（确认框/新建任务/帮助/向导——防穿透误触发后台任务操作）
-      if (isConfirmActive() || dialogOpen || showHelp || onboarding) return
+      // 模态期间屏蔽全局快捷键（确认框/新建任务/帮助/向导/产物预览等弹层——防穿透误触发后台任务操作）
+      if (isConfirmActive() || isAnyModalOpen() || dialogOpen || showHelp || onboarding) return
       const k = eventToKey(e)
       if (!k) return
       if (k === keys['new-task']) {
@@ -274,6 +275,13 @@ export default function App() {
     setDialogSource(undefined)
     setDialogOpen(true)
   }
+
+  // 顶栏搜索作用域提示：query 只过滤任务列表视图（TaskList），不作用于
+  // 音乐/设置/工具箱等功能页——placeholder 动态标注当前分组，消除「搜不到」困惑
+  const isTaskListView = !['music', 'health', 'settings', 'stats', 'toolbox'].includes(active)
+  const activeGroupLabel = NAV_GROUPS.flatMap((g) => g.items).find((i) => i.id === active)?.label
+  const searchPlaceholder =
+    isTaskListView && activeGroupLabel ? `在「${activeGroupLabel}」内搜索…` : t('search.placeholder')
 
   return (
     /* 圆角窗口外壳：透明窗口 + 自绘圆角边框（全平台一致） */
@@ -414,7 +422,8 @@ export default function App() {
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 className="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-text-3"
-                placeholder={t('search.placeholder')}
+                placeholder={searchPlaceholder}
+                title="搜索范围为当前分组的任务名称与链接（不跨分组）"
               />
               {query && (
                 <button

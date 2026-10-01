@@ -394,7 +394,7 @@ const TaskRow = memo(function TaskRow({
       ? 'bg-danger'
       : task.status === 'paused'
         ? 'bg-text-3'
-        : task.status === 'completed'
+        : task.status === 'completed' || task.status === 'seeding'
           ? 'bg-success'
           : 'bg-accent'
 
@@ -534,7 +534,13 @@ const TaskRow = memo(function TaskRow({
               <RowAction label="删除（保留文件）" onClick={() => void guarded('删除记录', purgeRecord)}>
                 <FileX size={13} />
               </RowAction>
-              <RowAction label="打开目录" onClick={() => void window.omniget.openFolder(task.id)}>
+              <RowAction
+                label="打开目录"
+                onClick={() =>
+                  // UX 硬性标准：失败必须可见反馈
+                  void window.omniget.openFolder(task.id).catch((err) => toastError('打开目录', err))
+                }
+              >
                 <FolderOpen size={13} />
               </RowAction>
             </>
@@ -559,7 +565,12 @@ const TaskRow = memo(function TaskRow({
                   <PushPin size={13} weight={pinned ? 'fill' : 'regular'} />
                 </RowAction>
               )}
-              <RowAction label="打开目录" onClick={() => void window.omniget.openFolder(task.id)}>
+              <RowAction
+                label="打开目录"
+                onClick={() =>
+                  void window.omniget.openFolder(task.id).catch((err) => toastError('打开目录', err))
+                }
+              >
                 <FolderOpen size={13} />
               </RowAction>
               <RowAction label="移入回收站" danger onClick={() => void guarded('移入回收站', moveToTrash)}>

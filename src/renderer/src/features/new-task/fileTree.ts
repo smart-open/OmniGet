@@ -88,10 +88,12 @@ export function setSubtree(node: TreeNode, checked: boolean, selected: Set<strin
 }
 
 export function formatBytes(bytes: number): string {
+  // P2-4：NaN/负数/Infinity 守卫——上游坏数据不得渲染成 "NaN B"/"Infinity GB" 脏文案
+  if (!Number.isFinite(bytes) || bytes < 0) return '--'
   if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`
   if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`
   if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${bytes} B`
+  return `${Math.round(bytes)} B`
 }
 
 export function formatEta(seconds: number): string {

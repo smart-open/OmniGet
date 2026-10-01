@@ -85,25 +85,31 @@ export function ClipEditor({
         const Ctx: typeof AudioContext =
           window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
         const ctx = new Ctx()
-        const audio = await ctx.decodeAudioData(buf)
-        void ctx.close()
-        const ch = audio.getChannelData(0)
-        const peaks = new Float32Array(PEAKS_N)
-        const step = Math.max(1, Math.floor(ch.length / PEAKS_N))
-        for (let i = 0; i < PEAKS_N; i++) {
-          let max = 0
-          const s = i * step
-          const e = Math.min(ch.length, s + step)
-          for (let j = s; j < e; j += 8) {
-            const v = Math.abs(ch[j] ?? 0)
-            if (v > max) max = v
+        try {
+          const audio = await ctx.decodeAudioData(buf)
+          const ch = audio.getChannelData(0)
+          const peaks = new Float32Array(PEAKS_N)
+          const step = Math.max(1, Math.floor(ch.length / PEAKS_N))
+          for (let i = 0; i < PEAKS_N; i++) {
+            let max = 0
+            const s = i * step
+            const e = Math.min(ch.length, s + step)
+            for (let j = s; j < e; j += 8) {
+              const v = Math.abs(ch[j] ?? 0)
+              if (v > max) max = v
+            }
+            peaks[i] = max
           }
-          peaks[i] = max
+          if (cancelled) return
+          peaksRef.current = peaks
+          setHasWave(true)
+          const dur = audio.duration
+          // 流式容器（部分 webm/mkv）duration 为 Infinity，必须拦下，否则 draw() 刻度循环死循环
+          setDuration((d) => d || (Number.isFinite(dur) ? dur : 0))
+        } finally {
+          // decode 失败也要释放（浏览器对 AudioContext 实例数有上限）
+          void ctx.close()
         }
-        if (cancelled) return
-        peaksRef.current = peaks
-        setHasWave(true)
-        setDuration((d) => d || audio.duration)
       } catch {
         if (!cancelled) setWaveErr(true)
       }
@@ -117,7 +123,7 @@ export function ClipEditor({
   const draw = useCallback(() => {
     const canvas = canvasRef.current
     const wrap = wrapRef.current
-    if (!canvas || !wrap || duration <= 0) return
+    if (!canvas || !wrap || !Number.isFinite(duration) || duration <= 0) return
     const dpr = window.devicePixelRatio || 1
     const w = wrap.clientWidth
     const h = wrap.clientHeight
@@ -353,7 +359,11 @@ export function ClipEditor({
           ref={mediaRef}
           src={previewUrl}
           onTimeUpdate={onTimeUpdate}
-          onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 0)}
+          onLoadedMetadata={(e) => {
+  // Infinity（流式容器）与 NaN 一律归 0，防止 draw() 死循环
+  const d = e.currentTarget.duration
+  setDuration(Number.isFinite(d) ? d : 0)
+}}
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
           onError={() =>
@@ -367,7 +377,11 @@ export function ClipEditor({
           ref={mediaRef as unknown as React.Ref<HTMLAudioElement>}
           src={previewUrl}
           onTimeUpdate={onTimeUpdate}
-          onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 0)}
+          onLoadedMetadata={(e) => {
+  // Infinity（流式容器）与 NaN 一律归 0，防止 draw() 死循环
+  const d = e.currentTarget.duration
+  setDuration(Number.isFinite(d) ? d : 0)
+}}
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
           onError={() =>

@@ -72,9 +72,12 @@ export function Onboarding({ open, onClose }: { open: boolean; onClose: () => vo
                 variant="outline"
                 icon={<FolderOpen size={14} />}
                 onClick={() =>
-                  void window.omniget.pickFolder().then((dir) => {
-                    if (dir) setSaveDir(dir)
-                  })
+                  void window.omniget
+                    .pickFolder()
+                    .then((dir) => {
+                      if (dir) setSaveDir(dir)
+                    })
+                    .catch((err) => toastError('选择文件夹', err))
                 }
               >
                 浏览

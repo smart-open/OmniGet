@@ -443,7 +443,7 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
         {saved && (
           <div
             className={
-              saved.startsWith('更新失败')
+              saved.startsWith('更新失败') || saved.startsWith('检查失败')
                 ? 'mb-4 rounded-ctl border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger'
                 : 'mb-4 rounded-ctl border border-success/40 bg-success/10 px-3 py-2 text-xs text-success'
             }
@@ -505,9 +505,12 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                     variant="outline"
                     icon={<FolderOpen size={13} />}
                     onClick={() =>
-                      void window.omniget.pickFolder().then((dir) => {
-                        if (dir) setSaveDir(dir)
-                      })
+                      void window.omniget
+                        .pickFolder()
+                        .then((dir) => {
+                          if (dir) setSaveDir(dir)
+                        })
+                        .catch((err) => toastError('选择文件夹', err))
                     }
                   >
                     浏览
@@ -669,7 +672,8 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                       onClick={() =>
                         window.open(
                           `http://127.0.0.1:${bridgeInfo.port}/?token=${bridgeInfo.token}`,
-                          '_blank'
+                          '_blank',
+                          'noopener'
                         )
                       }
                     >
@@ -948,13 +952,17 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                         : `已是最新版本（v${appUpdate.current}）`}
                     </span>
                   )}
-                  {appUpdate?.error && <span className="text-xs text-text-3">{appUpdate.error}</span>}
+                  {appUpdate?.error && <span className="text-xs text-danger">{appUpdate.error}</span>}
                 </div>
                 {appUpdate?.hasUpdate && (
                   <div className="mb-3">
                     <Button
                       size="sm"
-                      onClick={() => void window.omniget.openReleases()}
+                      onClick={() =>
+                        void window.omniget
+                          .openReleases()
+                          .catch((err) => toastError('打开发布页', err))
+                      }
                       icon={<FolderOpen size={12} />}
                     >
                       前往下载 v{appUpdate.latest}

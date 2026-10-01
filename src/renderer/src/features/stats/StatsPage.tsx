@@ -7,6 +7,7 @@ import { useTasks } from '../../stores/tasks'
 
 export function StatsPage({ onNewTask }: { onNewTask?: () => void }) {
   const [stats, setStats] = useState<DailyStat[] | null>(null)
+  const [statsError, setStatsError] = useState('')
   const tasks = useTasks((s) => s.tasks)
   const reload = useTasks((s) => s.load)
 
@@ -14,8 +15,15 @@ export function StatsPage({ onNewTask }: { onNewTask?: () => void }) {
     // P2 加固：getStats 失败不产生 unhandledrejection（保留骨架→空态路径）
     window.omniget
       .getStats()
-      .then(setStats)
-      .catch(() => setStats([]))
+      .then((r) => {
+        setStats(r)
+        setStatsError('')
+      })
+      .catch((err) => {
+        // UX 硬性标准：失败不得伪装成空数据——区分「暂无记录」与「加载失败」
+        setStats([])
+        setStatsError(err instanceof Error ? err.message : String(err))
+      })
     // 事件接线由 App 全局负责；此前此处重复接线导致监听器线性叠加
     void reload('all')
   }, [reload])
@@ -45,6 +53,12 @@ export function StatsPage({ onNewTask }: { onNewTask?: () => void }) {
     <main className="h-full overflow-y-auto">
       <div className="mx-auto max-w-[720px] px-6 py-6">
         <h2 className="mb-4 text-sm font-medium">统计</h2>
+
+        {statsError && (
+          <p className="mb-4 rounded-panel border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger">
+            统计数据加载失败：{statsError}
+          </p>
+        )}
 
         {/* 库实时总览（始终有数：来自任务库） */}
         <div className="grid grid-cols-3 divide-x divide-border border-y border-border">

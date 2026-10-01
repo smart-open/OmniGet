@@ -35,6 +35,7 @@ import {
 import { PREVIEW_SCHEME, type ToolDefInfo, type ToolEvent } from '@shared/types'
 import { Button } from '../../components/ui'
 import { toast, toastError } from '../../lib/feedback'
+import { useModalGate } from '../../lib/modalGate'
 import { ClipEditor, type ClipRegion } from './ClipEditor'
 
 interface RunningJob {
@@ -90,6 +91,8 @@ function ToolPreviewModal({
   const [error, setError] = useState('')
   const url = previewUrlOf(path)
   const name = path.split(/[\\/]/).pop() ?? path
+  // 弹层期间屏蔽全局快捷键（删除/暂停等不得穿透到工具箱后台）
+  useModalGate(true)
 
   useEffect(() => {
     if (kind !== 'text') return
