@@ -19,9 +19,14 @@ export function ConfirmDialog() {
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
       if (e.key === 'Escape') answer(false)
       else if (e.key === 'Enter' && !pending?.danger) answer(true)
+      else return
+      // R4-P1：capture 阶段消费后立即阻断——防止下层弹层（如 NewTaskDialog）的
+      // window 级 Esc 监听同时响应：用户取消确认框会连带关闭整个对话框、
+      // 丢失已解析的文件树/勾选/格式选择（磁力解析最长 90s）
+      e.stopImmediatePropagation()
     }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
   }, [open, answer, pending])
 
   return (
@@ -51,7 +56,7 @@ export function ConfirmDialog() {
             </div>
             <p className="text-xs leading-relaxed text-text-2">{pending.message}</p>
             <div className="mt-5 flex justify-end gap-2">
-              <Button size="sm" variant="outline" onClick={() => answer(false)}>
+              <Button size="sm" variant="outline" onClick={() => answer(false)} autoFocus>
                 取消
               </Button>
               <Button

@@ -84,10 +84,17 @@ export function TaskList({
   // ⚠ 数据源守卫：tasks map 是「最后一次 load」的内容。若在回收站视图里被其他
   // 组件 load('all') 覆盖（FILTERS.trash 不过滤），会把全部任务当回收站显示——
   // 一键清空将误删正在下载的任务。此处强制校验并自动重载正确的过滤器。
-  const trashDataReady = !isTrash || loadedFilter === 'trash'
+  // R4-P3：守卫推广到全部任务视图——任意分组切换在途期间旧数据不再按新分组
+  // 标题「串场」（回收站条目曾在「全部」视图闪现）
+  const trashDataReady = loadedFilter === active
   useEffect(() => {
-    if (isTrash && loadedFilter !== 'trash') void load('trash')
-  }, [isTrash, loadedFilter, load])
+    if (loadedFilter !== active) void load(active)
+  }, [active, loadedFilter, load])
+
+  // R4-P3：切换分组后滚动位置复位——此前残留位置会让用户落在列表中部
+  useEffect(() => {
+    parentRef.current?.scrollTo({ top: 0 })
+  }, [active])
 
   // 回收站批量操作：多选集合 + 批量恢复/彻底删除/一键清空
   const [checked, setChecked] = useState<Set<string>>(new Set())
@@ -197,6 +204,13 @@ export function TaskList({
 
   // P3 修复：单行操作后 checked 集合残留已删 id → 计数虚高、全选框错乱
   const checkedKey = list.map((t) => t.id).join('|')
+  // R4-P3：部分勾选时全选框显示 indeterminate 视觉态
+  const selectAllRef = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    if (selectAllRef.current) {
+      selectAllRef.current.indeterminate = checked.size > 0 && checked.size < list.length
+    }
+  }, [checked.size, list.length])
   useEffect(() => {
     const alive = new Set(checkedKey.split('|').filter(Boolean))
     setChecked((prev) => {
@@ -283,6 +297,7 @@ export function TaskList({
           <div className="flex items-center gap-1.5">
             <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-text-3">
               <input
+                ref={selectAllRef}
                 type="checkbox"
                 checked={list.length > 0 && checked.size === list.length}
                 onChange={(e) =>
@@ -393,6 +408,20 @@ const TaskRow = memo(function TaskRow({
   onSelect: (id: string) => void
 }) {
   const togglePin = useTasks((s) => s.togglePin)
+  // R4-P3：行操作防重入——双击此前会触发双 IPC + 双 toast（purge 双击经确认
+  // 队列还会弹第二个确认框，确认后报「任务不存在」）
+  const [rowBusy, setRowBusy] = useState(false)
+  const runOp = (action: string, fn: () => Promise<void>): void => {
+    if (rowBusy) return
+    setRowBusy(true)
+    void guarded(action, async () => {
+      try {
+        await fn()
+      } finally {
+        setRowBusy(false)
+      }
+    })
+  }
   const pct =
     task.totalBytes > 0 ? Math.min(100, (task.downloadedBytes / task.totalBytes) * 100) : 0
   const eta =
@@ -538,13 +567,13 @@ const TaskRow = memo(function TaskRow({
         <span className="ml-auto flex items-center gap-0.5 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
           {isTrash ? (
             <>
-              <RowAction label="恢复" onClick={() => void guarded('恢复任务', restore)}>
+              <RowAction label="恢复" onClick={() => runOp('恢复任务', restore)}>
                 <ArrowsClockwise size={13} />
               </RowAction>
-              <RowAction label="彻底删除（含文件）" danger onClick={() => void guarded('彻底删除', purge)}>
+              <RowAction label="彻底删除（含文件）" danger onClick={() => runOp('彻底删除', purge)}>
                 <Trash size={13} />
               </RowAction>
-              <RowAction label="删除（保留文件）" onClick={() => void guarded('删除记录', purgeRecord)}>
+              <RowAction label="删除（保留文件）" onClick={() => runOp('删除记录', purgeRecord)}>
                 <FileX size={13} />
               </RowAction>
               <RowAction
@@ -560,12 +589,12 @@ const TaskRow = memo(function TaskRow({
           ) : (
             <>
               {canPause && (
-                <RowAction label="暂停" onClick={() => void guarded('暂停任务', () => control('pause'))}>
+                <RowAction label="暂停" onClick={() => runOp('暂停任务', () => control('pause'))}>
                   <Pause size={13} />
                 </RowAction>
               )}
               {canResume && (
-                <RowAction label="继续" onClick={() => void guarded('继续任务', () => control('resume'))}>
+                <RowAction label="继续" onClick={() => runOp('继续任务', () => control('resume'))}>
                   <Play size={13} weight="fill" />
                 </RowAction>
               )}
@@ -586,7 +615,7 @@ const TaskRow = memo(function TaskRow({
               >
                 <FolderOpen size={13} />
               </RowAction>
-              <RowAction label="移入回收站" danger onClick={() => void guarded('移入回收站', moveToTrash)}>
+              <RowAction label="移入回收站" danger onClick={() => runOp('移入回收站', moveToTrash)}>
                 <Trash size={13} />
               </RowAction>
             </>

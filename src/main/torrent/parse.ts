@@ -32,12 +32,17 @@ export function normalizeInfohash(raw: string): string {
   if (s.length === 32) {
     // RFC4648 base32（磁力 urn:btih 默认字母表）
     const alpha = 'abcdefghijklmnopqrstuvwxyz234567'
+    // R4-P3：32 位 btih 混入非法字符（0/1/8/9，短链生成器常见错误）时原样返回
+    // 会造成同一资源 base32/hex 双查重键 → 重复任务；显式判非法并留痕
     let bits = 0
     let value = 0
     const out: number[] = []
     for (const ch of s) {
       const idx = alpha.indexOf(ch)
-      if (idx === -1) return s
+      if (idx === -1) {
+        // 非法 base32：交回上层按非法磁力拒绝（不再静默原样返回）
+        throw new Error(`磁力 infohash 含非法 base32 字符「${ch}」，请检查链接是否完整`)
+      }
       value = (value << 5) | idx
       bits += 5
       if (bits >= 8) {

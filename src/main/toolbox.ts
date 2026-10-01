@@ -286,7 +286,8 @@ export const TOOL_DEFS: ToolDef[] = [
     desc: 'srt / ass / vtt 互转（ffmpeg 原生转码，秒级完成）',
     fields: [{ key: 'format', label: '目标格式', type: 'select', options: ['srt', 'ass', 'vtt'], default: 'srt' }],
     build: (input, outDir, params) => {
-      const fmt = String(params.format ?? 'srt')
+      // R4-P2：format 白名单（与 convert 同口径）——原样拼接可注入 `../` 路径穿越
+      const fmt = ['srt', 'ass', 'vtt'].includes(String(params.format)) ? String(params.format) : 'srt'
       const out = join(outDir, `${baseName(input)}.${fmt}`)
       return { args: ['-y', '-i', input, out], output: out }
     }
@@ -507,7 +508,8 @@ export const TOOL_DEFS: ToolDef[] = [
     desc: 'PNG / JPG / WebP 互转（ffmpeg 原生编解码，秒级完成），封面/缩略图预处理',
     fields: [{ key: 'format', label: '目标格式', type: 'select', options: ['png', 'jpg', 'webp'], default: 'webp' }],
     build: (input, outDir, params) => {
-      const fmt = String(params.format ?? 'webp')
+      // R4-P2：format 白名单（与 convert 同口径）——原样拼接可注入 `../` 路径穿越
+      const fmt = ['png', 'jpg', 'webp'].includes(String(params.format)) ? String(params.format) : 'webp'
       const out = join(outDir, `${baseName(input)}.${fmt}`)
       return { args: ['-y', '-i', input, '-frames:v', '1', out], output: out }
     }
@@ -738,7 +740,8 @@ export class ToolboxRunner {
   cancel(taskId: string): boolean {
     const entry = this.procs.get(taskId)
     if (entry) {
-      this.procs.delete(taskId)
+      // R4-P3：不立即删 procs 表项——取消完成窗口内的二次 cancel 此前恒 false
+      //（UI 误报「取消失败」）；表项由 submit finally / 进程 exit 清理
       // L3 修复：先落取消标记（terminateTree 不置 proc.killed，Unix 上组信号
       // SIGTERM 终止后 exit 判定取消必须靠本标记，而非「ffmpeg 退出码 null」误导）
       this.cancelled.add(taskId)
@@ -889,13 +892,15 @@ export class ToolboxRunner {
       throw err
     }
     const { args, output, prewrite, extraOutputs } = built
-    if (prewrite) {
-      await writeFile(prewrite.path, prewrite.content, 'utf8')
-    }
     log.info(`tool ${input.tool} → ${output}`)
 
     // 信号量：≤2 并发（§4.7，不计入下载并发）；排队者额度由释放方同步移交
     if (!(await this.acquireSlot(taskId, input.tool))) throw new Error('任务已取消')
+    // R4-P3：prewrite 移到 acquireSlot 之后——排队中被取消的任务此前已把
+    // concat 清单写盘且无人清理（与「取消不留半成品」承诺不符）
+    if (prewrite) {
+      await writeFile(prewrite.path, prewrite.content, 'utf8')
+    }
     this.emit({ taskId, tool: input.tool, status: 'running', message: '处理中' })
     try {
       await this.runFfmpeg(args, output, taskId, input.tool, extraOutputs ?? [])
@@ -909,6 +914,10 @@ export class ToolboxRunner {
       log.error(`tool ${input.tool} failed: ${message}`)
       throw new Error(message)
     } finally {
+      // R4-P3：临时清单文件（concat 的 *_concat.txt）任务终态后清理，不留产物目录
+      if (prewrite) {
+        await rm(prewrite.path, { force: true }).catch(() => {})
+      }
       // P2 加固：额度同步移交被唤醒者（新 submit 在间隙内插队会突破并发上限）
       this.active--
       this.procs.delete(taskId)

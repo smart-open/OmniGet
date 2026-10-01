@@ -172,8 +172,13 @@ export const useI18n = create<I18nState>((set, get) => ({
 
 /** App 挂载时调用：从 settings 恢复语言偏好 */
 export function initLocale(): void {
-  void window.omniget.settingsGet('ui.locale').then((v) => {
-    const id: LocaleId = v === 'en' ? 'en' : 'zh-CN'
-    if (useI18n.getState().locale !== id) useI18n.setState({ locale: id })
-  })
+  void window.omniget
+    .settingsGet('ui.locale')
+    .then((v) => {
+      const id: LocaleId = v === 'en' ? 'en' : 'zh-CN'
+      if (useI18n.getState().locale !== id) useI18n.setState({ locale: id })
+    })
+    .catch(() => {
+      // R4-P3：读取失败按默认 zh-CN 继续（此前 unhandledrejection）
+    })
 }

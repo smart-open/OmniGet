@@ -62,6 +62,17 @@ export class LocalMusicAdapter implements MusicAdapter {
     // 都会成为 unhandledRejection——补 .catch 留痕成本极低
     void this.runJob(jobId, req, byId).catch((err) => {
       log.error(`music job ${jobId} crashed: ${err instanceof Error ? err.message : String(err)}`)
+      // R4-P3：崩溃必须补发 done(failed)——manager 靠 done 事件释放音乐并发槽
+      //（activeMusic 上限 4），缺失事件会让极端连续 crash 逐渐堵死音乐队列
+      this.emit({
+        type: 'music.done',
+        taskId: jobId,
+        success: false,
+        source: '',
+        message: '音乐引擎内部错误，请重试',
+        mp3Path: '',
+        lrcPath: ''
+      } as ServiceEvent)
     })
     return jobId
   }

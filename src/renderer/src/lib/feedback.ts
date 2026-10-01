@@ -33,6 +33,11 @@ export const toast = (message: string, level: NoticeLevel = 'info'): void => {
   useToasts.getState().push(message, level)
 }
 
+/** R4-P3：toast 可点击手动关闭（容器此前 pointer-events-none 只能等 3.5s 自动消失） */
+export const dismissToast = (id: string): void => {
+  useToasts.getState().dismiss(id)
+}
+
 /** 写操作失败的统一反馈：toast('保存失败：具体原因', 'warning') */
 export const toastError = (action: string, err: unknown): void => {
   const detail = err instanceof Error ? err.message : String(err)

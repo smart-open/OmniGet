@@ -4,7 +4,7 @@
 
 import { app, Menu, Tray, nativeImage, BrowserWindow, clipboard, Notification } from 'electron'
 import { join } from 'path'
-import { sniff, DedupeWindow } from '../sniffer'
+import { sniff, launchDedupe } from '../sniffer'
 import { createLogger } from '../logger'
 import { runtimeBase } from '../env'
 import { getSetting, setSetting } from '../db'
@@ -15,7 +15,7 @@ const log = createLogger('integrations')
 let tray: Tray | null = null
 let trayTooltipTimer: NodeJS.Timeout | null = null
 let clipboardTimer: NodeJS.Timeout | null = null
-const dedupe = new DedupeWindow(30_000)
+const dedupe = launchDedupe // R4-P3：三入口共用去重窗口（与协议/拖拽唤起同实例）
 let speedProvider: () => { down: number; up: number; running: number; queued: number } = () => ({
   down: 0,
   up: 0,

@@ -18,7 +18,7 @@ import { registerIpcHandlers, setTaskManager, setMusicAdapter } from './ipc'
 import { createLogger } from './logger'
 import { runtimeBase } from './env'
 import { startStatsScheduler, stopStatsScheduler } from './stats'
-import { startScheduler } from './scheduler'
+import { startScheduler, invalidateSchedule } from './scheduler'
 import { startBridge, stopBridge } from './bridge'
 import { toolbox } from './toolbox'
 import { broadcastToolEvents } from './ipc'
@@ -34,7 +34,7 @@ import {
   setSpeedProvider,
   startClipboardWatcher
 } from './integrations/tray'
-import { sniff, DedupeWindow } from './sniffer'
+import { sniff, launchDedupe as sharedDedupe } from './sniffer'
 
 const log = createLogger('main')
 
@@ -46,7 +46,7 @@ const gotLock = app.requestSingleInstanceLock()
 if (!gotLock) {
   app.quit()
 } else {
-  const launchDedupe = new DedupeWindow(30_000)
+  const launchDedupe = sharedDedupe // R4-P3：三入口共用去重窗口
   app.on('second-instance', (_e, argv) => {
     // magnet: 协议唤起：从 argv 提取链接并转发到窗口（§4.6；30s 去重防止重复唤起开重复任务）
     const source = argv.find((a) => /^magnet:\?/i.test(a) || /^https?:\/\//i.test(a))
@@ -159,6 +159,8 @@ async function bootstrap(): Promise<void> {
       log.info(`aria2 online at ${port}`)
       void manager.recoverEngineTasks()
       manager.broadcastHealth(true)
+      // R4-P2：重启路径 changeGlobalOption 会重置全局限速——重放当前时段档位
+      invalidateSchedule()
       // M4-16：aria2 就绪后注入 Tracker（启动期的竞态在此兜底重试）；
       // 加速：同时对运行中/排队任务逐个 changeOption 注入
       const trackerCsv = joinedTrackers()

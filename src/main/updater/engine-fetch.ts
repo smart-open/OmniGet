@@ -174,18 +174,25 @@ async function downloadAndVerify(url: string, sha256: string, dest: string, onPr
   const hash = createHash('sha256')
   const ws = createWriteStream(part)
   let received = 0
-  await pipeline(
-    (async function* () {
-      for await (const chunk of body) {
-        const buf = chunk as Buffer
-        hash.update(buf)
-        received += buf.length
-        onProgress?.(received, total)
-        yield buf
-      }
-    })(),
-    ws
-  )
+  try {
+    await pipeline(
+      (async function* () {
+        for await (const chunk of body) {
+          const buf = chunk as Buffer
+          hash.update(buf)
+          received += buf.length
+          onProgress?.(received, total)
+          yield buf
+        }
+      })(),
+      ws
+    )
+  } catch (err) {
+    // R4-P3：网络异常/超时等失败路径必须清理 .part（此前仅 SHA 不符分支清理，
+    // 引擎目录会累积残缺的 *.part）
+    await rm(part, { force: true }).catch(() => {})
+    throw err
+  }
   const digest = hash.digest('hex')
   if (digest !== sha256.toLowerCase()) {
     await rm(part, { force: true })
@@ -210,8 +217,14 @@ export interface FetchOptions {
 
 /** 补齐缺失引擎；全部就绪/无分发源时快速返回。安装成功即登记 TOFU 指纹。 */
 export async function fetchMissingEngines(opts: FetchOptions = {}): Promise<FetchResult> {
-  // H5 修复：启动期自动补齐与用户手动触发可能并发，串行排队（同一 .part 会互相踩踏）
-  return fetchChain.then(() => runFetchMissingEngines(opts))
+  // H5 修复 + R4-P1 修正：串行链必须回写链尾——此前从未赋回 fetchChain，
+  // 并发调用实际并行执行（同一 .part 互相踩踏），与 ytdlp 热更器同型空操作
+  const p = fetchChain.then(() => runFetchMissingEngines(opts))
+  fetchChain = p.then(
+    () => undefined,
+    () => undefined
+  )
+  return p
 }
 
 let fetchChain: Promise<unknown> = Promise.resolve()

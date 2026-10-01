@@ -5,7 +5,7 @@
 
 import { app, protocol } from 'electron'
 import { createReadStream } from 'fs'
-import { stat } from 'fs/promises'
+import { realpath, stat } from 'fs/promises'
 import { extname, isAbsolute } from 'path'
 import { Readable } from 'stream'
 import { createLogger } from '../logger'
@@ -121,9 +121,22 @@ function isAppArtifactPath(p: string): boolean {
   return [...candidates].some((root) => norm === root || norm.startsWith(`${root}/`))
 }
 
-async function serveLocalMedia(path: string, request: Request): Promise<Response> {
+async function serveLocalMedia(rawPath: string, request: Request): Promise<Response> {
   try {
-    if (!isAbsolute(path)) return new Response('bad request', { status: 400 })
+    if (!isAbsolute(rawPath)) return new Response('bad request', { status: 400 })
+    // R4-P1 加固：先 realpath 规范化再过黑/白名单——WHATWG URL 对非特殊 scheme
+    // 不做路径点归一化，`omniget-preview://local/c:/windows/../..` 会以字面串
+    // 绕过前缀比对后由 fs 层解析 `..` 逃逸（与 taskParseFile/toolReveal 同口径）。
+    // 显式含 `..`/`.` 段直接拒绝；软链/junction 由 realpath 消除。
+    if (/(^|[\\/])\.\.?(?:[\\/]|$)/.test(rawPath)) {
+      return new Response('forbidden', { status: 403 })
+    }
+    let path: string
+    try {
+      path = await realpath(rawPath)
+    } catch {
+      return new Response('not found', { status: 404 })
+    }
     const type = LOCAL_MEDIA_TYPES[extname(path).toLowerCase()]
     if (!type) return new Response('unsupported media type', { status: 415 })
     if (isSensitivePath(path)) return new Response('forbidden', { status: 403 })

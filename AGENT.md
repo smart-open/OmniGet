@@ -154,6 +154,25 @@ npm run dev               # GUI 冒烟（看日志：aria2 online / tray created
 
 ## 10. 审查与修复记录
 
+**第四轮全面审查修复（2026-10-01 晚，P1×5 + P2×16 + P3×25 全修）**：typecheck 双端 + 65/65 单测通过。四路子代理（主进程编排/渲染层 UX/音乐·工具箱·热更器/IPC·安全面）深查，排除已知遗留项后：
+
+**P1×5**：
+1. **preview:// 本地分支缺 realpath**（preview-protocol.ts）——WHATWG URL 对非特殊 scheme 不归一化路径点，`..` 可绕过敏感目录黑名单任意读文件；修：显式拒 `..`/`.` 段 + `realpath` 后重跑黑/白名单（与 taskParseFile/toolReveal 同口径）
+2. **yt-dlp 暂停→恢复→再暂停失效**（ytdlp.ts）——`running` 登记移入 `run()`（resume 重 spawn 同样登记）
+3. **音乐失败重试永久卡 queued**（manager.ts）——retry/cancelled/failed 三路径清 `engineGid`（pumpMusic 过滤 `!engineGid` 此前永不入泵）
+4. **热更串行链空操作**（updater/ytdlp.ts + engine-fetch.ts 同型）——`chain.then(run)` 从未回写 chain，并发热更实际并行互踩；修为 `chain = p.catch(noop)` 回写链尾。附带：同版本跳过（engines.ytdlpTag）、tmp 残留清理、回滚失败自动排队 fetchMissingEngines 自愈、engine-fetch pipeline 失败清 .part
+5. **Esc 双重关闭**（ConfirmDialog）——capture 阶段监听 + `stopImmediatePropagation`，取消确认框不再连带关闭 NewTaskDialog（丢失磁力解析结果）
+
+**P2 主进程**：restoreFromTrash 归位列表补 `seeding`；`runWhenQueued` finally 补 `pumpStarts()`（启动失败后队列死锁）；tool 任务 pause 显式拒绝/resume 重走 runToolTask（此前误走 aria2 分支：假暂停+晦涩报错）；persistYtdlpProduct 优先用适配器 `getOutputFiles()` 精确产物（目录扫描仅兜底，防同目录并发任务互相污染）；settingsSet `ytdlp.cookieFile` 路径校验（拒 UNC/敏感目录，NTLM 凭据面对齐）；音乐取消清理跳过 `cached` 命中（防删并发同歌任务的既有文件，PlatformResult.cached 标记）；subtitle/image-convert `format` 白名单（路径穿越）；env.ts 迁移改 staging+rename 原子落位；musicSearch 入参校验（q 必填+200 字上限）；taskParseFile ENOENT/EACCES/bencode 错误中文映射；aria2 重启后 `invalidateSchedule()` 重放分时限速档（index.ts onOnline）。
+
+**P2 渲染层**：main.tsx 桥缺失降级页 + 顶层 RootBoundary（此前白屏零提示）；启动期 settingsGet/onboarded/keymap/initLocale/Onboarding 目录填充全部补 catch；TaskList loadedFilter 守卫推广到全部任务视图（分组切换串场）；SettingsPage Tracker 写成功/刷新失败分开提示（防重复添加）。
+
+**P3 主进程**：磁力确认勾选成功后清理 %TEMP% 元数据目录（st.dir 即 metaDir）；toolbox concat prewrite 移到 acquireSlot 后 + 终态清理清单文件；cancel 不立即删 procs 表项（取消窗口二次 cancel 不再误报失败）；postMusicDownload 失败 fresh+isTrashed 复核；fetchToFile 非 ok 记 logHttpFailure；tryAllPlatforms 每轮平台前查 abort（透传 signal）；downloadById rename 后取消复核 + completed 后置；adapter runJob crash 补发 music.done(failed)（防音乐并发槽泄漏）；sniffer URL 拖尾标点清洗（new URL().toString()）+ 本地绝对路径不作音乐名；DedupeWindow 三入口共享实例（launchDedupe 导出）；base32 非法字符显式抛错（防双查重键）；CSP 补 `form-action 'none'; frame-ancestors 'none'`（ws://localhost:* 为 dev HMR 保留）；删除孤儿通道 `app:update` 与死 API `db:ping`；env.ts 探测文件/回退失败留痕。
+
+**P3 渲染层**：TaskRow 行操作防重入（runOp per-row busy）；分组切换滚动复位；全选框 indeterminate；App 回收站清空选中/切走清搜索词/主题弹层 Esc/订阅 onWinState（最大化按钮反映真实窗口态）；toast 可点击手动关闭（dismissToast）；ConfirmDialog 初始焦点；Inspector Esc 关闭 + 详情加载失败内联提示；NewTaskDialog 模式切换保留输入内容/BT「下完即停」仅 bt/magnet 显示/提交与批量入队按当前 loadedFilter 重载（防守卫双载闪烁）；MusicWorkbench 批量导入卸载守卫（batchAlive）/audio.play().catch/试听网络错误与能力缺失分开提示；ToolboxPage 清空记录轻确认；StatsPage 图表口径统一 30 天 + 库总览 loadedFilter 守卫；HelpOverlay 补齐 group4-6 行、脚注对齐；SettingsPage 脚本重载成功 toast/启停防连点/BT 自检 disabled/调度计划前端校验+保存防连点；ClipEditor pointercancel 清理拖拽态。
+
+**音乐/工具箱/热更器复核通过面**：四镜像回退、HostGate、ffmpeg 取消清理链、node 任务额度移交、热更 SHA256+TOFU、schedule/trackers/scripts 校验均无新问题。
+
 **音乐链路 + 日志专项（2026-10-01 下午，用户反馈"牡丹亭 fetch failed"）**：typecheck 双端 + 39/39 单测。修复——
 1. **P1 下载/试听全链必败根因**：`downloadNeteaseAudio` 镜像 fetcher 无 try/catch——第一个镜像（cenguigui）不可达即 `fetch failed` 整任务失败，后 3 个镜像永不尝试；试听只走 haitangw 单镜像。修复：下载/试听均改四镜像（cenguigui→haitangw→rrvenn→toubiec）逐个容错回退 + 逐镜像日志
 2. **P1 GIF/图片预览被 CSP 拦截**：img-src 无 `omniget-preview:`（文本预览 fetch 同被 connect-src 拦）→ CSP 补齐。⚠ 剪辑编辑器波形解码 fetch 此前也一直被 connect-src 静默拦截（降级纯时间轴），一并修复

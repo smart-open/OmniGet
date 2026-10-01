@@ -4,7 +4,7 @@
 // - 运行目录不可写（如装进 Program Files）时回退系统 userData，日志告警
 // - 纯 Node（单测/集成脚本）降级临时目录；OMNIGET_TEST_DATA_DIR 可注入隔离
 
-import { existsSync, mkdirSync, copyFileSync, writeFileSync, rmSync } from 'fs'
+import { existsSync, mkdirSync, copyFileSync, renameSync, writeFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { dirname, join } from 'path'
 
@@ -66,17 +66,28 @@ function legacyDataDir(): string | null {
 export const legacyMigrationErrors: string[] = []
 
 /** 一次性迁移：旧 omniget.db / dht.dat → data/（目标缺失才拷贝）。
- * fingerprints.json 不迁移：TOFU 信任锚定安装身份，旧目录指纹对新 sidecar 无意义 */
+ * fingerprints.json 不迁移：TOFU 信任锚定安装身份，旧目录指纹对新 sidecar 无意义
+ * R4-P2：拷贝改为「临时名 + rename 原子落位」——copyFileSync 中途失败（磁盘满/
+ * 杀软锁定）会留残缺目标文件，下次启动 existsSync(to) 为真即永久跳过迁移，
+ * 用户数据"消失"且不再告警 */
 function migrateFromLegacy(legacy: string, target: string): void {
   const items = ['omniget.db', 'dht.dat', 'dht6.dat']
   for (const name of items) {
     const from = join(legacy, name)
     const to = join(target, name)
     if (existsSync(from) && !existsSync(to)) {
+      const staging = `${to}.migrating`
       try {
-        copyFileSync(from, to)
+        copyFileSync(from, staging)
+        renameSync(staging, to)
       } catch (err) {
-        // 迁移失败不阻塞启动（新库从零开始），但必须留痕——用户视角是历史数据"消失"
+        // 迁移失败不阻塞启动（新库从零开始），但必须留痕——用户视角是历史数据"消失"。
+        // 清理残缺暂存文件，下次启动可重试迁移（目标未落位，下次仍会重拷）
+        try {
+          if (existsSync(staging)) rmSync(staging, { force: true })
+        } catch {
+          // ignore
+        }
         // eslint-disable-next-line no-console
         console.error(`[env] 旧数据迁移失败: ${from} → ${to}`, err)
         legacyMigrationErrors.push(`${name}（${err instanceof Error ? err.message : String(err)}）`)
@@ -101,7 +112,11 @@ export function userDataDir(): string {
     // 写入探测（目录存在但 ACL 只读时 mkdir 不报错）
     const probe = join(target, '.write-probe')
     writeFileSync(probe, '')
-    rmSync(probe, { force: true })
+    try {
+      rmSync(probe, { force: true })
+    } catch {
+      // 残留探测文件无害，忽略
+    }
     cachedDataDir = target
   } catch {
     const app = electronApp()
@@ -113,8 +128,12 @@ export function userDataDir(): string {
     }
     try {
       mkdirSync(fallback, { recursive: true })
-    } catch {
-      // ignore
+    } catch (err) {
+      // R4-P3：主目录与回退目录均不可写的根因必须留痕（后续 getDb/logger 全线
+      // 失败只会给出表层错误）
+      legacyMigrationErrors.push(
+        `数据目录不可写（${target}），回退目录创建也失败（${err instanceof Error ? err.message : String(err)}）`
+      )
     }
     cachedDataDir = fallback
     try {

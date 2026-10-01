@@ -9,6 +9,7 @@ export function StatsPage({ onNewTask }: { onNewTask?: () => void }) {
   const [stats, setStats] = useState<DailyStat[] | null>(null)
   const [statsError, setStatsError] = useState('')
   const tasks = useTasks((s) => s.tasks)
+  const loadedFilter = useTasks((s) => s.loadedFilter)
   const reload = useTasks((s) => s.load)
 
   useEffect(() => {
@@ -28,12 +29,17 @@ export function StatsPage({ onNewTask }: { onNewTask?: () => void }) {
     void reload('all')
   }, [reload])
 
-  // 库实时总览（不依赖 daily_stats 有无完成记录）
+  // 库实时总览（不依赖 daily_stats 有无完成记录）。
+  // R4-P3：loadedFilter 守卫——从回收站切到统计页的过渡窗口，tasks map 仍是
+  // 回收站内容，此前会短暂显示错误口径（全表 → reload('all') 返回后才纠正）
+  const libReady = loadedFilter === 'all'
   const lib = { total: 0, running: 0, bytes: 0 }
-  for (const t of tasks.values()) {
-    lib.total++
-    if (t.status === 'running' || t.status === 'queued') lib.running++
-    lib.bytes += t.downloadedBytes ?? 0
+  if (libReady) {
+    for (const t of tasks.values()) {
+      lib.total++
+      if (t.status === 'running' || t.status === 'queued') lib.running++
+      lib.bytes += t.downloadedBytes ?? 0
+    }
   }
 
   const totals = (stats ?? []).reduce(
@@ -46,8 +52,9 @@ export function StatsPage({ onNewTask }: { onNewTask?: () => void }) {
   )
 
   // 迷你柱状图（自绘 SVG，无外部图表库 §3.1）
+  // R4-P3：口径统一——此前标题「近 30 天」、图表只画 14 天、汇总用全部数据三处不一
   const maxCount = Math.max(1, ...(stats ?? []).map((s) => s.completedCount))
-  const chart = (stats ?? []).slice(0, 14).reverse()
+  const chart = (stats ?? []).slice(0, 30).reverse()
 
   return (
     <main className="h-full overflow-y-auto">
@@ -63,9 +70,9 @@ export function StatsPage({ onNewTask }: { onNewTask?: () => void }) {
         {/* 库实时总览（始终有数：来自任务库） */}
         <div className="grid grid-cols-3 divide-x divide-border border-y border-border">
           {[
-            { label: '任务总数', value: String(lib.total) },
-            { label: '进行中', value: String(lib.running) },
-            { label: '累计已下载', value: formatBytes(lib.bytes) }
+            { label: '任务总数', value: libReady ? String(lib.total) : '…' },
+            { label: '进行中', value: libReady ? String(lib.running) : '…' },
+            { label: '累计已下载', value: libReady ? formatBytes(lib.bytes) : '…' }
           ].map((m) => (
             <div key={m.label} className="px-4 py-4">
               <p className="num text-xl">{m.value}</p>

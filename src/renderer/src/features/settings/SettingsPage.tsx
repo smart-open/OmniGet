@@ -321,6 +321,10 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
   const [appUpdate, setAppUpdate] = useState<AppUpdateCheck | null>(null)
   // Backlog：适配脚本注册表（内置自维护 + userData 热更目录）
   const [scripts, setScripts] = useState<AdapterScriptInfo[]>([])
+  // R4-P3：脚本启停防连点（此前连点两次 toggle IPC，第二次 toast 与实际终态可能相反）
+  const [scriptBusy, setScriptBusy] = useState<string | null>(null)
+  // R4-P3：调度计划保存进行中禁用
+  const [scheduleSaving, setScheduleSaving] = useState(false)
   // R1+R5：本地桥接信息
   const [bridgeInfo, setBridgeInfo] = useState<{
     port: number
@@ -401,11 +405,19 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
   const reloadScripts = (): Promise<void> =>
     window.omniget
       .reloadAdapterScripts()
-      .then(setScripts)
+      .then((list) => {
+        setScripts(list)
+        // UX 硬性标准：写操作成功也要可见反馈（此前仅失败有提示）
+        toast('适配脚本已重新加载', 'success')
+      })
       .catch((err) => toastError('重新加载适配脚本', err))
 
+  // R4-P3：列表刷新失败与写操作成败分开报告——此前「添加成功但刷新失败」
+  // 会走 catch 提示「添加失败」，用户重试产生重复条目
   const reloadTrackers = (): Promise<void> =>
-    window.omniget.listTrackers().then(setTrackers)
+    window.omniget.listTrackers().then(setTrackers).catch(() => {
+      toast('操作成功，但 Tracker 列表刷新失败', 'warning')
+    })
 
   if (!settingsLoaded) {
     return (
@@ -632,11 +644,24 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                 </Button>
                 <Button
                   size="xs"
+                  disabled={scheduleSaving}
                   onClick={() => {
+                    // R4-P3：前端预校验时段格式（主进程 sanitize 会静默丢弃非法行，
+                    // 用户无感知；此处显式提示）
+                    const TIME_RE = /^([01]?\d|2[0-3]):([0-5]\d)$/
+                    const bad = rules.find(
+                      (r) => !TIME_RE.test(r.from) || !TIME_RE.test(r.to) || !r.limit.trim()
+                    )
+                    if (bad) {
+                      toastError('保存调度计划', new Error('存在格式非法的时段（应为 HH:MM 且限速非空），请修正后保存'))
+                      return
+                    }
+                    setScheduleSaving(true)
                     window.omniget
                       .setScheduleRules(rules)
                       .then(() => flash('调度计划已保存（切换即时生效）'))
                       .catch((err) => toastError('保存调度计划', err))
+                      .finally(() => setScheduleSaving(false))
                   }}
                 >
                   保存计划
@@ -800,6 +825,7 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                 <Button
                   size="xs"
                   variant="outline"
+                  disabled={btDiag === 'checking'}
                   onClick={() => {
                     setBtDiag('checking')
                     void window.omniget
@@ -894,11 +920,14 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                           : 'border-border text-text-3 hover:text-text-2'
                       }`}
                       onClick={() => {
+                        if (scriptBusy) return
+                        setScriptBusy(s.id)
                         window.omniget
                           .toggleAdapterScript(s.id, !s.enabled)
                           .then(reloadScripts)
                           .then(() => toast(s.enabled ? '脚本已停用' : '脚本已启用', 'success'))
                           .catch((err) => toastError('切换脚本状态', err))
+                          .finally(() => setScriptBusy(null))
                       }}
                     >
                       {s.enabled ? '已启用' : '已停用'}

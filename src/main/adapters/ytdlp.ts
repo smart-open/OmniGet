@@ -215,7 +215,6 @@ export class YtDlpAdapter {
       args.push('-o', join(task.saveDir, toYtDlpOutputTemplate(getNamingTemplate())))
     }
 
-    this.running.add(task.id)
     this.emit({ taskId: task.id, status: 'running', message: '开始下载' })
     this.argsByTask.set(task.id, { args, shortVideo: isShort, attempt: 1 })
     this.run(task, args, { shortVideo: isShort, video: opts, attempt: 1 })
@@ -227,6 +226,9 @@ export class YtDlpAdapter {
     args: string[],
     ctx: { shortVideo: boolean; video: VideoSelection; attempt: number }
   ): void {
+    // R4-P1 修复：running 登记移入 run()——resume 重 spawn 也必须登记，
+    // 否则 pause() 的 running.has 永远 false → 暂停失效（UI 显示已暂停但进程继续）
+    this.running.add(task.id)
     // M9 修复：记录 yt-dlp 实际输出路径——完整性探测/delogo 不再依赖"目录内最新文件"，
     // 多任务并发下载到同一保存目录时不会错拿别的任务刚完成的产物
     if (!this.outputFiles.has(task.id)) this.outputFiles.set(task.id, [])
@@ -459,6 +461,11 @@ export class YtDlpAdapter {
 
   isRunning(taskId: string): boolean {
     return this.running.has(taskId)
+  }
+
+  /** R4-P2：精确产物路径（M9 追踪，manager 落 task_files 用，替代目录扫描猜测） */
+  getOutputFiles(taskId: string): string[] {
+    return this.outputFiles.get(taskId) ?? []
   }
 
   /** confirm 时登记视频参数 */

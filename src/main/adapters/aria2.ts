@@ -419,6 +419,10 @@ export class Aria2Adapter implements EngineAdapter {
     await this.rpc().call('changeOption', gid, {
       ...buildTaskOptions({ type: 'bt', threads, saveDir, seedRatio, selectedFileIndexes: indexes })
     })
+    // R4-P3：确认后元数据临时目录不再被引用（dir 已改为任务保存目录）——
+    // 此前仅解析失败路径清理，成功解析的磁力每次都在 %TEMP% 残留一个 .torrent。
+    // st.dir 即 parse 阶段的 omniget-metadata/<taskId>/ 目录
+    if (dir && dir.toLowerCase().includes('omniget-metadata')) cleanupMetadataDir(dir)
   }
 
   /** 托盘「全部暂停」（§4.6） */

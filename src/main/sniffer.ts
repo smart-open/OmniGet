@@ -52,25 +52,35 @@ export function sniff(input: string): SniffResult | null {
   // 3. URL（视频平台 / HTTP 直链）
   if (/^https?:\/\//i.test(raw)) {
     try {
-      const host = new URL(raw).hostname.toLowerCase()
+      const u = new URL(raw)
+      // R4-P3：source 用规范化后的 URL——聊天/网页复制的链接常带中文标点/引号/
+      // markdown 尾缀（`https://v.douyin.com/xxx。`），new URL 能解析成功但
+      // 尾巴会随 source 进引擎导致 404
+      const clean = u.toString()
+      const host = u.hostname.toLowerCase()
       for (const { pattern, platform } of VIDEO_DOMAINS) {
         if (pattern.test(host)) {
           const shortlink = SHORTLINK_DOMAINS.test(host)
           return {
             type: 'video',
-            source: raw,
+            source: clean,
             platform,
             noWatermark: shortlink ? true : undefined // 短视频分享链默认无水印（§4.3.1）
           }
         }
       }
-      return { type: 'http', source: raw, platform: 'http' }
+      return { type: 'http', source: clean, platform: 'http' }
     } catch {
       return null
     }
   }
 
   // 4. 其余文本 → 音乐名（自然语言："陈奕迅的孤勇者" / "陈奕迅 孤勇者"）
+  // R4-P3：形如本地绝对路径的输入不当作音乐名（防未来新入口把
+  // `D:\movies\xxx.mp4` 当歌名搜索）——当前两个调用方各有过滤，此处兜底收口
+  if (/^(?:[a-zA-Z]:[\\/]|\/)/.test(raw) && !/\.torrent$/i.test(raw)) {
+    return null
+  }
   return { type: 'music', source: raw, platform: 'music' }
 }
 
@@ -93,3 +103,7 @@ export class DedupeWindow {
     return true
   }
 }
+
+/** R4-P3：三入口共用实例——剪贴板与 magnet 协议此前各自 new，同一磁力 30s 内
+ * 先经剪贴板、再经协议唤起会各弹一次（模块注释声称"三入口共用"但实现未兑现） */
+export const launchDedupe = new DedupeWindow(30_000)

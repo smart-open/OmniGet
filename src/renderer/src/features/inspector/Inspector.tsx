@@ -43,6 +43,9 @@ export function Inspector({
   onChanged: () => void
 }) {
   const [files, setFiles] = useState<TaskFile[]>([])
+  // R4-P3：详情加载失败显式提示（此前静默置空 → 文件区块整体隐藏，
+  // 用户无法区分「无文件清单」与「加载失败」）
+  const [detailError, setDetailError] = useState(false)
   const [copied, setCopied] = useState(false)
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const detailSeq = useRef(0)
@@ -55,15 +58,33 @@ export function Inspector({
       return
     }
     const seq = ++detailSeq.current
+    setDetailError(false)
     window.omniget
       .getTaskDetail(task.id)
       .then((d) => {
         if (seq === detailSeq.current) setFiles(d?.files ?? [])
       })
       .catch(() => {
-        if (seq === detailSeq.current) setFiles([]) // 失败留空，不产生 unhandledrejection
+        if (seq === detailSeq.current) {
+          setFiles([]) // 失败留空，不产生 unhandledrejection
+          setDetailError(true)
+        }
       })
   }, [task?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // R4-P3：详情抽屉支持 Esc 关闭（此前只能点击关闭按钮）
+  useEffect(() => {
+    if (!task) return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape') return
+      // 确认框打开时让位（ConfirmDialog 在 capture 阶段消费 Esc）
+      const tag = (e.target as HTMLElement)?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+      onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [task, onClose])
 
   // 卸载清理定时器（防关闭抽屉后 setState）——必须位于 if (!task) 早退之前，
   // 否则 task 非 null → null 时 Hook 数量变化触发 React "Rendered fewer hooks" 白屏
@@ -253,6 +274,11 @@ export function Inspector({
           </motion.div>
 
           {/* 文件清单（BT/磁力多文件；其余单文件）：分类筛选 chips + 列表 */}
+          {detailError && (
+            <p className="mt-4 border-t border-border pt-4 text-[11px] text-danger">
+              文件清单加载失败（任务可能刚被删除）。请关闭后重新打开详情。
+            </p>
+          )}
           {files.length > 0 && (
             <motion.div
               initial={{ opacity: 0, y: 8 }}

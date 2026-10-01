@@ -14,7 +14,7 @@ import {
   type MusicSearchInput,
   type ToolCreateInput
 } from '@shared/types'
-import { getDb, getSetting, getSettingParsed, setSetting } from './db'
+import { getSetting, getSettingParsed, setSetting } from './db'
 import { validateSaveDir } from './save-dir'
 import { createLogger } from './logger'
 import type { TaskManager } from './task/manager'
@@ -179,7 +179,20 @@ export function registerIpcHandlers(): void {
     ) {
       throw new Error('不允许解析系统或敏感目录中的文件')
     }
-    const info = parseTorrentFile(p)
+    let info
+    try {
+      info = parseTorrentFile(p)
+    } catch (err) {
+      // R4-P2：Node 原生 ENOENT/EACCES 英文错误（含本地路径回显）不得直透渲染层
+      const code = (err as NodeJS.ErrnoException | null)?.code
+      if (code === 'ENOENT') {
+        throw new Error('种子文件不存在或已被移动，请重新选择 .torrent 文件')
+      }
+      if (code === 'EACCES') {
+        throw new Error('没有权限读取该种子文件，请检查文件权限后重试')
+      }
+      throw new Error('种子文件解析失败：文件可能已损坏。请重新获取 .torrent 文件后重试')
+    }
     return {
       kind: 'torrent',
       name: info.name,
@@ -259,7 +272,11 @@ export function registerIpcHandlers(): void {
   // music（M2：内嵌音乐引擎）
   ipcMain.handle(IPC_CHANNELS.musicSearch, async (_e, input: MusicSearchInput) => {
     if (!taskManager) throw new Error('任务系统尚未就绪，请稍候')
-    return taskManager.musicSearch(input.q)
+    // R4-P2：IPC 是运行时边界——入参零校验时 null 会裸抛英文 TypeError 到渲染层
+    const q = typeof input?.q === 'string' ? input.q.trim() : ''
+    if (!q) throw new Error('请输入歌曲名或「歌手 - 歌名」后再搜索')
+    if (q.length > 200) throw new Error('搜索词过长（上限 200 字符），请缩短后重试')
+    return taskManager.musicSearch(q)
   })
   ipcMain.handle(IPC_CHANNELS.musicDownload, async (_e, input: MusicDownloadInput) => {
     if (!taskManager) throw new Error('任务系统尚未就绪，请稍候')
@@ -453,12 +470,8 @@ export function registerIpcHandlers(): void {
   })
 
   // ── M4-7 应用自检更新 ────────────────────────────────────────────────
-  // P2 修复：此前误调 updateYtDlp（引擎热更）——用户点「检查应用更新」实际在替换 yt-dlp。
-  // 现走 electron-updater 通道（dev/Linux 返回 null，渲染层降级为手动检查口径）
-  ipcMain.handle('app:update', async () => {
-    const { checkForAppUpdateNow } = await import('./app-updater')
-    return checkForAppUpdateNow()
-  })
+  // R4 清理：'app:update' 孤儿通道已删除——渲染层唯一更新入口是
+  // appCheckUpdate（bridge.checkAppUpdate）；checkForAppUpdateNow 仅由定时器使用
 
   // settings
   // 读取黑名单：与写白名单对称——渲染层被攻破时不得借 settingsGet 拖走敏感值
@@ -515,6 +528,32 @@ export function registerIpcHandlers(): void {
       //（或 bridge token 持有者）可把落盘目录指到自启动目录实现持久化代码执行
       const err = validateSaveDir(value)
       if (err) throw new Error(err)
+    }
+    if (k === 'ytdlp.cookieFile') {
+      // R4-P2：路径校验（与 save-dir/taskParseFile 威胁模型对齐）——UNC 会触发
+      // SMB 出站认证（NTLM 凭据外泄面）；敏感目录中的文件不得被 yt-dlp 读取
+      const v = typeof value === 'string' ? value.trim() : ''
+      if (v) {
+        if (!isAbsolute(v)) throw new Error('Cookie 文件必须是本机绝对路径，请通过「浏览」重新选择')
+        if (/^\/\//.test(v.replace(/\\/g, '/'))) {
+          throw new Error('不支持网络路径中的 Cookie 文件（存在凭据外泄风险）')
+        }
+        const profile = (process.env.USERPROFILE ?? process.env.HOME ?? '').replace(/\\/g, '/')
+        const norm = v.replace(/\\/g, '/').toLowerCase()
+        const blockedDirs = [
+          (process.env.SystemRoot ?? 'C:\\Windows').replace(/\\/g, '/').toLowerCase(),
+          'c:/program files',
+          'c:/program files (x86)',
+          process.env.TEMP ? process.env.TEMP.replace(/\\/g, '/').toLowerCase() : '',
+          profile ? `${profile}/.ssh`.toLowerCase() : '',
+          profile ? `${profile}/.gnupg`.toLowerCase() : '',
+          profile ? `${profile}/.aws`.toLowerCase() : '',
+          profile ? `${profile}/.kube`.toLowerCase() : ''
+        ].filter(Boolean)
+        if (blockedDirs.some((d) => norm === d || norm.startsWith(d + '/'))) {
+          throw new Error('不允许使用系统或敏感目录中的文件作为 Cookie 文件')
+        }
+      }
     }
     setSetting(k, JSON.stringify(value ?? null))
   })
@@ -697,11 +736,7 @@ export function registerIpcHandlers(): void {
     }
   })
 
-  // DB 健康自检（T0-4 验收辅助）
-  ipcMain.handle('db:ping', () => {
-    const row = getDb().pragma('user_version', { simple: true }) as number
-    return { userVersion: row }
-  })
+  // R4 清理：'db:ping'（T0-4 验收辅助）无渲染层调用方已删除——收敛 IPC 面
 
   // Backlog：适配脚本热更监听（加载内置清单 + userData 目录 watch）
   import('./adapters/scripts')

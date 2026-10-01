@@ -34,7 +34,7 @@ import {
 } from '@phosphor-icons/react'
 import { PREVIEW_SCHEME, type ToolDefInfo, type ToolEvent } from '@shared/types'
 import { Button } from '../../components/ui'
-import { toast, toastError } from '../../lib/feedback'
+import { toast, toastError, confirmAction } from '../../lib/feedback'
 import { useModalGate } from '../../lib/modalGate'
 import { ClipEditor, type ClipRegion } from './ClipEditor'
 
@@ -676,8 +676,16 @@ export function ToolboxPage() {
                     <span className="num text-[10px] text-text-3">{toolJobs.length}</span>
                     <button
                       onClick={() => {
-                        setJobs((prev) => prev.filter((j) => j.tool !== activeTool))
-                        toast('处理记录已清空', 'info')
+                        // R4-P3：按 UX 标准精神补轻确认（清的是前端记录，误触可承受但会丢后台进度可见性）
+                        void confirmAction({
+                          title: '清空处理记录',
+                          message: '将隐藏当前工具的全部处理动态（后台任务不受影响，可在任务列表查看）。',
+                          confirmLabel: '清空'
+                        }).then((ok) => {
+                          if (!ok) return
+                          setJobs((prev) => prev.filter((j) => j.tool !== activeTool))
+                          toast('处理记录已清空', 'info')
+                        })
                       }}
                       className="ml-auto rounded-ctl px-1.5 py-0.5 text-[10px] text-text-3 transition-colors hover:bg-surface-2 hover:text-text-1"
                       title="清空当前工具的处理记录"

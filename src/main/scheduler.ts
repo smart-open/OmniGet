@@ -75,10 +75,12 @@ export function currentLimit(now = new Date()): string | null {
 
 let timer: NodeJS.Timeout | null = null
 let applied: string | null = null
+let applyFn: ((limit: string) => Promise<void> | void) | null = null
 
 /** 启动调度器：每分钟检查，值变化时经回调应用（aria2 changeGlobalOption） */
 export function startScheduler(apply: (limit: string) => Promise<void> | void): void {
   stopScheduler()
+  applyFn = apply
   const tick = (): void => {
     // 定时器回调内上抛 = uncaughtException 崩主进程：任何异常都不允许逃出 tick
     try {
@@ -106,6 +108,21 @@ export function startScheduler(apply: (limit: string) => Promise<void> | void): 
   }
   tick()
   timer = setInterval(tick, 60_000)
+}
+
+/** R4-P2：aria2 崩溃重启会经 spawnAndConnect 重放全局启动参数（含不限速默认值），
+ * 覆盖已应用的分时限速档——标记失效并立即重放当前档位（否则静默失效到下个时段边界） */
+export function invalidateSchedule(): void {
+  applied = null
+  if (!applyFn) return
+  const limit = currentLimit()
+  if (limit !== null) {
+    void Promise.resolve(applyFn(limit))
+      .then(() => {
+        applied = limit
+      })
+      .catch((err) => log.warn('schedule re-apply after restart failed', err))
+  }
 }
 
 export function stopScheduler(): void {

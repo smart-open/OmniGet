@@ -13,6 +13,9 @@ const ACTIONS: Array<{ action: ShortcutAction; desc: string; fallback: string }>
   { action: 'group1', desc: '分组 1 · 全部', fallback: 'Ctrl+1' },
   { action: 'group2', desc: '分组 2 · 下载中', fallback: 'Ctrl+2' },
   { action: 'group3', desc: '分组 3 · 已完成', fallback: 'Ctrl+3' },
+  { action: 'group4', desc: '分组 4 · 种子磁力', fallback: 'Ctrl+4' },
+  { action: 'group5', desc: '分组 5 · 视频', fallback: 'Ctrl+5' },
+  { action: 'group6', desc: '分组 6 · 音乐', fallback: 'Ctrl+6' },
   { action: 'pause-toggle', desc: '暂停 / 继续选中任务', fallback: 'Space' },
   { action: 'trash', desc: '移入回收站', fallback: 'Delete' }
 ]
@@ -87,7 +90,7 @@ export function HelpOverlay({ open, onClose }: { open: boolean; onClose: () => v
               </div>
             </div>
             <p className="mt-3 text-[10px] text-text-3">
-              键位可在 设置 → 快捷键 中自定义；「Ctrl + 4..6」切换其余分组
+              键位可在 设置 → 快捷键 中自定义；平台健康 / 工具箱 / 回收站暂无键位，请点击侧栏进入
             </p>
           </motion.div>
         </motion.div>

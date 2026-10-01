@@ -35,7 +35,7 @@ import { ToolboxPage } from '../features/toolbox/ToolboxPage'
 import { HelpOverlay } from '../features/help/HelpOverlay'
 import { Onboarding } from '../features/onboarding/Onboarding'
 import { SpeedSparkline, IconButton, ConfirmDialog } from '../components/ui'
-import { toast, useToasts, confirmAction, isConfirmActive, toastError } from '../lib/feedback'
+import { toast, useToasts, confirmAction, isConfirmActive, toastError, dismissToast } from '../lib/feedback'
 import { isAnyModalOpen } from '../lib/modalGate'
 import {
   effectiveKeys,
@@ -123,11 +123,17 @@ export default function App() {
 
   // 主题：恢复 + 应用 + 跟随系统（多主题见 theme.ts）
   useEffect(() => {
-    void window.omniget.settingsGet('ui.theme').then((v) => {
-      const id = parseStoredTheme(v)
-      setTheme(id)
-      applyTheme(id)
-    })
+    void window.omniget
+      .settingsGet('ui.theme')
+      .then((v) => {
+        const id = parseStoredTheme(v)
+        setTheme(id)
+        applyTheme(id)
+      })
+      .catch(() => {
+        // R4-P3：启动期读取失败按默认主题继续（此前 unhandledrejection）
+        applyTheme('system')
+      })
     // P2 修复：设置页改主题时同步侧栏菜单选中态（此前两份独立 state 不互通）
     const onThemeChanged = (e: Event): void => {
       const id = (e as CustomEvent<ThemeId>).detail
@@ -178,29 +184,60 @@ export default function App() {
 
   // P2 修复：进入非任务视图时清空选中——Space/Delete 快捷键不再作用于
   // 用户当前看不见的后台任务（selRef 跨视图残留曾导致误暂停/误删）
+  // R4-P3：回收站同样纳入——在「全部」选中任务后切到回收站按 Delete 会对已删除
+  // 任务弹「移入回收站」确认。R4-P3：切走时清空搜索词（跨视图残留 query 会在
+  // 返回时突然生效，造成「搜不全」困惑）
   useEffect(() => {
     if (['music', 'health', 'settings', 'stats', 'toolbox'].includes(active)) {
+      select(null)
+      setQuery((q) => (q ? '' : q))
+    } else if (active === 'trash') {
       select(null)
     }
   }, [active, select])
 
   // M4-8 首次启动向导
   useEffect(() => {
-    void window.omniget.settingsGet('onboarded').then((v) => {
-      if (!v) setOnboarding(true)
-    })
+    void window.omniget
+      .settingsGet('onboarded')
+      .then((v) => {
+        if (!v) setOnboarding(true)
+      })
+      .catch(() => {
+        // R4-P3：读取失败按未完成向导处理（可再走一遍，无害）
+        setOnboarding(true)
+      })
   }, [])
 
   // 快捷键（§7.9 可自定义）：默认表 + 用户覆盖（settings ui.keymap），设置页录制后经事件刷新
   const [keymap, setKeymap] = useState<Keymap>({})
   useEffect(() => {
-    void window.omniget.settingsGet('ui.keymap').then((v) => setKeymap(parseKeymap(v)))
-    const onChanged = (): void => {
-      void window.omniget.settingsGet('ui.keymap').then((v) => setKeymap(parseKeymap(v)))
+    const readKeymap = (): void => {
+      void window.omniget
+        .settingsGet('ui.keymap')
+        .then((v) => setKeymap(parseKeymap(v)))
+        .catch(() => {})
     }
+    readKeymap()
+    const onChanged = (): void => readKeymap()
     window.addEventListener('keymap-changed', onChanged)
     return () => window.removeEventListener('keymap-changed', onChanged)
   }, [])
+
+  // R4-P3：订阅窗口最大化状态——此前 onWinState 桥无渲染层调用方，
+  // 最大化按钮图标恒为「最大化 / 还原」不反映真实窗口态
+  const [maximized, setMaximized] = useState(false)
+  useEffect(() => window.omniget.onWinState(setMaximized), [])
+
+  // R4-P3：主题弹层支持 Esc 关闭（此前只能点击遮罩）
+  useEffect(() => {
+    if (!themeMenu) return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setThemeMenu(false)
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [themeMenu])
 
   // 快捷键全集（§7.9）：新建/搜索/帮助/分组 1-6/Space 暂停/Delete 回收站（键位可自定义）。
   // selectedTaskId 经 ref 中转避免事件批次重挂监听器；任务详情改用 getState() 按需读取
@@ -478,8 +515,19 @@ export default function App() {
             <IconButton tip="最小化" onClick={() => window.omniget.windowMinimize()}>
               <Minus size={14} weight="bold" />
             </IconButton>
-            <IconButton tip="最大化 / 还原" onClick={() => window.omniget.windowMaximize()}>
-              <Square size={11} weight="bold" />
+            <IconButton
+              tip={maximized ? '还原' : '最大化'}
+              onClick={() => window.omniget.windowMaximize()}
+            >
+              {maximized ? (
+                // 还原态：双矩形（Copy 样式）——此前不订阅 onWinState，图标恒为最大化
+                <span className="relative flex h-[11px] w-[11px] items-center justify-center">
+                  <Square size={11} weight="bold" />
+                  <span className="absolute -bottom-[2px] -right-[2px] h-[5px] w-[5px] border-b-2 border-r-2 border-current bg-[var(--bg)]" />
+                </span>
+              ) : (
+                <Square size={11} weight="bold" />
+              )}
             </IconButton>
             <IconButton
               tip="关闭"
@@ -556,12 +604,13 @@ export default function App() {
       <Onboarding open={onboarding} onClose={() => setOnboarding(false)} />
       <ConfirmDialog />
 
-      {/* 全局 toast（右下角，操作失败/降级告警统一反馈） */}
-      <div className="pointer-events-none fixed bottom-10 right-4 z-[60] flex flex-col gap-2">
+      {/* 全局 toast（右下角，操作失败/降级告警统一反馈；R4-P3：可点击手动关闭） */}
+      <div className="pointer-events-none fixed bottom-10 right-4 z-[60] flex flex-col items-end gap-2">
         {toasts.map((t) => (
           <div
             key={t.id}
-            className={`stagger-in rounded-ctl border px-3 py-2 text-xs shadow-[var(--shadow-pop)] ${
+            onClick={() => dismissToast(t.id)}
+            className={`stagger-in pointer-events-auto cursor-pointer rounded-ctl border px-3 py-2 text-xs shadow-[var(--shadow-pop)] ${
               t.level === 'warning'
                 ? 'border-warning/40 bg-[var(--tooltip-bg)] text-warning'
                 : t.level === 'success'

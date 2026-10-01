@@ -346,6 +346,13 @@ export function ClipEditor({
     }
   }
 
+  // R4-P3：Alt-Tab/系统手势中断拖拽时清理 drag 状态（此前 dragRef 残留到下次按下）
+  function onPointerCancel(): void {
+    dragRef.current = null
+    setDraft(null)
+    setActiveIdx(null)
+  }
+
   function removeRegion(idx: number): void {
     setRegions((prev) => prev.filter((_, i) => i !== idx))
     if (activeIdx === idx) setActiveIdx(null)
@@ -398,6 +405,7 @@ export function ClipEditor({
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
+        onPointerCancel={onPointerCancel}
       >
         <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
         {duration <= 0 && !mediaErr && (

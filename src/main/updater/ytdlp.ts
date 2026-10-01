@@ -7,6 +7,7 @@ import { createWriteStream } from 'fs'
 import { checksumFile, recordFingerprint, binaryPath, enginesDir } from '../orchestrator/binaries'
 import { rename, unlink, copyFile, mkdir, chmod } from 'fs/promises'
 import { createHash } from 'crypto'
+import { getSettingParsed, setSetting } from '../db'
 import { createLogger } from '../logger'
 
 const log = createLogger('ytdlp-updater')
@@ -69,8 +70,15 @@ async function downloadTo(url: string, dest: string): Promise<void> {
 }
 
 export async function updateYtDlp(): Promise<UpdateResult> {
-  // H5 修复：热更与按需补齐/重复触发可能并发替换同一二进制，串行排队防互踩
-  return ytdlpUpdateChain.then(() => runUpdateYtDlp())
+  // H5 修复 + R4-P1 修正：串行链必须回写链尾——此前 `chain.then(run)` 的结果
+  // 从未赋回 chain，并发调用 await 的都是同一个已 resolve 的初始 promise，
+  // 实际并行执行（互踩 unlink/rename/指纹登记）。r4 审查证实为空操作。
+  const p = ytdlpUpdateChain.then(() => runUpdateYtDlp())
+  ytdlpUpdateChain = p.then(
+    () => undefined,
+    () => undefined
+  )
+  return p
 }
 
 let ytdlpUpdateChain: Promise<unknown> = Promise.resolve()
@@ -78,6 +86,8 @@ let ytdlpUpdateChain: Promise<unknown> = Promise.resolve()
 async function runUpdateYtDlp(): Promise<UpdateResult> {
   const target = binaryPath('ytdlp')
   const backup = `${target}.bak`
+  const tmpExe = `${target}.new`
+  const tmpSums = `${target}.sums`
   try {
     // 1. 查询最新版本资产
     const res = await fetch(API_LATEST, {
@@ -94,9 +104,14 @@ async function runUpdateYtDlp(): Promise<UpdateResult> {
     const sums = release.assets.find((a) => a.name === SUMS_ASSET)
     if (!exe || !sums) throw new Error('最新发布中缺少 yt-dlp 资产，请稍后重试')
 
+    // R4-P3：同版本跳过——此前同一版本也全量替换（无谓流量 + 替换风险）
+    const appliedTag = getSettingParsed<string>('engines.ytdlpTag')
+    if (appliedTag && appliedTag === release.tag_name) {
+      log.info(`yt-dlp already at ${release.tag_name}, skip`)
+      return { ok: true, version: release.tag_name }
+    }
+
     // 2. 下载新二进制与校验和
-    const tmpExe = `${target}.new`
-    const tmpSums = `${target}.sums`
     await downloadTo(exe.browser_download_url, tmpExe)
     await downloadTo(sums.browser_download_url, tmpSums)
 
@@ -124,15 +139,29 @@ async function runUpdateYtDlp(): Promise<UpdateResult> {
     // 5. TOFU 指纹登记（后续启动逐次比对）
     const digest = await checksumFile(target)
     await recordFingerprint('ytdlp', digest)
+    await setSetting('engines.ytdlpTag', JSON.stringify(release.tag_name))
     log.info(`yt-dlp updated to ${release.tag_name}`)
     return { ok: true, version: release.tag_name }
   } catch (err) {
+    // R4-P3：失败路径清理临时文件（.new/.sums 残留此前无人清）
+    const { rm } = await import('fs/promises')
+    await rm(tmpExe, { force: true }).catch(() => {})
+    await rm(tmpSums, { force: true }).catch(() => {})
     // 回滚：还原备份（回滚本身失败必须留痕——target 可能处于缺失/损坏状态）
-    await copyFile(backup, target).catch((rollbackErr) =>
-      log.error('yt-dlp 更新回滚失败，当前二进制可能损坏，建议重新更新或重装', {
-        error: String(rollbackErr)
+    const rollbackOk = await copyFile(backup, target)
+      .then(() => true)
+      .catch((rollbackErr) => {
+        log.error('yt-dlp 更新回滚失败，当前二进制可能损坏，建议重新更新或重装', {
+          error: String(rollbackErr)
+        })
+        return false
       })
-    )
+    if (!rollbackOk) {
+      // R4-P3：target 缺失/损坏时排队自愈——走按需补齐通道重装（SHA256+TOFU 全程校验）
+      void import('./engine-fetch')
+        .then((m) => m.fetchMissingEngines({ names: ['yt-dlp'] }))
+        .catch(() => {})
+    }
     const message = err instanceof Error ? err.message : String(err)
     log.error('yt-dlp update failed', message)
     return { ok: false, error: message }

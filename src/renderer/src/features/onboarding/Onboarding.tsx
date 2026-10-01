@@ -67,7 +67,15 @@ export function Onboarding({ open, onClose }: { open: boolean; onClose: () => vo
                 onChange={(e) => setSaveDir(e.target.value)}
                 placeholder={saveDir || '点击加载系统默认'}
                 onFocus={() => {
-                  if (!saveDir) void window.omniget.defaultSaveDir().then(setSaveDir)
+                  if (!saveDir) {
+                    void window.omniget
+                      .defaultSaveDir()
+                      .then(setSaveDir)
+                      .catch(() => {
+                        // R4-P3：自动填充失败留行内提示（此前静默失败，输入框停留空态无解释）
+                        setSaveDir('')
+                      })
+                  }
                 }}
                 className="num h-9 min-w-0 flex-1 rounded-ctl border border-border bg-surface-2 px-3 text-xs outline-none focus:border-accent"
               />

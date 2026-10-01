@@ -48,12 +48,15 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
    * 慢的先发后至会覆盖新结果；序号比对让过期响应整体自弃 */
   const searchSeq = useRef(0)
   const batchInfoTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // R4-P3：批量导入卸载守卫——此前中途离开音乐页后循环继续执行、卸载后 setState
+  const batchAlive = useRef(true)
 
   // P2 修复：离开音乐页时停止试听（此前 Audio 随页面卸载继续播放且无法控制）
   useEffect(() => {
     return () => {
       previewSeq.current++
       searchSeq.current++ // 作废在途搜索，防止卸载后 setState
+      batchAlive.current = false
       audioRef.current?.pause()
       audioRef.current = null
       if (batchInfoTimer.current) clearTimeout(batchInfoTimer.current)
@@ -114,20 +117,31 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
     const seq = ++previewSeq.current
     audioRef.current?.pause()
     setPlayingId(null)
-    const url = await window.omniget.musicPreview(c.platform, c.id).catch(() => '')
+    let previewUrl = ''
+    let previewErr: unknown = null
+    try {
+      previewUrl = await window.omniget.musicPreview(c.platform, c.id)
+    } catch (err) {
+      previewErr = err
+    }
     if (seq !== previewSeq.current) return // P2 修复：等待期间用户已点开其他候选
-    if (!url) {
-      toast('该平台暂不支持试听', 'warning')
+    if (!previewUrl) {
+      // R4-P3：网络故障与能力缺失分开提示（此前一律「暂不支持试听」误导排查）
+      toast(previewErr ? `试听获取失败：${previewErr instanceof Error ? previewErr.message : String(previewErr)}` : '该平台暂不支持试听', 'warning')
       return
     }
-    const audio = new Audio(url)
+    const audio = new Audio(previewUrl)
     audioRef.current = audio
     audio.onended = () => setPlayingId(null)
     audio.onerror = () => {
       setPlayingId(null)
       toast('试听加载失败（镜像可能已失效）', 'warning')
     }
-    void audio.play()
+    audio.play().catch(() => {
+      // R4-P3：autoplay/解码失败是 promise 拒绝，onerror 不覆盖——此前 unhandledrejection
+      setPlayingId(null)
+      toast('试听播放失败', 'warning')
+    })
     setPlayingId(key)
   }
 
@@ -166,6 +180,7 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
     let done = 0
     let failed = 0
     for (const line of lines) {
+      if (!batchAlive.current) return // R4-P3：已离开音乐页，终止循环
       try {
         await window.omniget.musicDownload({
           q: line,
@@ -176,6 +191,7 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
         failed++ // 单行失败不阻断批量
       }
       done++
+      if (!batchAlive.current) return
       setBatchInfo(`入队中 ${done}/${lines.length}`)
     }
     setBatchBusy(false)

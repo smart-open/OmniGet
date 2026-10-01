@@ -346,7 +346,11 @@ export async function fetchToFile(
         dispatcher: streamingDispatcherFor(url)
       })
     }
-    if (!res.ok || !res.body) return 0
+    if (!res.ok || !res.body) {
+      // R4-P3：4xx/重试耗尽仍 5xx 静默返回 0 会让「这个平台为什么下不了」无法排查
+      logHttpFailure(url, new Error(`HTTP ${res.status}`))
+      return 0
+    }
     await mkdir(dirname(dest), { recursive: true })
     let total = 0
     const { createWriteStream } = await import('fs')

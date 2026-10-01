@@ -173,20 +173,38 @@ export class TaskManager {
     if (getTaskFiles(task.id).length > 0) return
     void (async () => {
       const { readdir, stat } = await import('fs/promises')
-      const { join } = await import('path')
-      const entries = await readdir(task.saveDir).catch(() => [] as string[])
-      const videos = entries.filter((f) => /\.(mp4|mkv|webm|mov|flv|ts)$/i.test(f) && !f.endsWith('.part'))
-      if (videos.length === 0) return
-      let best: { path: string; m: number } | null = null
-      for (const f of videos) {
-        const m = await stat(join(task.saveDir, f)).then((s) => s.mtimeMs).catch(() => 0)
-        if (!best || m > best.m) best = { path: f, m }
+      const { join, relative, isAbsolute } = await import('path')
+      // R4-P2：优先用适配器精确追踪的产物（M9 --print after_move:filepath，含
+      // info-json/封面/字幕等附属文件）——此前按「目录内最新视频」猜测，多任务
+      // 共用保存目录并发完成时会错拿他任务产物，回收站「含文件删除」误删
+      const tracked = (this.ytdlp?.getOutputFiles(task.id) ?? []).filter((p) => isAbsolute(p))
+      const products: { path: string; size: number }[] = []
+      for (const abs of tracked) {
+        const rel = relative(task.saveDir, abs).replace(/\\/g, '/')
+        if (!rel || rel.startsWith('../') || rel === '..') continue // 越界防御
+        const sz = await stat(abs).then((s) => s.size).catch(() => 0)
+        products.push({ path: rel, size: sz })
       }
-      if (!best) return
+      if (products.length === 0) {
+        // 兜底：适配器无追踪记录（如恢复重跑后的旧会话）→ 目录扫描最新视频
+        const entries = await readdir(task.saveDir).catch(() => [] as string[])
+        const videos = entries.filter((f) => /\.(mp4|mkv|webm|mov|flv|ts)$/i.test(f) && !f.endsWith('.part'))
+        let best: { path: string; m: number } | null = null
+        for (const f of videos) {
+          const m = await stat(join(task.saveDir, f)).then((s) => s.mtimeMs).catch(() => 0)
+          if (!best || m > best.m) best = { path: f, m }
+        }
+        if (best) {
+          const fallbackSize = e.totalBytes ?? task.totalBytes ?? 0
+          products.push({ path: best.path, size: fallbackSize })
+        }
+      }
+      if (products.length === 0) return
       const size = e.totalBytes ?? task.totalBytes ?? 0
-      saveTaskFiles(task.id, [
-        { path: best.path, size, selected: true, downloaded: size }
-      ])
+      saveTaskFiles(
+        task.id,
+        products.map((p) => ({ path: p.path, size: p.size || size, selected: true, downloaded: p.size || size }))
+      )
     })().catch((err) => {
       // 修复：saveTaskFiles 同步异常（如退出阶段 DB 已关闭）不得逃逸为 unhandledRejection
       log.warn(`persistYtdlpProduct failed for ${task.id}`, err)
@@ -271,6 +289,9 @@ export class TaskManager {
           this.pushEvent({ taskId, status: 'failed', error: message })
         } finally {
           this.launching.delete(taskId)
+          // R4-P2：失败释放并发槽后必须泵队列——pushEvent 是直推、不触发 pumpStarts，
+          // maxConcurrent 场景下首个任务启动失败会让排队任务永久卡 queued
+          this.pumpStarts()
         }
       })()
     }
@@ -562,6 +583,10 @@ export class TaskManager {
             // 音乐：真取消（AbortSignal 即刻中断，引擎产物已清理），槽位由后续 done(cancelled) 事件释放
             if (task.engineGid) void this.music?.cancel(task.engineGid)
             updateTaskFields(task.id, { engineGid: null })
+          } else if (task.engine === 'tool') {
+            // R4-P2：tool（ffmpeg）无暂停语义——此前误走 aria2 分支静默 no-op 后
+            // 仍转移 paused（UI 显示已暂停、进程实际继续跑）。显式拒绝并给出路
+            throw new Error('工具任务不支持暂停。如需中断请移除任务（可保留文件），稍后重新提交。')
           } else {
             await this.aria2.pause(task).catch(() => {
               // 极端竞态：forcePause 仍被拒（如刚重启 aria2 会话丢失）→ 不转状态，抛友好提示
@@ -591,6 +616,14 @@ export class TaskManager {
             updateTaskFields(task.id, { status: 'queued', engineGid: null })
             this.pushEvent({ taskId: task.id, status: 'queued' })
             this.pumpMusic()
+            break
+          } else if (task.engine === 'tool') {
+            // R4-P2：tool 无续跑语义（§4.5，ffmpeg 中间产物不续传）——
+            // 退回 queued 重走工具执行体（toolbox.submit 从头跑），而非误提交 aria2
+            updateTaskFields(task.id, { status: 'queued' })
+            this.pushEvent({ taskId: task.id, status: 'queued' })
+            const curTool = getTask(task.id) as TaskExt | null
+            if (curTool) void this.runToolTask(curTool)
             break
           } else {
             if (!task.engineGid) {
@@ -698,7 +731,9 @@ export class TaskManager {
     if (!task) return
     // 移入回收站时引擎侧任务已被移除：恢复后运行类状态归位 queued 并立即 re-add，
     // 避免「恢复后永远 running 但引擎里没有任务」的幽灵态
-    if (['running', 'queued', 'paused', 'verifying'].includes(task.status)) {
+    if (['running', 'queued', 'paused', 'verifying', 'seeding'].includes(task.status)) {
+      // R4-P2：seeding 纳入归位（与 recoverOnStartup 口径一致）——移入回收站时
+      // 引擎 gid 已销毁，漏掉会让任务永久显示「做种中」且无重试入口
       updateTaskFields(taskId, { status: 'queued', engineGid: null })
       this.pushEvent({ taskId, status: 'queued' })
       if (task.engine === 'aria2' || task.engine === 'ytdlp') {
@@ -789,7 +824,12 @@ export class TaskManager {
     if (task.engine !== 'aria2' && task.engine !== 'ytdlp') {
       this.pushEvent({ taskId, status: 'queued' })
       // 音乐/工具失败重试：立即重泵对应队列（否则任务卡 queued 直到引擎重启）
-      if (task.engine === 'music') this.pumpMusic()
+      if (task.engine === 'music') {
+        // R4-P1：失败任务的 engineGid 残留会被 pumpMusic 的 !engineGid 过滤
+        // 挡住 → 重试后永久卡 queued，必须先清 gid 再泵
+        updateTaskFields(taskId, { engineGid: null })
+        this.pumpMusic()
+      }
       // H6 修复：tool 引擎此前无任何重新提交路径，failed→queued 后永久卡死
       if (task.engine === 'tool') void this.runToolTask(task)
       return
@@ -1150,8 +1190,12 @@ export class TaskManager {
       // POST 失败：释放占位并标记失败
       this.activeMusic = Math.max(0, this.activeMusic - 1)
       const message = err instanceof Error ? err.message : String(err)
+      // R4-P3：fresh 重读 + 回收站复核（POST 在途可达数十秒，期间用户可能已删除
+      // 任务）——用过期快照转移会把回收站里的行写回 failed 并广播矛盾事件
+      const fresh = getTask(task.id) as TaskExt | null
+      if (!fresh || isTrashed(task.id)) return
       try {
-        this.transition(task, 'failed')
+        this.transition(fresh, 'failed')
       } catch {
         // 已失败
       }
@@ -1228,7 +1272,9 @@ export class TaskManager {
       } catch {
         // 已失败
       }
-      updateTaskFields(task.id, { error: '任务已取消' })
+      // R4-P1：失败/取消均清 gid——残留 gid 会让后续重试被 pumpMusic 的
+      // !engineGid 过滤挡住，任务永久卡 queued
+      updateTaskFields(task.id, { error: '任务已取消', engineGid: null })
       this.pushEvent({ taskId: task.id, status: 'failed', error: '任务已取消' })
     } else if (ev.success) {
       if (task.status === 'queued') this.transition(task, 'running')
@@ -1275,7 +1321,8 @@ export class TaskManager {
       } catch {
         // 已失败
       }
-      updateTaskFields(task.id, { error: message })
+      // R4-P1：失败清 gid（同取消路径——残留会让重试永不入泵）
+      updateTaskFields(task.id, { error: message, engineGid: null })
       this.pushEvent({ taskId: task.id, status: 'failed', error: message })
     }
     this.pumpMusic()

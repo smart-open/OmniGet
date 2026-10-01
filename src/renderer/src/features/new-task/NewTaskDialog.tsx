@@ -279,7 +279,13 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
     )
     // UX 硬性标准：批量入队全成功也要有可见成功反馈
     if (failed === 0) toast(`批量入队完成：成功 ${started} 个任务`, 'success')
-    void useTasks.getState().load('all')
+    // R4-P3：按当前视图过滤器重载（同 confirm——固定 'all' 会污染 loadedFilter）
+    const cur = useTasks.getState().loadedFilter
+    const target =
+      cur && ['all', 'downloading', 'completed', 'bt', 'video', 'music', 'trash'].includes(cur)
+        ? cur
+        : 'all'
+    void useTasks.getState().load(target)
   }
 
   /** R4：应用参数预设 */
@@ -390,7 +396,14 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
           : undefined
       })
       if (sid !== sessionRef.current) return
-      await useTasks.getState().load('all')
+      // R4-P3：按当前视图过滤器重载——固定 load('all') 会污染 loadedFilter，
+      // 在回收站视图打开对话框时触发数据源守卫双载 + 骨架闪烁
+      const cur = useTasks.getState().loadedFilter
+      const target =
+        cur && ['all', 'downloading', 'completed', 'bt', 'video', 'music', 'trash'].includes(cur)
+          ? cur
+          : 'all'
+      await useTasks.getState().load(target)
       // UX 硬性标准：成功必须有可见反馈，不得静默关框
       toast('任务已创建', 'success')
       onClose()
@@ -457,7 +470,8 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
                     className="press text-[11px] text-text-3 transition-colors hover:text-accent"
                     onClick={() => {
                       setBatchMode((v) => !v)
-                      setSource('')
+                      // R4-P3：不再无条件清空 source——误触模式切换此前会丢失已粘贴
+                      // 的多行链接/内容且无确认
                       setError('')
                     }}
                   >
@@ -900,8 +914,9 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
                     </button>
                   </div>
 
-                  {/* F3：下完即停（BT/磁力任务） */}
-                  {(sniffType === 'bt' || sniffType === 'magnet' || sniffType === null) && (
+                  {/* F3：下完即停（BT/磁力任务）——R4-P3：不再对未识别类型显示
+                      （视频/音乐任务此前会看到误导性的 BT 语义文案） */}
+                  {(sniffType === 'bt' || sniffType === 'magnet') && (
                     <label className="flex w-fit cursor-pointer items-center gap-2 text-xs text-text-2">
                       <input
                         type="checkbox"

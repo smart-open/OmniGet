@@ -197,10 +197,13 @@ export class MusicEngine {
         song ?? '',
         input.saveDir,
         quality,
-        (ev) => emit(ev.type, ev.platform, ev.message)
+        (ev) => emit(ev.type, ev.platform, ev.message),
+        job.controller.signal
       )
       if (this.isCancelled(job)) {
-        await this.cleanupArtifacts(result)
+        // R4-P2：cached 命中的是既有文件（可能是并发同歌任务刚产出的）——
+        // 取消清理只删本任务真实落盘的产物，否则会误删他人文件
+        if (!result.cached) await this.cleanupArtifacts(result)
         return this.cancelledResult()
       }
       const out: MusicDownloadResult = {
@@ -347,9 +350,16 @@ export class MusicEngine {
           lrcPath: ''
         }
       }
-      job.status = 'completed'
       log.info(`音乐按 ID 下载完成: 网易云:${nid} → ${mp3Path}`)
       const final = await this.applyNaming(mp3Path, lrcPath, artist, song)
+      // R4-P3：与 download 的 M-5 口径对齐——rename 后再次复核取消，
+      // 否则取消落在改名期间会留下孤儿产物（completed 态必须在复核后落位，
+      // 否则 rename 期间 cancel() 会被拒、复核永假）
+      if (this.isCancelled(job)) {
+        await this.cleanupArtifacts({ mp3Path: final.mp3, lrcPath: final.lrc })
+        return this.cancelledResult()
+      }
+      job.status = 'completed'
       const finalBase = final.mp3.replace(/\\/g, '/').split('/').pop() ?? filename
       return {
         success: true,

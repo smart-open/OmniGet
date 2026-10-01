@@ -66,6 +66,8 @@ export interface PlatformResult {
   message: string
   mp3Path: string
   lrcPath: string
+  /** R4-P2：产物为既有文件（skip_existing 命中）——取消清理不得误删 */
+  cached?: boolean
 }
 
 export interface EngineCallbacks {
@@ -772,7 +774,8 @@ export async function tryAllPlatforms(
   songName: string,
   saveDir: string,
   quality: Quality,
-  onEvent?: EngineCallbacks['onEvent']
+  onEvent?: EngineCallbacks['onEvent'],
+  signal?: AbortSignal
 ): Promise<PlatformResult> {
   const keyword = `${singer} ${songName}`
   await ensureDir(saveDir)
@@ -780,10 +783,16 @@ export async function tryAllPlatforms(
   const mp3Path = join(saveDir, `${base}.mp3`)
   const lrcPath = join(saveDir, `${base}.lrc`)
 
-  // skip_existing 语义（Python _already_downloaded 口径）：mp3>1KB 且 lrc 存在 → 跳过
+  // skip_existing 语义（Python _already_downloaded 口径）：mp3>1KB 且 lrc 存在 → 跳过。
+  // cached 标记：产物是既有文件而非本次落盘——取消清理时不得误删（可能属于并发同歌任务）
   if (await alreadyDownloaded(mp3Path, lrcPath)) {
-    return { success: true, source: 'cached', message: '已存在，跳过', mp3Path, lrcPath }
+    return { success: true, source: 'cached', message: '已存在，跳过', mp3Path, lrcPath, cached: true }
   }
+
+  // R4-P3：每轮平台尝试前检查取消——取消后快速失败请求被平台 catch 吞成空结果，
+  // 循环会白耗遍历并广播「尝试 QQ 音乐…」等误导性进度事件
+  const aborted = (): boolean => signal?.aborted === true
+  if (aborted()) return { success: false, source: '', message: '任务已取消', mp3Path: '', lrcPath: '' }
 
   // 1. 网易云（原唱校验）
   if (onEvent) onEvent({ type: 'progress', platform: 'netease', message: '尝试 网易云…' })
@@ -794,6 +803,7 @@ export async function tryAllPlatforms(
   onEvent?.({ type: 'progress', platform: 'netease', message: '网易云 未命中' })
 
   // 2. QQ
+  if (aborted()) return { success: false, source: '', message: '任务已取消', mp3Path: '', lrcPath: '' }
   if (onEvent) onEvent({ type: 'progress', platform: 'qq', message: '尝试 QQ 音乐…' })
   for (const song of await engine.searchQq(keyword)) {
     if (await engine.tryQq(song.id, mp3Path, lrcPath, quality)) {
@@ -804,6 +814,7 @@ export async function tryAllPlatforms(
   onEvent?.({ type: 'progress', platform: 'qq', message: 'QQ 音乐 未命中' })
 
   // 3. 酷狗
+  if (aborted()) return { success: false, source: '', message: '任务已取消', mp3Path: '', lrcPath: '' }
   if (onEvent) onEvent({ type: 'progress', platform: 'kugou', message: '尝试 酷狗…' })
   for (const song of await engine.searchKugou(keyword)) {
     if (await engine.tryKugou(song.id, mp3Path, lrcPath, quality)) {
@@ -814,6 +825,7 @@ export async function tryAllPlatforms(
   onEvent?.({ type: 'progress', platform: 'kugou', message: '酷狗 未命中' })
 
   // 4. 咪咕
+  if (aborted()) return { success: false, source: '', message: '任务已取消', mp3Path: '', lrcPath: '' }
   if (onEvent) onEvent({ type: 'progress', platform: 'migu', message: '尝试 咪咕…' })
   for (const song of await engine.searchMigu(keyword)) {
     if (await engine.tryMigu(song, mp3Path, lrcPath, quality)) {
@@ -824,6 +836,7 @@ export async function tryAllPlatforms(
   onEvent?.({ type: 'progress', platform: 'migu', message: '咪咕 未命中' })
 
   // 5. 汽水
+  if (aborted()) return { success: false, source: '', message: '任务已取消', mp3Path: '', lrcPath: '' }
   if (onEvent) onEvent({ type: 'progress', platform: 'soda', message: '尝试 汽水…' })
   for (const song of await engine.searchSoda(keyword)) {
     if (await engine.trySoda(song, mp3Path, lrcPath)) {
