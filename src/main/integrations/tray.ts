@@ -13,6 +13,7 @@ import type { TaskEvent } from '@shared/types'
 const log = createLogger('integrations')
 
 let tray: Tray | null = null
+let trayTooltipTimer: NodeJS.Timeout | null = null
 let clipboardTimer: NodeJS.Timeout | null = null
 const dedupe = new DedupeWindow(30_000)
 let speedProvider: () => { down: number; up: number; running: number; queued: number } = () => ({
@@ -191,7 +192,10 @@ export function createTray(): Tray {
     )
   }
   rebuild()
-  setInterval(rebuild, 2000)
+  // 加固：tooltip 刷新定时器 unref（不阻止进程退出）+ 存模块引用防托盘重建时叠加
+  if (trayTooltipTimer) clearInterval(trayTooltipTimer)
+  trayTooltipTimer = setInterval(rebuild, 2000)
+  trayTooltipTimer.unref?.()
   log.info('tray created (interactive icon + rich menu)')
   return tray
 }

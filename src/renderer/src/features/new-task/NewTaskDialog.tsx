@@ -60,9 +60,13 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
   const [delogo, setDelogo] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  // #16 会话计数器：对话框每次打开自增；关闭后未完成的异步回调用它判定过期，
+  // 防止旧会话的 createTask/confirmSelection 结果回填进新会话状态。
+  const sessionRef = useRef(0)
 
   useEffect(() => {
     if (open) {
+      sessionRef.current += 1
       setPhase('input')
       setError('')
       setParsed(null)
@@ -79,7 +83,13 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
       setEmbedThumbnail(false)
       setDelogo(false)
       if (!saveDir) {
-        void window.omniget.defaultSaveDir().then(setSaveDir)
+        const sid = sessionRef.current
+        window.omniget
+          .defaultSaveDir()
+          .then((dir) => {
+            if (sid === sessionRef.current) setSaveDir(dir)
+          })
+          .catch(() => {})
       }
       setTimeout(() => inputRef.current?.focus(), 60)
     }
@@ -131,18 +141,20 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
 
   async function submitSource(): Promise<void> {
     if (!source.trim()) return
+    const sid = sessionRef.current
     setPhase('parsing')
     setError('')
     try {
-      applyResult(
-        await window.omniget.createTask({
-          source: source.trim(),
-          threads,
-          saveDir,
-          seedRatio: seedAndStop ? 0 : undefined
-        })
-      )
+      const res = await window.omniget.createTask({
+        source: source.trim(),
+        threads,
+        saveDir,
+        seedRatio: seedAndStop ? 0 : undefined
+      })
+      if (sid !== sessionRef.current) return // #16：会话已关闭/重开，丢弃过期结果
+      applyResult(res)
     } catch (err) {
+      if (sid !== sessionRef.current) return
       setError(err instanceof Error ? err.message : String(err))
       setPhase('input')
     }
@@ -158,24 +170,27 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
   }
 
   async function submitSourceWithPath(path: string): Promise<void> {
+    const sid = sessionRef.current
     setPhase('parsing')
     setError('')
     try {
-      applyResult(
-        await window.omniget.createTask({
-          source: path,
-          threads,
-          saveDir,
-          seedRatio: seedAndStop ? 0 : undefined
-        })
-      )
+      const res = await window.omniget.createTask({
+        source: path,
+        threads,
+        saveDir,
+        seedRatio: seedAndStop ? 0 : undefined
+      })
+      if (sid !== sessionRef.current) return
+      applyResult(res)
     } catch (err) {
+      if (sid !== sessionRef.current) return
       setError(err instanceof Error ? err.message : String(err))
       setPhase('input')
     }
   }
 
   async function confirm(): Promise<void> {
+    const sid = sessionRef.current
     setSubmitting(true)
     try {
       await window.omniget.confirmSelection({
@@ -193,9 +208,11 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
             }
           : undefined
       })
+      if (sid !== sessionRef.current) return
       await useTasks.getState().load('all')
       onClose()
     } catch (err) {
+      if (sid !== sessionRef.current) return
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setSubmitting(false)

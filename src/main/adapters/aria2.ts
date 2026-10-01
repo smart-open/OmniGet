@@ -320,6 +320,14 @@ export class Aria2Adapter implements EngineAdapter {
       .map((p) => indexByRel.get(p.replace(/\\/g, '/').toLowerCase()))
       .filter((v): v is string => v !== undefined)
       .map(Number)
+    // #17 加固：用户勾选与引擎元数据 0 命中（镜像改名/大小写口径漂移）时，
+    // 不带 select-file 的 unpause 会静默全量下载——明确失败并给出口动作
+    if (selectedPaths.length > 0 && indexes.length === 0) {
+      throw new Error(
+        `勾选的 ${selectedPaths.length} 个文件与种子元数据 0 命中（文件清单可能已变化）。` +
+          '请删除该任务后重新解析，在文件树中重新勾选'
+      )
+    }
     await this.rpc().call('changeOption', gid, {
       ...buildTaskOptions({ type: 'bt', threads, saveDir, seedRatio, selectedFileIndexes: indexes })
     })
