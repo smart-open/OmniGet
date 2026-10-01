@@ -1,7 +1,13 @@
 // F1 试听流协议（omniget-preview://）：主进程流式代理网易云镜像音频，
 // 替代原 omni-service 16801 端口代理；<audio> 直接播放，无端口/token 开销。
+// 工具箱剪辑编辑器（本地媒体）复用同一协议：omniget-preview://local/<URL 编码的绝对路径>，
+// 支持 Range 请求（视频/音频可拖动试听）。
 
 import { protocol } from 'electron'
+import { createReadStream } from 'fs'
+import { stat } from 'fs/promises'
+import { extname, isAbsolute } from 'path'
+import { Readable } from 'stream'
 import { createLogger } from '../logger'
 import { getMusicEngine } from './engine'
 import { openStream } from './http'
@@ -9,6 +15,22 @@ import { openStream } from './http'
 const log = createLogger('music-preview')
 
 export const PREVIEW_SCHEME = 'omniget-preview'
+
+/** 本地媒体扩展名白名单：防止该协议被当作任意本地文件读取通道 */
+const LOCAL_MEDIA_TYPES: Record<string, string> = {
+  '.mp3': 'audio/mpeg',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.flac': 'audio/flac',
+  '.wav': 'audio/wav',
+  '.opus': 'audio/opus',
+  '.ogg': 'audio/ogg',
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.mkv': 'video/x-matroska',
+  '.mov': 'video/quicktime',
+  '.ts': 'video/mp2t'
+}
 
 /** app.ready 前调用：注册特权 scheme（媒体流 + fetch 支持） */
 export function registerPreviewScheme(): void {
@@ -20,11 +42,65 @@ export function registerPreviewScheme(): void {
   ])
 }
 
+/** 本地媒体流（Range 支持：<video>/<audio> 拖动进度必需） */
+async function serveLocalMedia(path: string, request: Request): Promise<Response> {
+  try {
+    if (!isAbsolute(path)) return new Response('bad request', { status: 400 })
+    const type = LOCAL_MEDIA_TYPES[extname(path).toLowerCase()]
+    if (!type) return new Response('unsupported media type', { status: 415 })
+    const info = await stat(path)
+    if (!info.isFile()) return new Response('not found', { status: 404 })
+    const size = info.size
+
+    const rangeHeader = request.headers.get('range')
+    const rangeMatch = rangeHeader ? /bytes=(\d*)-(\d*)/.exec(rangeHeader) : null
+    if (rangeMatch) {
+      let start = rangeMatch[1] ? parseInt(rangeMatch[1], 10) : 0
+      let end = rangeMatch[2] ? Math.min(parseInt(rangeMatch[2], 10), size - 1) : size - 1
+      if (!Number.isFinite(start) || start < 0 || start > end || start >= size) {
+        return new Response(null, {
+          status: 416,
+          headers: { 'Content-Range': `bytes */${size}` }
+        })
+      }
+      end = Math.min(end, size - 1)
+      const stream = createReadStream(path, { start, end })
+      return new Response(Readable.toWeb(stream) as ReadableStream, {
+        status: 206,
+        headers: {
+          'Content-Type': type,
+          'Content-Length': String(end - start + 1),
+          'Content-Range': `bytes ${start}-${end}/${size}`,
+          'Accept-Ranges': 'bytes'
+        }
+      })
+    }
+
+    const stream = createReadStream(path)
+    return new Response(Readable.toWeb(stream) as ReadableStream, {
+      status: 200,
+      headers: {
+        'Content-Type': type,
+        'Content-Length': String(size),
+        'Accept-Ranges': 'bytes'
+      }
+    })
+  } catch {
+    // 文件被移动/删除：404 即可（渲染层 onerror 兜底提示）
+    return new Response('not found', { status: 404 })
+  }
+}
+
 /** app.ready 后调用：挂载协议处理器 */
 export function registerPreviewHandler(): void {
   protocol.handle(PREVIEW_SCHEME, async (request) => {
     try {
       const url = new URL(request.url)
+      // 本地媒体分支（工具箱剪辑试听）
+      if (url.host === 'local') {
+        const p = decodeURIComponent(url.pathname.replace(/^\/+/, ''))
+        return serveLocalMedia(p, request)
+      }
       if (url.host !== 'music') return new Response('not found', { status: 404 })
       const platform = url.searchParams.get('platform') ?? 'netease'
       const sid = url.searchParams.get('id') ?? ''

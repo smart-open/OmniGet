@@ -263,6 +263,9 @@ export class MusicEngine {
       if (!exists) break
       final = join(dir, `${base} (${n})${ext}`)
     }
+    // P3 加固：序号探测耗尽时 final 可能仍指向已存在文件——直接 rename 会覆盖用户同名文件
+    const targetExists = await stat(final).then(() => true).catch(() => false)
+    if (targetExists) return { mp3: mp3Path, lrc: lrcPath } // 放弃重命名，保留引擎原生命名
     const renamed = await rename(mp3Path, final)
       .then(() => true)
       .catch(() => false)

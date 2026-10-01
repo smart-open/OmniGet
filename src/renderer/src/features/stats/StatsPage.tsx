@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 import type { DailyStat } from '@shared/types'
 import { formatBytes } from '../new-task/fileTree'
 import { Skeleton, Button } from '../../components/ui'
-import { useTasks, wireTaskEvents } from '../../stores/tasks'
+import { useTasks } from '../../stores/tasks'
 
 export function StatsPage({ onNewTask }: { onNewTask?: () => void }) {
   const [stats, setStats] = useState<DailyStat[] | null>(null)
@@ -11,8 +11,12 @@ export function StatsPage({ onNewTask }: { onNewTask?: () => void }) {
   const reload = useTasks((s) => s.load)
 
   useEffect(() => {
-    void window.omniget.getStats().then(setStats)
-    wireTaskEvents()
+    // P2 加固：getStats 失败不产生 unhandledrejection（保留骨架→空态路径）
+    window.omniget
+      .getStats()
+      .then(setStats)
+      .catch(() => setStats([]))
+    // 事件接线由 App 全局负责；此前此处重复接线导致监听器线性叠加
     void reload('all')
   }, [reload])
 

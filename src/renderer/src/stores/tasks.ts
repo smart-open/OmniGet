@@ -5,6 +5,9 @@ import type { EngineHealth, Task, TaskCounts, TaskEvent } from '@shared/types'
 
 const SPEED_HISTORY_MAX = 40
 
+/** load 乱序防护：仅应用最新一次请求的结果（快速切换分组时旧响应不得覆盖新状态） */
+let loadSeq = 0
+
 interface TasksState {
   tasks: Map<string, Task>
   engines: EngineHealth[]
@@ -43,19 +46,26 @@ export const useTasks = create<TasksState>()((set, get) => ({
   loading: true,
 
   load: async (filter) => {
+    const seq = ++loadSeq
     set({ loading: get().tasks.size === 0 })
-    const [list, rawPinned] = await Promise.all([
-      window.omniget.listTasks(filter),
-      window.omniget.settingsGet('ui.pinnedTasks') as Promise<string[] | null>
-    ])
-    const map = new Map<string, Task>()
-    for (const t of list) map.set(t.id, t)
-    set({
-      tasks: map,
-      loadedFilter: filter,
-      pinned: Array.isArray(rawPinned) ? rawPinned.filter((id) => map.has(id)) : [],
-      loading: false
-    })
+    try {
+      const [list, rawPinned] = await Promise.all([
+        window.omniget.listTasks(filter),
+        window.omniget.settingsGet('ui.pinnedTasks') as Promise<string[] | null>
+      ])
+      if (seq !== loadSeq) return // 过期响应：已被更新的 load 取代
+      const map = new Map<string, Task>()
+      for (const t of list) map.set(t.id, t)
+      set({
+        tasks: map,
+        loadedFilter: filter,
+        pinned: Array.isArray(rawPinned) ? rawPinned.filter((id) => map.has(id)) : [],
+        loading: false
+      })
+    } catch {
+      // DB/引擎异常：不抛出（调用方多为 void），保留上次列表并退出加载态
+      if (seq === loadSeq) set({ loading: false })
+    }
     void get().refreshCounts()
   },
 
@@ -72,7 +82,8 @@ export const useTasks = create<TasksState>()((set, get) => ({
     const cur = get().pinned
     const next = cur.includes(id) ? cur.filter((x) => x !== id) : [id, ...cur]
     set({ pinned: next })
-    void window.omniget.settingsSet('ui.pinnedTasks', next)
+    // P2 加固：settingsSet 可能因 DB 异常 reject，void 直调会产生 unhandledrejection
+    window.omniget.settingsSet('ui.pinnedTasks', next).catch(() => {})
   },
 
   applyEvents: (events) => {
@@ -91,6 +102,10 @@ export const useTasks = create<TasksState>()((set, get) => ({
         error: e.error ?? prev.error
       })
       if (e.message !== undefined) stageById[e.taskId] = e.message
+      // P2 加固：终态任务的阶段文案已无消费方，删除防 stageById 无界增长
+      if ((e.status === 'completed' || e.status === 'failed') && e.message === undefined) {
+        delete stageById[e.taskId]
+      }
     }
     for (const t of tasks.values()) {
       if (t.status === 'running') speed += t.speedBps

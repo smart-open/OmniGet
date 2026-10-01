@@ -13,6 +13,8 @@ import { join } from 'path'
 import { generateMagnet, normalizeInfohash, parseTorrentFile } from '../torrent/parse'
 import { buildTaskOptions } from '../aria2/options'
 import { createLogger } from '../logger'
+import { diagnose } from '../diagnosis'
+import { recordPlatformFailure } from '../health'
 import type { EngineAdapter, EngineHealthInfo, ParseOutput } from './types'
 import type { Aria2Supervisor } from '../orchestrator/aria2'
 
@@ -353,8 +355,12 @@ export class Aria2Adapter implements EngineAdapter {
         }
         const mapped = statusMap[st.status]
         // M4-17：aria2 错误结构化归因（五类 + 出口动作）
-        const { diagnose } = await import('../diagnosis')
+        // P3 加固：pollEvents 每秒逐任务调用，归因/健康模块必须静态导入（动态 import 每秒 N 次 Promise 调度开销）
         const d = diagnose(st.errorMessage ?? '')
+        // Backlog：平台健康面板——aria2 错误写入健康注册表
+        if (st.status === 'error') {
+          recordPlatformFailure('aria2', d.kind, st.errorMessage ?? d.message, 'aria2')
+        }
         events.push({
           taskId: task.id,
           status: mapped,

@@ -48,6 +48,33 @@ export function isTrustedAudioHost(host: string): boolean {
 }
 
 const insecureAgent = new Agent({ connect: { rejectUnauthorized: false } })
+
+// ── Backlog：平台适配脚本 host 重写（scripts.ts 注入，http 层统一改写）────
+// 平台 API 改版时由适配脚本把官方域指向镜像域，免发版自救。
+// TLS 豁免随目标域自动生效：改写后 isMirrorHost 判断的是新域。
+let scriptHostOverrides = new Map<string, string>()
+
+export function setScriptHostOverrides(m: Map<string, string>): void {
+  scriptHostOverrides = m
+}
+
+export function rewriteUrl(url: string): string {
+  if (scriptHostOverrides.size === 0) return url
+  try {
+    const u = new URL(url)
+    const target = scriptHostOverrides.get(u.hostname.toLowerCase())
+    if (target) {
+      // 目标形如 host 或 host:port：经 URL 解析拆分，避免 port 混入 hostname
+      const parsed = new URL(`http://${target}`)
+      u.hostname = parsed.hostname
+      if (parsed.port) u.port = parsed.port
+      return u.toString()
+    }
+  } catch {
+    // 非法 URL/目标：原样返回，交由调用方报错
+  }
+  return url
+}
 // 试听流专用：连接 10s 超时、body 不限时（对应 Python socket 超时口径，长歌曲不被掐断）
 const streamingAgent = new Agent({
   connect: { rejectUnauthorized: false },
@@ -102,6 +129,7 @@ export async function fetchJson<T = unknown>(
   opts: HttpOpts = {}
 ): Promise<T> {
   const { signal, timeoutMs = 15_000 } = opts
+  url = rewriteUrl(url)
   let lastErr: unknown = new Error('unreachable')
   for (let attempt = 0; attempt <= RETRY_TOTAL; attempt++) {
     try {
@@ -175,6 +203,7 @@ export async function postForm<T = unknown>(
 
 /** GET 文本（歌词等） */
 export async function getText(url: string, headers?: Record<string, string>, opts: HttpOpts = {}): Promise<string> {
+  url = rewriteUrl(url)
   const res = await undiciFetch(url, {
     method: 'GET',
     headers,
@@ -195,6 +224,7 @@ export async function fetchToFile(
   opts: HttpOpts & { minBytes?: number } = {}
 ): Promise<number> {
   const { signal, minBytes = 1024 } = opts
+  url = rewriteUrl(url)
   const { mkdir, rename, unlink } = await import('fs/promises')
   const { dirname } = await import('path')
   const tmp = `${dest}.part`
@@ -252,6 +282,7 @@ export async function fetchToFile(
 export async function openStream(
   url: string
 ): Promise<{ status: number; ok: boolean; contentType: string; contentLength: string | null; body: unknown }> {
+  url = rewriteUrl(url)
   const res = await undiciFetch(url, {
     method: 'GET',
     headers: { 'User-Agent': 'Mozilla/5.0' },

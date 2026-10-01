@@ -56,6 +56,12 @@ const api: OmniGetBridge = {
   removeTracker: (url: string) => ipcRenderer.invoke('trackers:remove', url),
   refreshTrackers: () => ipcRenderer.invoke('trackers:refresh'),
   getToolDefs: () => ipcRenderer.invoke('tool:defs'),
+  // Backlog：平台健康面板 + 适配脚本注册表
+  getPlatformHealth: () => ipcRenderer.invoke(IPC_CHANNELS.healthGet),
+  listAdapterScripts: () => ipcRenderer.invoke(IPC_CHANNELS.scriptsList),
+  reloadAdapterScripts: () => ipcRenderer.invoke(IPC_CHANNELS.scriptsReload),
+  toggleAdapterScript: (id: string, enabled: boolean) =>
+    ipcRenderer.invoke(IPC_CHANNELS.scriptsToggle, id, enabled),
   onToolEvents: (listener: (e: import('@shared/types').ToolEvent) => void) => {
     const wrapped = (_e: unknown, ev: import('@shared/types').ToolEvent): void => listener(ev)
     ipcRenderer.on('event:tools', wrapped)

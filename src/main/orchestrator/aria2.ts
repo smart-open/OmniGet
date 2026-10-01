@@ -84,17 +84,24 @@ export class Aria2RpcClient {
       params: [`token:${this.secret}`, ...params]
     }
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, {
-        resolve: resolve as (v: unknown) => void,
-        reject: (e: Error) => reject(e)
-      })
-      this.ws!.send(JSON.stringify(payload))
-      setTimeout(() => {
+      // P3 加固：超时 timer 在响应到达时清理（高频轮询下未清理的 timer 会持续堆积）
+      const timer = setTimeout(() => {
         if (this.pending.has(id)) {
           this.pending.delete(id)
           reject(new Error(`aria2 RPC 请求超时：${method}`))
         }
       }, 10_000)
+      this.pending.set(id, {
+        resolve: (v: unknown) => {
+          clearTimeout(timer)
+          resolve(v as T)
+        },
+        reject: (e: Error) => {
+          clearTimeout(timer)
+          reject(e)
+        }
+      })
+      this.ws!.send(JSON.stringify(payload))
     })
   }
 

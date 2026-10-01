@@ -16,6 +16,7 @@ import {
   MusicNote,
   Palette,
   Plus,
+  Pulse,
   Square,
   Trash,
   Tray,
@@ -25,6 +26,7 @@ import {
 import { useTasks, wireTaskEvents } from '../stores/tasks'
 import logoUrl from '../assets/logo.png'
 import { THEMES, applyTheme, parseStoredTheme, watchSystemTheme, type ThemeId } from '../theme'
+import { initLocale, useI18n } from '../i18n'
 import { TaskList } from '../features/tasks/TaskList'
 import { NewTaskDialog } from '../features/new-task/NewTaskDialog'
 import { MusicWorkbench } from '../features/music/MusicWorkbench'
@@ -33,7 +35,8 @@ import { StatsPage } from '../features/stats/StatsPage'
 import { ToolboxPage } from '../features/toolbox/ToolboxPage'
 import { HelpOverlay } from '../features/help/HelpOverlay'
 import { Onboarding } from '../features/onboarding/Onboarding'
-import { SpeedSparkline, IconButton } from '../components/ui'
+import { SpeedSparkline, IconButton, ConfirmDialog } from '../components/ui'
+import { toast, useToasts, confirmAction, isConfirmActive } from '../lib/feedback'
 import {
   effectiveKeys,
   eventToKey,
@@ -42,6 +45,7 @@ import {
   type ShortcutAction
 } from '../shortcuts'
 import { Inspector } from '../features/inspector/Inspector'
+import { HealthPage } from '../features/health/HealthPage'
 import { formatBytes } from '../features/new-task/fileTree'
 
 interface NavItem {
@@ -65,6 +69,7 @@ const NAV_GROUPS: { title?: string; items: NavItem[] }[] = [
       { id: 'bt', label: '种子磁力', icon: Magnet },
       { id: 'video', label: '视频', icon: MonitorPlay },
       { id: 'music', label: '音乐', icon: MusicNote },
+      { id: 'health', label: '平台健康', icon: Pulse },
       { id: 'toolbox', label: '工具箱', icon: Wrench }
     ]
   },
@@ -89,6 +94,7 @@ function LogoMark() {
 }
 
 export default function App() {
+  const t = useI18n((s) => s.t)
   const [active, setActive] = useState('all')
   const [dialogOpen, setDialogOpen] = useState(false)
   const [dialogSource, setDialogSource] = useState<string | undefined>(undefined)
@@ -104,6 +110,7 @@ export default function App() {
 
   useEffect(() => wireTaskEvents(), [])
   useEffect(() => void reload(active), [active, reload])
+  useEffect(() => initLocale(), [])
 
   // 主题：恢复 + 应用 + 跟随系统（多主题见 theme.ts）
   useEffect(() => {
@@ -135,23 +142,15 @@ export default function App() {
   // 顶栏搜索 → 任务列表过滤（Ctrl+F 聚焦）
   const [query, setQuery] = useState('')
 
-  // 全局 toast（onNotices：操作失败/降级告警的统一反馈，3.5s 自动消失）
-  const [toasts, setToasts] = useState<Array<{ id: number; level: 'warning' | 'info'; message: string }>>([])
+  // 全局 toast（渲染层 toast + 主进程 onNotices 合流，3.5s 自动消失）
+  const toasts = useToasts((s) => s.toasts)
   useEffect(() => {
     const off = window.omniget.onNotices((items) => {
       if (!Array.isArray(items) || items.length === 0) return
-      setToasts((prev) => [
-        ...prev.slice(-4),
-        ...items.map((n, i) => ({ id: Date.now() + i, level: n.level, message: n.message }))
-      ])
+      for (const n of items) toast(n.message, n.level === 'warning' ? 'warning' : 'info')
     })
     return off
   }, [])
-  useEffect(() => {
-    if (toasts.length === 0) return
-    const t = setTimeout(() => setToasts((prev) => prev.slice(1)), 3500)
-    return () => clearTimeout(t)
-  }, [toasts])
 
   const [showHelp, setShowHelp] = useState(false)
   const [onboarding, setOnboarding] = useState(false)
@@ -182,6 +181,8 @@ export default function App() {
     const onKey = (e: KeyboardEvent): void => {
       const tag = (e.target as HTMLElement)?.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+      // 确认对话框模态期间屏蔽全局快捷键（防 Space/Delete 穿透误触发后台任务操作）
+      if (isConfirmActive()) return
       const k = eventToKey(e)
       if (!k) return
       if (k === keys['new-task']) {
@@ -205,12 +206,28 @@ export default function App() {
         const t = tasks.get(selectedTaskId)
         if (!t) return
         const action = t.status === 'paused' ? 'resume' : 'pause'
-        void window.omniget.controlTask({ taskId: selectedTaskId, action })
+        void window.omniget
+          .controlTask({ taskId: selectedTaskId, action })
+          .then(() => toast(action === 'pause' ? '任务已暂停' : '任务已继续下载', 'success'))
       } else if (k === keys.trash) {
         const sel = selectedTaskId
         if (!sel) return
         e.preventDefault()
-        void window.omniget.controlTask({ taskId: sel, action: 'remove' }).then(() => reload('all'))
+        const t = tasks.get(sel)
+        // 移入回收站属删除类操作：二次确认（可恢复，用轻量确认）
+        void confirmAction({
+          title: '移入回收站',
+          message: `「${t?.name || sel}」将被移入回收站，可在回收站中恢复。`,
+          confirmLabel: '移入回收站'
+        }).then((ok) => {
+          if (!ok) return
+          void window.omniget
+            .controlTask({ taskId: sel, action: 'remove' })
+            .then(() => {
+              toast('任务已移入回收站', 'success')
+              return reload('all')
+            })
+        })
       }
     }
     window.addEventListener('keydown', onKey)
@@ -274,7 +291,7 @@ export default function App() {
                       weight={isActive ? 'fill' : 'regular'}
                       className="shrink-0"
                     />
-                    <span className="flex-1 truncate text-left leading-none">{item.label}</span>
+                    <span className="flex-1 truncate text-left leading-none">{t(`nav.${item.id}`)}</span>
                     {badge !== null && badge > 0 && (
                       <span className="num flex h-4 min-w-4 items-center justify-center rounded-full bg-accent px-1 text-[9px] font-medium leading-none text-white">
                         {badge}
@@ -290,16 +307,16 @@ export default function App() {
         {/* 底部固定组（shrink-0：永不因导航挤压消失/抖动） */}
         <div className="relative shrink-0 border-t border-border px-2.5 py-2">
           {[
-            { id: 'stats', label: '统计', icon: ChartBar, onClick: () => setActive('stats') },
+            { id: 'stats', label: t('nav.stats'), icon: ChartBar, onClick: () => setActive('stats') },
             {
               id: 'theme',
-              label: THEMES.find((t) => t.id === theme)?.label ?? '主题',
+              label: THEMES.find((th) => th.id === theme)?.label ?? t('nav.theme'),
               icon: Palette,
               onClick: () => setThemeMenu((v) => !v)
             },
             {
               id: 'settings',
-              label: '设置',
+              label: t('nav.settings'),
               icon: GearSix,
               onClick: () => setActive('settings')
             }
@@ -368,7 +385,7 @@ export default function App() {
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 className="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-text-3"
-                placeholder="搜索任务…"
+                placeholder={t('search.placeholder')}
               />
               {query && (
                 <button
@@ -397,7 +414,7 @@ export default function App() {
               className="press inline-flex h-8 items-center gap-1.5 rounded-full bg-accent px-3.5 text-xs font-medium text-white shadow-[0_2px_8px_var(--accent-soft)] transition-colors hover:bg-accent-press"
             >
               <Plus size={14} weight="bold" />
-              新建任务
+              {t('action.newTask')}
             </button>
           </div>
 
@@ -424,6 +441,8 @@ export default function App() {
           <div className="min-w-0 flex-1 overflow-hidden">
             {active === 'music' ? (
               <MusicWorkbench onOpenTasks={() => setActive('all')} />
+            ) : active === 'health' ? (
+              <HealthPage />
             ) : active === 'settings' ? (
               <SettingsPage />
             ) : active === 'stats' ? (
@@ -454,7 +473,7 @@ export default function App() {
             0 B/s
           </span>
           <span className="num text-text-3">
-            运行 {counts.running} · 排队 {counts.queued}
+            {t('status.running')} {counts.running} · {t('status.queued')} {counts.queued}
           </span>
           <span className="ml-auto flex items-center gap-3">
             {(['aria2', 'ytdlp', 'music'] as const).map((name) => (
@@ -483,6 +502,7 @@ export default function App() {
       />
       <HelpOverlay open={showHelp} onClose={() => setShowHelp(false)} />
       <Onboarding open={onboarding} onClose={() => setOnboarding(false)} />
+      <ConfirmDialog />
 
       {/* 全局 toast（右下角，操作失败/降级告警统一反馈） */}
       <div className="pointer-events-none fixed bottom-10 right-4 z-[60] flex flex-col gap-2">

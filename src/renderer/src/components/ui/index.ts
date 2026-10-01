@@ -1,5 +1,6 @@
 export { Button, type ButtonProps } from './Button'
 export { IconButton, Tooltip } from './IconButton'
+export { ConfirmDialog } from './ConfirmDialog'
 export { Input } from './Input'
 export { Skeleton, TaskRowSkeleton } from './Skeleton'
 export { Row } from './Row'

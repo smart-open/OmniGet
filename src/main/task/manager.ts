@@ -24,6 +24,7 @@ import type { ParseOutput } from '../adapters/types'
 import { notifyTaskEvent } from '../integrations/tray'
 import { toolbox } from '../toolbox'
 import { samplePeakSpeed, recordCompletion } from '../stats'
+import { recordPlatformOk, recordPlatformDegraded, recordPlatformFailure } from '../health'
 import { assertTransition, IllegalTransitionError } from './state-machine'
 import { uuidv7 } from './id'
 import { TaskEventMerger } from './events'
@@ -133,6 +134,10 @@ export class TaskManager {
         ...(e.wmLevel ? { wmLevel: e.wmLevel } : {})
       })
       this.currentEvents.set(e.taskId, e)
+      // P2 加固：终态事件后聚合速度表不再需要该条目，删除防 Map 无界增长
+      if (e.status === 'completed' || e.status === 'failed') {
+        this.currentEvents.delete(e.taskId)
+      }
       notifyTaskEvent(e, task.name)
       out.push({ ...e, status: e.status ?? task.status })
     }
@@ -376,8 +381,12 @@ export class TaskManager {
               throw new Error('任务正忙，无法立即暂停，请稍候重试')
             })
           }
-          this.transition(task, 'paused')
-          this.pushEvent({ taskId: task.id, status: 'paused' })
+          // P2 加固：await 期间轮询事件可能已把任务转移到 completed/failed——
+          // 用旧快照 transition 会把 DB 状态回写覆盖，必须重读复核
+          const fresh = getTask(input.taskId) as TaskExt | null
+          if (!fresh || (fresh.status !== 'running' && fresh.status !== 'queued')) return
+          this.transition(fresh, 'paused')
+          this.pushEvent({ taskId: fresh.id, status: 'paused' })
         }
         break
       case 'resume':
@@ -396,8 +405,11 @@ export class TaskManager {
           } else {
             await this.aria2.resume(task)
           }
-          this.transition(task, 'running')
-          this.pushEvent({ taskId: task.id, status: 'running' })
+          // P2 加固：同 pause——跨 await 后复核状态，防旧快照覆盖终态
+          const fresh = getTask(input.taskId) as TaskExt | null
+          if (!fresh || fresh.status !== 'paused') return
+          this.transition(fresh, 'running')
+          this.pushEvent({ taskId: fresh.id, status: 'running' })
         }
         break
       case 'remove': {
@@ -857,7 +869,9 @@ export class TaskManager {
 
   /** 音乐引擎事件 → 任务流（§6.3 music.progress/done/warning） */
   applyMusicEvent(ev: ServiceEvent): void {
+    // Backlog：平台健康面板——降级/成功事件喂给健康注册表
     if (ev.type === 'music.warning') {
+      if (ev.platform) recordPlatformDegraded(ev.platform, ev.message ?? '平台降级')
       const notice: UiNotice = {
         level: 'warning',
         message: ev.message ?? '音乐平台降级',
@@ -874,6 +888,7 @@ export class TaskManager {
         | TaskExt
         | undefined
       if (!task) return
+      if (ev.platform) recordPlatformOk(ev.platform) // 平台有响应推进 → 健康
       if (task.status === 'queued') {
         this.transition(task, 'running')
       }
@@ -892,6 +907,14 @@ export class TaskManager {
     // 任务可能已被删除/暂停（gid 已清），此时查找会落空——但槽位必须照常释放，
     // 否则每取消/删除一个运行中任务就永久泄漏 1 个并发位（上限 4，泄漏满后音乐队列全卡死）。
     this.activeMusic = Math.max(0, this.activeMusic - 1)
+    // Backlog：平台健康——done 事件按成败回写（取消不计失败）
+    if (ev.platform && !(ev as { cancelled?: boolean }).cancelled) {
+      if (ev.success === false) {
+        recordPlatformFailure(ev.platform, 'risk', ev.message ?? '平台返回失败')
+      } else {
+        recordPlatformOk(ev.platform)
+      }
+    }
 
     const all = listTasks({ status: ['queued', 'running'] })
     const task = all.find((t) => t.engine === 'music' && t.engineGid === ev.taskId) as

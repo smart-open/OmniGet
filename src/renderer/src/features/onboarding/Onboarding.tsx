@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { motion } from 'framer-motion'
 import { ArrowRight, Check, FolderOpen } from '@phosphor-icons/react'
 import { Button } from '../../components/ui'
+import { toastError } from '../../lib/feedback'
 import { THEMES, applyTheme, type ThemeId } from '../../theme'
 
 export function Onboarding({ open, onClose }: { open: boolean; onClose: () => void }) {
@@ -14,13 +15,16 @@ export function Onboarding({ open, onClose }: { open: boolean; onClose: () => vo
   if (!open) return null
 
   async function finish(): Promise<void> {
-    if (saveDir) void window.omniget.settingsSet('download.saveDir', saveDir)
-    void window.omniget.settingsSet('ui.theme', theme)
-    applyTheme(theme)
     // 剪贴板监听默认开（§8 向导第四步）；关闭则记录偏好
-    void window.omniget.settingsSet('ui.clipboardWatch', clipboard ? 'true' : 'false')
-    void window.omniget.settingsSet('onboarded', true)
+    const writes: Array<Promise<unknown>> = [
+      window.omniget.settingsSet('ui.theme', theme),
+      window.omniget.settingsSet('ui.clipboardWatch', clipboard ? 'true' : 'false'),
+      window.omniget.settingsSet('onboarded', true)
+    ]
+    if (saveDir) writes.push(window.omniget.settingsSet('download.saveDir', saveDir))
+    applyTheme(theme)
     onClose()
+    await Promise.all(writes).catch((err) => toastError('保存向导设置', err))
   }
 
   const steps = ['下载目录', '外观', '系统集成']

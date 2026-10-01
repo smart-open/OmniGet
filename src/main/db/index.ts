@@ -110,6 +110,21 @@ export function getSetting(key: string): string | null {
   return row?.value ?? null
 }
 
+/**
+ * 主进程侧读取设置：settingsSet 以 JSON.stringify 落库（渲染层 settingsGet 已做
+ * 反序列化），主进程内部读取必须走本函数，否则读到带引号的 JSON 串污染路径/参数。
+ * 反序列化失败回退原文（兼容历史裸文本值）。
+ */
+export function getSettingParsed<T = unknown>(key: string): T | null {
+  const raw = getSetting(key)
+  if (raw === null) return null
+  try {
+    return JSON.parse(raw) as T
+  } catch {
+    return raw as unknown as T
+  }
+}
+
 export function setSetting(key: string, value: string): void {
   getDb()
     .prepare(

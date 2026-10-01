@@ -7,7 +7,7 @@
 import type { Task, TaskEvent, VideoFormat } from '@shared/types'
 import { join } from 'path'
 import { sanitizeFilename } from '@shared/sanitize'
-import { getSetting } from '../db'
+import { getSettingParsed } from '../db'
 import { createLogger } from '../logger'
 import { getYtDlpSupervisor } from '../orchestrator/ytdlp'
 import { ensureVerified } from '../orchestrator/binaries'
@@ -160,7 +160,9 @@ export class YtDlpAdapter {
     const opts = this.videoOpts.get(task.id) ?? {}
     const isPlaylist = (selection?.indexes?.length ?? 0) > 1
     const isShort = this.shortVideo.has(task.id)
-    const cookieFile = getSetting('ytdlp.cookieFile')
+    // P1 加固：settings 落库为 JSON 串，读取必须反序列化（带引号会让 --cookies 静默失效）
+    const rawCookie = getSettingParsed<string | null>('ytdlp.cookieFile')
+    const cookieFile = typeof rawCookie === 'string' && rawCookie.trim() ? rawCookie : null
 
     const args: string[] = [task.source]
     // M3-3：格式选择（默认 bv*+ba/b）；仅音频（M3-10）
@@ -293,6 +295,17 @@ export class YtDlpAdapter {
         ? 'yt-dlp 参数错误（引擎版本不兼容？）。请尝试更新引擎。'
         : `${diagnosis.message}${lastLine ? `（${lastLine}）` : ''}`
     this.emit({ taskId: task.id, status: 'failed', error: msg })
+    // Backlog：平台健康面板——视频提取失败写入健康注册表（cls=usage 属参数问题不计平台故障）
+    if (cls !== 'usage') {
+      const { recordPlatformFailure } = await import('../health')
+      recordPlatformFailure(
+        'ytdlp',
+        diagnosis.kind,
+        msg,
+        'yt-dlp',
+        diagnosis.exitAction === 'update-engine' ? '尝试更新引擎（设置 → 更新）' : undefined
+      )
+    }
     this.cleanupTaskState(task.id)
   }
 

@@ -318,6 +318,43 @@ export interface EngineUpdateResult {
   error?: string
 }
 
+/** Backlog：平台适配健康（提取器健康度/失效平台公示） */
+export type PlatformHealthStatus = 'ok' | 'degraded' | 'down' | 'unknown'
+
+export interface PlatformHealthError {
+  at: number
+  /** M4-17 归因口径：dns/tls/http/risk/disk/unknown */
+  kind: string
+  message: string
+}
+
+export interface PlatformHealthEntry {
+  id: string
+  label: string
+  /** 归属引擎（aria2/yt-dlp/music）或 music 平台 id */
+  engine: string
+  status: PlatformHealthStatus
+  lastOkAt?: number
+  lastFailAt?: number
+  /** 最近 24h 失败次数 */
+  failCount: number
+  recentErrors: PlatformHealthError[]
+  /** 降级/失效时的建议出口动作 */
+  hint?: string
+}
+
+/** Backlog：平台适配脚本（内置自维护 + userData 目录热更） */
+export interface AdapterScriptInfo {
+  id: string
+  platform: string
+  version: string
+  enabled: boolean
+  source: 'builtin' | 'user'
+  notes?: string
+  /** host 重写表：官方域 → 镜像域（平台改版自救，免发版） */
+  hostOverrides: Record<string, string>
+}
+
 export interface OmniGetBridge {
   // task
   createTask(input: CreateTaskInput): Promise<CreateTaskResult>
@@ -369,6 +406,12 @@ export interface OmniGetBridge {
   removeTracker(url: string): Promise<void>
   refreshTrackers(): Promise<number>
   getToolDefs(): Promise<ToolDefInfo[]>
+  /** Backlog：平台适配健康面板（提取器健康度/失效平台公示） */
+  getPlatformHealth(): Promise<PlatformHealthEntry[]>
+  /** Backlog：平台适配脚本注册表（内置自维护 + userData 热更目录） */
+  listAdapterScripts(): Promise<AdapterScriptInfo[]>
+  reloadAdapterScripts(): Promise<AdapterScriptInfo[]>
+  toggleAdapterScript(id: string, enabled: boolean): Promise<void>
   /** M4-13 工具箱事件流 */
   onToolEvents(listener: (e: ToolEvent) => void): () => void
   /** M4-7：触发应用自检更新 */
@@ -412,6 +455,12 @@ export const IPC_CHANNELS = {
   appOpenReleases: 'app:openReleases',
   engineUpdate: 'engine:update',
   toolCreate: 'tool:create',
+  /** Backlog：平台适配健康面板 */
+  healthGet: 'health:get',
+  /** Backlog：平台适配脚本注册表 */
+  scriptsList: 'scripts:list',
+  scriptsReload: 'scripts:reload',
+  scriptsToggle: 'scripts:toggle',
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
   eventTasks: 'event:tasks',
@@ -423,3 +472,6 @@ export const IPC_CHANNELS = {
 } as const
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS]
+
+/** 试听/本地媒体预览协议（<audio>/<video> 播放；CSP media-src 已放行） */
+export const PREVIEW_SCHEME = 'omniget-preview'

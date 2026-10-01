@@ -12,7 +12,7 @@ import {
   type MusicSearchInput,
   type ToolCreateInput
 } from '@shared/types'
-import { getDb, getSetting, setSetting } from './db'
+import { getDb, getSetting, getSettingParsed, setSetting } from './db'
 import { createLogger } from './logger'
 import type { TaskManager } from './task/manager'
 import type { MusicAdapter } from './music/adapter'
@@ -107,11 +107,22 @@ export function registerIpcHandlers(): void {
     const p = String(path ?? '').trim()
     if (!/\.torrent$/i.test(p)) throw new Error('仅支持解析 .torrent 文件')
     const sysDirs = [process.env.SystemRoot ?? 'C:\\Windows', process.env.WINDIR ?? 'C:\\Windows']
-      .concat(['C:\\Windows', '/usr', '/etc', '/bin', '/sbin', '/boot'])
+      .concat([
+        'C:\\Windows',
+        '/usr',
+        '/etc',
+        '/bin',
+        '/sbin',
+        '/boot',
+        process.env.TEMP ?? '',
+        process.env.TMP ?? '',
+        process.env.USERPROFILE ?? process.env.HOME ?? ''
+      ])
       .filter(Boolean)
-      .map((d) => d.toLowerCase())
+      .map((d) => d.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase())
     const norm = p.replace(/\\/g, '/').toLowerCase()
-    if (sysDirs.some((d) => norm.startsWith(d.replace(/\\/g, '/').toLowerCase() + '/'))) {
+    // P3 加固：目录本身与子路径一并拒绝（原实现仅匹配子路径，C:\Windows 本体可绕过）
+    if (sysDirs.some((d) => norm === d || norm.startsWith(d + '/'))) {
       throw new Error('不允许解析系统目录中的文件')
     }
     const info = parseTorrentFile(p)
@@ -157,7 +168,22 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.taskOpenFolder, async (_e, taskId: string) => {
     const { getTask } = await import('./task/store')
     const task = getTask(taskId)
-    if (task) void shell.openPath(task.saveDir)
+    if (!task) return
+    try {
+      // openPath 失败返回错误字符串（成功返回空串）：目录不存在等必须给用户可见反馈
+      const error = await shell.openPath(task.saveDir)
+      if (error) {
+        broadcastNotices([{ level: 'warning', message: `打开目录失败：${error}` }])
+      }
+    } catch (err) {
+      // 兜底：openPath 自身异常也不产生 unhandled rejection（渲染层多为 void 调用）
+      broadcastNotices([
+        {
+          level: 'warning',
+          message: `打开目录失败：${err instanceof Error ? err.message : String(err)}`
+        }
+      ])
+    }
   })
 
   ipcMain.handle(IPC_CHANNELS.taskCounts, async () => {
@@ -212,6 +238,26 @@ export function registerIpcHandlers(): void {
         fields: d.fields
       }))
     )
+  })
+
+  // ── Backlog：平台适配健康面板 ────────────────────────────────────────
+  ipcMain.handle(IPC_CHANNELS.healthGet, async () => {
+    const { platformHealthSnapshot } = await import('./health')
+    return platformHealthSnapshot()
+  })
+
+  // ── Backlog：平台适配脚本注册表（内置自维护 + userData 热更）─────────
+  ipcMain.handle(IPC_CHANNELS.scriptsList, async () => {
+    const { listAdapterScripts } = await import('./adapters/scripts')
+    return listAdapterScripts()
+  })
+  ipcMain.handle(IPC_CHANNELS.scriptsReload, async () => {
+    const { reloadAdapterScripts } = await import('./adapters/scripts')
+    return reloadAdapterScripts()
+  })
+  ipcMain.handle(IPC_CHANNELS.scriptsToggle, async (_e, id: string, enabled: boolean) => {
+    const { setAdapterScriptEnabled } = await import('./adapters/scripts')
+    setAdapterScriptEnabled(id, enabled)
   })
 
   // ── M4-3 回收站（失败统一广播通知，渲染层不静默）────────────────────
@@ -333,8 +379,9 @@ export function registerIpcHandlers(): void {
 
   // 应用环境：默认保存目录 = 用户配置（download.saveDir）→ 系统 Downloads
   ipcMain.handle('app:defaultSaveDir', () => {
-    const configured = getSetting('download.saveDir')
-    if (configured && configured.trim()) return configured
+    // P1 加固：设置值为 JSON 串，必须反序列化（否则路径带引号落盘损坏）
+    const configured = getSettingParsed<string>('download.saveDir')
+    if (typeof configured === 'string' && configured.trim()) return configured
     return app.getPath('downloads')
   })
 
@@ -501,6 +548,11 @@ export function registerIpcHandlers(): void {
     const row = getDb().pragma('user_version', { simple: true }) as number
     return { userVersion: row }
   })
+
+  // Backlog：适配脚本热更监听（加载内置清单 + userData 目录 watch）
+  import('./adapters/scripts')
+    .then((m) => m.startAdapterScriptWatcher())
+    .catch(() => {})
 
   log.info('ipc handlers registered')
 }

@@ -16,6 +16,7 @@ import {
 import type { Task, TaskFile } from '@shared/types'
 import { useEffect, useState } from 'react'
 import { FILE_CATEGORIES, fileCategory } from '@shared/file-category'
+import { confirmAction, toast } from '../../lib/feedback'
 import { formatBytes } from '../new-task/fileTree'
 
 const spring = { type: 'spring' as const, stiffness: 300, damping: 32 }
@@ -50,7 +51,10 @@ export function Inspector({
       setFiles([])
       return
     }
-    void window.omniget.getTaskDetail(task.id).then((d) => setFiles(d?.files ?? []))
+    window.omniget
+      .getTaskDetail(task.id)
+      .then((d) => setFiles(d?.files ?? []))
+      .catch(() => setFiles([])) // 请求失败不产生 unhandledrejection，文件清单留空
   }, [task?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!task) return null
@@ -62,8 +66,28 @@ export function Inspector({
   const trashed = false // 列表过滤已保证 trash 视图不进 Inspector（select 仅在非回收站行触发）
 
   const control = async (action: 'pause' | 'resume' | 'remove'): Promise<void> => {
+    if (action === 'remove') {
+      const ok = await confirmAction({
+        title: '移入回收站',
+        message: `「${task.name || task.source}」将被移入回收站，可在回收站中恢复。`,
+        confirmLabel: '移入回收站'
+      })
+      if (!ok) return
+    }
     await window.omniget.controlTask({ taskId: task.id, action })
     onChanged()
+    if (action === 'pause') toast('任务已暂停', 'success')
+    else if (action === 'resume') toast('任务已继续下载', 'success')
+    else toast('任务已移入回收站', 'success')
+  }
+
+  const retry = (): void => {
+    void window.omniget
+      .retryTask(task.id)
+      .then(() => {
+        toast('任务已重新排队', 'success')
+        onChanged()
+      })
   }
 
   const copySource = (): void => {
@@ -138,7 +162,7 @@ export function Inspector({
             >
               <p className="text-[11px] leading-relaxed text-danger">{task.error}</p>
               <button
-                onClick={() => void window.omniget.retryTask(task.id).then(onChanged)}
+                onClick={retry}
                 className="press mt-2 inline-flex items-center gap-1.5 rounded-ctl border border-border px-2.5 py-1 text-[11px] text-text-2 hover:text-text-1"
               >
                 <ArrowClockwise size={12} /> 重试任务
@@ -263,7 +287,7 @@ export function Inspector({
           )}
           {failed && (
             <button
-              onClick={() => void window.omniget.retryTask(task.id).then(onChanged)}
+              onClick={retry}
               className="press inline-flex h-8 flex-1 items-center justify-center gap-1.5 rounded-ctl bg-accent text-xs text-white hover:bg-accent-press"
             >
               <ArrowClockwise size={13} /> 重试

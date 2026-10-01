@@ -19,6 +19,7 @@ import {
 import { useTasks } from '../../stores/tasks'
 import { formatBytes, formatEta } from '../new-task/fileTree'
 import { Button, EmptyState, TaskRowSkeleton } from '../../components/ui'
+import { confirmAction, toast } from '../../lib/feedback'
 import type { Task } from '@shared/types'
 
 const FILTERS: Record<string, (t: Task) => boolean> = {
@@ -99,23 +100,40 @@ export function TaskList({
     setChecked(new Set())
     await useTasks.getState().load('trash')
     setBusy(false)
+    toast(`已恢复 ${checked.size} 个任务到原分组`, 'success')
   }
   const batchPurge = async (): Promise<void> => {
     if (!trashDataReady || checked.size === 0) return
+    const ok = await confirmAction({
+      title: `彻底删除 ${checked.size} 个任务`,
+      message: '将永久删除这些任务及其已下载的全部文件，此操作不可恢复。请确认已不再需要它们。',
+      confirmLabel: '彻底删除',
+      danger: true
+    })
+    if (!ok) return
     setBusy(true)
     for (const id of checked) await window.omniget.purgeTask(id)
     setChecked(new Set())
     await useTasks.getState().load('trash')
     setBusy(false)
+    toast(`已彻底删除 ${checked.size} 个任务及其文件`, 'success')
   }
   const emptyTrash = async (): Promise<void> => {
     // 双保险：数据源必须是回收站（trash 过滤）才允许清空
     if (!trashDataReady || list.length === 0) return
+    const ok = await confirmAction({
+      title: '清空回收站',
+      message: `将永久删除回收站内全部 ${list.length} 个任务及其已下载文件，此操作不可恢复。`,
+      confirmLabel: '全部删除',
+      danger: true
+    })
+    if (!ok) return
     setBusy(true)
     for (const t of list) await window.omniget.purgeTask(t.id)
     setChecked(new Set())
     await useTasks.getState().load('trash')
     setBusy(false)
+    toast('回收站已清空', 'success')
   }
 
   const list = useMemo(() => {
@@ -317,16 +335,52 @@ function TaskRow({
   async function restore(): Promise<void> {
     await window.omniget.restoreTask(task.id)
     await useTasks.getState().load('all')
+    toast(`已恢复「${task.name || task.source}」`, 'success')
   }
 
   async function purge(): Promise<void> {
+    const ok = await confirmAction({
+      title: '彻底删除任务',
+      message: `「${task.name || task.source}」及其已下载文件将被永久删除，此操作不可恢复。`,
+      confirmLabel: '彻底删除',
+      danger: true
+    })
+    if (!ok) return
     await window.omniget.purgeTask(task.id)
     await useTasks.getState().load('all')
+    toast('任务及其文件已彻底删除', 'success')
+  }
+
+  async function purgeRecord(): Promise<void> {
+    const ok = await confirmAction({
+      title: '删除任务记录',
+      message: `将删除「${task.name || task.source}」的任务记录（保留已下载文件），此操作不可恢复。`,
+      confirmLabel: '删除记录',
+      danger: true
+    })
+    if (!ok) return
+    await window.omniget.purgeTaskRecord(task.id)
+    await useTasks.getState().load('all')
+    toast('任务记录已删除（文件保留）', 'success')
+  }
+
+  async function moveToTrash(): Promise<void> {
+    const ok = await confirmAction({
+      title: '移入回收站',
+      message: `「${task.name || task.source}」将被移入回收站，可在回收站中恢复。`,
+      confirmLabel: '移入回收站'
+    })
+    if (!ok) return
+    await window.omniget.controlTask({ taskId: task.id, action: 'remove', withFiles: false })
+    await useTasks.getState().load('all')
+    toast('任务已移入回收站', 'success')
   }
 
   async function control(action: 'pause' | 'resume' | 'remove' | 'top'): Promise<void> {
     await window.omniget.controlTask({ taskId: task.id, action, withFiles: false })
     await useTasks.getState().load('all')
+    if (action === 'pause') toast('任务已暂停', 'success')
+    else if (action === 'resume') toast('任务已继续下载', 'success')
   }
 
   const canPause = task.status === 'running' || task.status === 'queued'
@@ -408,10 +462,7 @@ function TaskRow({
               <RowAction label="彻底删除（含文件）" danger onClick={() => void purge()}>
                 <Trash size={13} />
               </RowAction>
-              <RowAction
-                label="删除（保留文件）"
-                onClick={() => void window.omniget.purgeTaskRecord(task.id).then(() => useTasks.getState().load('all'))}
-              >
+              <RowAction label="删除（保留文件）" onClick={() => void purgeRecord()}>
                 <FileX size={13} />
               </RowAction>
               <RowAction label="打开目录" onClick={() => void window.omniget.openFolder(task.id)}>
@@ -442,7 +493,7 @@ function TaskRow({
               <RowAction label="打开目录" onClick={() => void window.omniget.openFolder(task.id)}>
                 <FolderOpen size={13} />
               </RowAction>
-              <RowAction label="移入回收站" danger onClick={() => void control('remove')}>
+              <RowAction label="移入回收站" danger onClick={() => void moveToTrash()}>
                 <Trash size={13} />
               </RowAction>
             </>

@@ -1,12 +1,13 @@
 // 智能命名模板（M4-11，§4.3.2）：{{title}} {{uploader}} {{date}} {{index:N}}
 // 三类引擎统一接入（yt-dlp -o 模板 / 音乐完成重命名 / aria2 目录口径）。
 
-import { getSetting } from './db'
+import { getSettingParsed } from './db'
 
 export const DEFAULT_TEMPLATE = '{{title}}'
 
 export function getNamingTemplate(): string {
-  return getSetting('naming.template') ?? DEFAULT_TEMPLATE
+  const v = getSettingParsed<string>('naming.template')
+  return typeof v === 'string' ? v : DEFAULT_TEMPLATE
 }
 
 export interface NamingVars {

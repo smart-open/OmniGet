@@ -1,6 +1,6 @@
 // 主进程入口（T0-1）：单实例锁、窗口、生命周期编排。
 
-import { app, BrowserWindow, Menu, shell } from 'electron'
+import { app, BrowserWindow, dialog, Menu, shell } from 'electron'
 import { existsSync } from 'fs'
 import { join } from 'path'
 import { allocatePorts } from './orchestrator/ports'
@@ -60,7 +60,20 @@ if (!gotLock) {
     }
   })
 
-  void bootstrap()
+  // P1 加固：bootstrap 内任一环节（DB 打开/迁移、端口分配等）抛错都不允许变成
+  // unhandledRejection 静默无窗退出——给出可见错误后退出
+  bootstrap().catch((err) => {
+    log.error('bootstrap failed:', err)
+    try {
+      dialog.showErrorBox(
+        'OmniGet 启动失败',
+        `${err instanceof Error ? err.message : String(err)}\n\n请检查数据目录是否可写，或重新安装应用。`
+      )
+    } catch {
+      // ready 之前 showErrorBox 不可用的极端场景：忽略，走 app.quit
+    }
+    app.quit()
+  })
 }
 
 async function bootstrap(): Promise<void> {

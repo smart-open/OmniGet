@@ -2,8 +2,10 @@
 // 模板 / 下载 / Tracker / 更新 / 说明
 import { useEffect, useState } from 'react'
 import { ArrowClockwise, CheckCircle, FolderOpen, Trash } from '@phosphor-icons/react'
-import type { AppUpdateCheck, ScheduleRule, TrackerEntry } from '@shared/types'
+import type { AppUpdateCheck, AdapterScriptInfo, ScheduleRule, TrackerEntry } from '@shared/types'
 import { Button } from '../../components/ui'
+import { confirmAction, toast, toastError } from '../../lib/feedback'
+import { LOCALES, useI18n } from '../../i18n'
 import { THEMES, applyTheme, parseStoredTheme, watchSystemTheme, type ThemeId } from '../../theme'
 import {
   DEFAULT_KEYS,
@@ -65,7 +67,10 @@ function KeysSection({ onOpenHelp }: { onOpenHelp?: () => void }) {
 
   const resetAll = (): void => {
     setOverrides({})
-    void window.omniget.settingsSet('ui.keymap', {})
+    window.omniget
+      .settingsSet('ui.keymap', {})
+      .then(() => flashToast('快捷键已恢复默认'))
+      .catch((err) => toastError('恢复默认键位', err))
     window.dispatchEvent(new Event('keymap-changed'))
   }
 
@@ -125,6 +130,8 @@ function KeysSection({ onOpenHelp }: { onOpenHelp?: () => void }) {
 /** 外观：主题选择（色板卡 + 跟随系统） */
 function AppearanceSection() {
   const [theme, setTheme] = useState<ThemeId>('system')
+  const locale = useI18n((s) => s.locale)
+  const setLocale = useI18n((s) => s.setLocale)
 
   useEffect(() => {
     void window.omniget.settingsGet('ui.theme').then((v) => {
@@ -170,11 +177,32 @@ function AppearanceSection() {
       <p className="mt-2 text-[10px] text-text-3">
         「随系统」随 Windows 深浅色自动切换曜石黑 / 石墨灰
       </p>
+
+      {/* Backlog：多语言 i18n（外壳与健康页已覆盖，存量页面按迁移节奏收敛） */}
+      <div className="mt-4 border-t border-border pt-4">
+        <p className="mb-2 text-xs text-text-2">语言 / Language</p>
+        <div className="flex gap-2">
+          {LOCALES.map((l) => (
+            <button
+              key={l.id}
+              onClick={() => setLocale(l.id)}
+              className={`flex h-8 items-center gap-2 rounded-panel border px-3 text-xs transition-colors ${
+                locale === l.id
+                  ? 'border-accent bg-accent-soft font-medium text-accent'
+                  : 'border-border text-text-2 hover:border-text-3 hover:text-text-1'
+              }`}
+            >
+              {l.label}
+              {locale === l.id && <CheckCircle size={13} weight="fill" className="text-accent" />}
+            </button>
+          ))}
+        </div>
+      </div>
     </Section>
   )
 }
 
-type Tab = 'appearance' | 'keys' | 'template' | 'download' | 'tracker' | 'update' | 'about'
+type Tab = 'appearance' | 'keys' | 'template' | 'download' | 'tracker' | 'scripts' | 'update' | 'about'
 
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: 'appearance', label: '外观' },
@@ -182,6 +210,7 @@ const TABS: Array<{ id: Tab; label: string }> = [
   { id: 'template', label: '命名模板' },
   { id: 'download', label: '下载' },
   { id: 'tracker', label: 'Tracker' },
+  { id: 'scripts', label: '适配脚本' },
   { id: 'update', label: '更新' },
   { id: 'about', label: '说明' }
 ]
@@ -245,6 +274,9 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
   >(null)
   const [appUpdateChecking, setAppUpdateChecking] = useState(false)
   const [appUpdate, setAppUpdate] = useState<AppUpdateCheck | null>(null)
+  // Backlog：适配脚本注册表（内置自维护 + userData 热更目录）
+  const [scripts, setScripts] = useState<AdapterScriptInfo[]>([])
+  const t = useI18n((s) => s.t)
 
   useEffect(() => {
     void (async () => {
@@ -253,6 +285,7 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
       setSaveDir(String((await window.omniget.settingsGet('download.saveDir')) ?? ''))
       setRules((await window.omniget.getScheduleRules()) ?? [])
       setTrackers(await window.omniget.listTrackers())
+      setScripts(await window.omniget.listAdapterScripts())
     })()
   }, [])
 
@@ -260,6 +293,12 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
     setSaved(msg)
     setTimeout(() => setSaved(''), 2500)
   }
+
+  const reloadScripts = (): Promise<void> =>
+    window.omniget
+      .reloadAdapterScripts()
+      .then(setScripts)
+      .catch((err) => toastError('重新加载适配脚本', err))
 
   const reloadTrackers = (): Promise<void> =>
     window.omniget.listTrackers().then(setTrackers)
@@ -271,17 +310,17 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
 
         {/* 内部菜单（分区导航） */}
         <div className="mb-5 flex gap-1 border-b border-border">
-          {TABS.map((t) => (
+          {TABS.map((tb) => (
             <button
-              key={t.id}
-              onClick={() => setTab(t.id)}
+              key={tb.id}
+              onClick={() => setTab(tb.id)}
               className={`-mb-px border-b-2 px-3.5 pb-2.5 pt-1 text-[13px] transition-colors ${
-                tab === t.id
+                tab === tb.id
                   ? 'border-accent font-medium text-accent'
                   : 'border-transparent text-text-2 hover:text-text-1'
               }`}
             >
-              {t.label}
+              {t(`settings.tab.${tb.id}`)}
             </button>
           ))}
         </div>
@@ -315,8 +354,10 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
             <Button
               size="sm"
               onClick={() => {
-                void window.omniget.settingsSet('naming.template', template)
-                flash('命名模板已保存')
+                window.omniget
+                  .settingsSet('naming.template', template)
+                  .then(() => flash('命名模板已保存'))
+                  .catch((err) => toastError('保存命名模板', err))
               }}
             >
               保存
@@ -363,9 +404,12 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
               <Button
                 size="sm"
                 onClick={() => {
-                  void window.omniget.settingsSet('download.saveDir', saveDir)
-                  void window.omniget.settingsSet('ytdlp.cookieFile', cookieFile)
-                  flash('下载设置已保存')
+                  Promise.all([
+                    window.omniget.settingsSet('download.saveDir', saveDir),
+                    window.omniget.settingsSet('ytdlp.cookieFile', cookieFile)
+                  ])
+                    .then(() => flash('下载设置已保存'))
+                    .catch((err) => toastError('保存下载设置', err))
                 }}
               >
                 保存
@@ -418,8 +462,10 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                 <Button
                   size="xs"
                   onClick={() => {
-                    void window.omniget.setScheduleRules(rules)
-                    flash('调度计划已保存（切换即时生效）')
+                    window.omniget
+                      .setScheduleRules(rules)
+                      .then(() => flash('调度计划已保存（切换即时生效）'))
+                      .catch((err) => toastError('保存调度计划', err))
                   }}
                 >
                   保存计划
@@ -445,9 +491,21 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                   </span>
                   <button
                     className="press text-text-3 hover:text-danger"
-                    onClick={() =>
-                      void window.omniget.removeTracker(t.url).then(reloadTrackers)
-                    }
+                    onClick={() => {
+                      void confirmAction({
+                        title: '删除 Tracker',
+                        message: `将从本地 Tracker 列表中移除：${t.url}`,
+                        confirmLabel: '删除',
+                        danger: true
+                      }).then((ok) => {
+                        if (!ok) return
+                        window.omniget
+                          .removeTracker(t.url)
+                          .then(reloadTrackers)
+                          .then(() => toast('Tracker 已删除', 'success'))
+                          .catch((err) => toastError('删除 Tracker', err))
+                      })
+                    }}
                   >
                     <Trash size={12} />
                   </button>
@@ -470,10 +528,14 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                 size="xs"
                 onClick={() => {
                   if (!newTracker.trim()) return
-                  void window.omniget
+                  window.omniget
                     .addTracker(newTracker.trim())
                     .then(reloadTrackers)
-                    .then(() => setNewTracker(''))
+                    .then(() => {
+                      setNewTracker('')
+                      toast('Tracker 已添加', 'success')
+                    })
+                    .catch((err) => toastError('添加 Tracker', err))
                 }}
               >
                 添加
@@ -485,9 +547,11 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                 disabled={refreshing}
                 onClick={() => {
                   setRefreshing(true)
-                  void window.omniget
+                  window.omniget
                     .refreshTrackers()
                     .then(reloadTrackers)
+                    .then(() => toast('Tracker 订阅已刷新', 'success'))
+                    .catch((err) => toastError('刷新 Tracker 订阅', err))
                     .finally(() => setRefreshing(false))
                 }}
               >
@@ -562,6 +626,59 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                   探测经第三方服务 check-host.net 发起{btExt.state === 'ok' || btExt.state === 'blocked' ? `（本机公网 IP ${'ip' in btExt ? btExt.ip : ''}，仅用于本次探测，不入库不上报）` : ''}。
                 </p>
               )}
+            </div>
+          </Section>
+        )}
+
+        {/* ── 适配脚本（Backlog：平台适配脚本热更生态）─────────────── */}
+        {tab === 'scripts' && (
+          <Section title="平台适配脚本（内置自维护 + 热更）">
+            <p className="mb-3 text-[11px] leading-relaxed text-text-3">
+              平台 API 改版时无需更新应用：编辑 <span className="num">userData/adapter-scripts/</span>{' '}
+              下的 JSON 清单（<span className="num">hostOverrides</span> 把官方域重定向到镜像域），保存即自动热更；停用的脚本不参与请求改写。
+            </p>
+            {scripts.length === 0 ? (
+              <p className="rounded-panel border border-border px-3 py-4 text-xs text-text-3">
+                暂无脚本清单
+              </p>
+            ) : (
+              <div className="mb-3 max-h-72 overflow-y-auto rounded-panel border border-border">
+                {scripts.map((s) => (
+                  <div key={s.id} className="row-line flex items-center gap-2 px-3 py-2 text-xs">
+                    <span className="num shrink-0 text-text-3">{s.platform}</span>
+                    <span className="min-w-0 flex-1">
+                      <span className="num text-text-2">{s.id}</span>
+                      <span className="ml-2 text-[10px] text-text-3">v{s.version}</span>
+                      {Object.keys(s.hostOverrides ?? {}).length > 0 && (
+                        <span className="ml-2 rounded border border-accent/40 px-1 py-px text-[9px] text-accent">
+                          host 重写 ×{Object.keys(s.hostOverrides ?? {}).length}
+                        </span>
+                      )}
+                    </span>
+                    <button
+                      className={`press shrink-0 rounded-ctl border px-2 py-0.5 text-[10px] transition-colors ${
+                        s.enabled
+                          ? 'border-accent/40 bg-accent-soft text-accent'
+                          : 'border-border text-text-3 hover:text-text-2'
+                      }`}
+                      onClick={() => {
+                        window.omniget
+                          .toggleAdapterScript(s.id, !s.enabled)
+                          .then(reloadScripts)
+                          .then(() => toast(s.enabled ? '脚本已停用' : '脚本已启用', 'success'))
+                          .catch((err) => toastError('切换脚本状态', err))
+                      }}
+                    >
+                      {s.enabled ? '已启用' : '已停用'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="flex items-center gap-2">
+              <Button size="xs" variant="outline" icon={<ArrowClockwise size={11} />} onClick={() => void reloadScripts()}>
+                重新加载
+              </Button>
             </div>
           </Section>
         )}

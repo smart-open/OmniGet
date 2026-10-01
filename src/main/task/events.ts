@@ -2,6 +2,9 @@
 // 同一任务在窗口内的多次进度更新合并为一条，整窗口批量推送渲染层。
 
 import type { TaskEvent } from '@shared/types'
+import { createLogger } from '../logger'
+
+const log = createLogger('events')
 
 export class TaskEventMerger {
   private buffer = new Map<string, TaskEvent>()
@@ -25,7 +28,12 @@ export class TaskEventMerger {
     if (this.buffer.size === 0) return
     const events = [...this.buffer.values()]
     this.buffer.clear()
-    this.flush(events)
+    try {
+      this.flush(events)
+    } catch (err) {
+      // 定时器回调内上抛 = uncaughtException 崩主进程：记录并放弃本窗口事件
+      log.error('event flush failed', err)
+    }
   }
 
   dispose(): void {

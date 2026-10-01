@@ -31,7 +31,8 @@ export interface UpdateResult {
 }
 
 async function downloadTo(url: string, dest: string): Promise<void> {
-  const res = await fetch(url, { redirect: 'follow' })
+  // P2 加固：网络停滞时永久挂起会让"更新中"卡死——下载整体限时（引擎包 ~15MB 量级，5min 足够慢速网络）
+  const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(300_000) })
   if (!res.ok || !res.body) throw new Error(`下载失败（HTTP ${res.status}），请稍后重试更新`)
   const fs = await import('fs')
   // 引擎目录可能尚未创建（首次热更/全新安装），否则 createWriteStream 异步 open 失败会被吞掉

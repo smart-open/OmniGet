@@ -15,6 +15,7 @@ import {
 } from '@phosphor-icons/react'
 import type { MusicCandidate, MusicSearchResult, UiNotice } from '@shared/types'
 import { Button, Input } from '../../components/ui'
+import { toast } from '../../lib/feedback'
 
 const QUALITY_LABELS: Record<string, string> = {
   standard: '标准 128k',
@@ -88,6 +89,7 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
         return next
       })
     }
+    toast(`「${c.name}」已加入下载队列`, 'success')
   }
 
   /** F1 试听：经主进程 omniget-preview:// 协议代理的预览流（符合 CSP media-src） */
@@ -132,6 +134,7 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
         saveDir: await window.omniget.defaultSaveDir().catch(() => undefined)
       })
       setIdValue('')
+      toast('歌曲已加入下载队列', 'success')
     } catch (err) {
       setNotices((prev) =>
         [
@@ -151,6 +154,7 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
     if (lines.length === 0) return
     setBatchInfo(`入队中 0/${lines.length}`)
     let done = 0
+    let failed = 0
     for (const line of lines) {
       try {
         await window.omniget.musicDownload({
@@ -159,12 +163,27 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
           saveDir: await window.omniget.defaultSaveDir().catch(() => undefined)
         })
       } catch {
-        // 单行失败不阻断批量
+        failed++ // 单行失败不阻断批量
       }
       done++
       setBatchInfo(`入队中 ${done}/${lines.length}`)
     }
-    setBatchInfo(`已入队 ${done} 个任务，可在任务列表观察进度`)
+    if (failed > 0) {
+      setNotices((prev) =>
+        [
+          {
+            level: 'warning' as const,
+            message: `批量入队完成：成功 ${done - failed} 个，失败 ${failed} 个（无法解析或平台不支持）`
+          },
+          ...prev
+        ].slice(0, 4)
+      )
+    }
+    setBatchInfo(
+      failed > 0
+        ? `已入队 ${done - failed}/${done} 个任务，${failed} 个失败`
+        : `已入队 ${done} 个任务，可在任务列表观察进度`
+    )
     setTimeout(() => setBatchInfo(''), 4000)
   }
 
