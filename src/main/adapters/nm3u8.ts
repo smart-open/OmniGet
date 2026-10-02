@@ -58,6 +58,21 @@ function nameFromUrl(url: string): string {
   }
 }
 
+/** 审查修复：master 直播清单漏判——ENDLIST 只出现在媒体清单，master 文本永远没有。
+ * 补探测首个变体（按最高清排序前的原始顺序取第一条）的媒体清单是否含 ENDLIST；
+ * 探测失败按非直播回落（宁可不显示录制选项，也不给 VOD 误标直播） */
+async function probeMasterLive(masterUrl: string, info: ReturnType<typeof parseHlsManifest>): Promise<boolean> {
+  const first = info.variants[0]
+  if (!first) return false
+  try {
+    const abs = new URL(first.uri, masterUrl).toString()
+    const text = await fetchManifestText(abs)
+    return !/#EXT-X-ENDLIST/i.test(text)
+  } catch {
+    return false
+  }
+}
+
 export interface Nm3u8Selection {
   /** master 变体 URI（parse 返回的 formatId；空 = 自动最佳轨道） */
   formatId?: string
@@ -118,8 +133,14 @@ export class Nm3u8Adapter {
       formats.push({ formatId: '', resolution: 'auto', ext: 'ts', noWatermark: true })
     }
     log.info(`manifest parsed: kind=${info.kind}, variants=${info.variants.length}`)
-    // R7 续（backlog #20）：media 清单且无 #EXT-X-ENDLIST = 直播流
-    const live = info.kind === 'media' && !/#EXT-X-ENDLIST/i.test(text)
+    // R7 续（backlog #20）：media 清单且无 #EXT-X-ENDLIST = 直播流；
+    // master 清单经变体探测补判（probeMasterLive，失败按非直播回落）
+    const live =
+      info.kind === 'media'
+        ? !/#EXT-X-ENDLIST/i.test(text)
+        : info.kind === 'master'
+          ? await probeMasterLive(task.source, info)
+          : false
     return {
       name: sanitizeFilename(nameFromUrl(task.source)),
       formats: formats.slice(0, 40),
@@ -232,6 +253,7 @@ export class Nm3u8Adapter {
     this.userPaused.add(task.id)
     const ok = this.supervisor.pause(task.id)
     if (!ok) this.userPaused.delete(task.id)
+    if (ok) this.warnLiveInterrupted(task.id)
     return ok
   }
 
@@ -255,7 +277,25 @@ export class Nm3u8Adapter {
     this.userPaused.add(task.id)
     const paused = this.supervisor.pause(task.id)
     if (!paused) this.userPaused.delete(task.id)
+    this.warnLiveInterrupted(task.id)
     this.cleanupTaskState(task.id, true)
+  }
+
+  /** 审查修复：Windows 上进程终止实际是 taskkill /F（orchestrator/proc.ts——
+   * SIGTERM 映射 TerminateProcess），--live-real-time-merge 的 mp4 moov 不落盘 =
+   * 手动中断的直播录制大概率无法播放，且直播流无「续传补 finalize」可能。
+   * 引擎侧无法优雅终止（Node 在 Windows 无 SIGINT 投递），降级为明确告知用户 */
+  private warnLiveInterrupted(taskId: string): void {
+    if ((this.videoOpts.get(taskId)?.liveRecordMinutes ?? 0) <= 0) return
+    void import('../ipc').then(({ broadcastNotices }) =>
+      broadcastNotices([
+        {
+          level: 'warning',
+          message:
+            '直播录制已中断：混流文件可能未完成封装（无法播放）。建议等待设定的录制时长自然结束，或中断后重新录制。'
+        }
+      ])
+    )
   }
 
   /** R4-P2 同型：精确产物路径（manager 落 task_files 用） */
@@ -265,6 +305,12 @@ export class Nm3u8Adapter {
 
   setVideoOptions(taskId: string, sel: Nm3u8Selection): void {
     this.videoOpts.set(taskId, sel)
+  }
+
+  /** 审查修复：回收站恢复前清除 remove() 遗留的 userPaused 标记——恢复后 RE 正常
+   * 跑完若命中该标记会被误判为「已暂停」，完成记账/产物落库全部跳过 */
+  clearPauseMark(taskId: string): void {
+    this.userPaused.delete(taskId)
   }
 
   private cleanupTaskState(taskId: string, keepPauseMark = false): void {

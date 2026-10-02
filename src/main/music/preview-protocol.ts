@@ -216,7 +216,13 @@ export function registerPreviewHandler(): void {
         const { isInternalUrl } = await import('../net-guard')
         if (await isInternalUrl(src)) return new Response('forbidden', { status: 403 })
         const upstream = await openStream(src).catch(() => null)
-        if (!upstream?.ok || !upstream.body) return new Response('upstream error', { status: 502 })
+        if (!upstream?.ok || !upstream.body) {
+          // 审查修复：上游非 ok 时已打开的响应流必须释放（防 socket 悬挂累积）
+          await (upstream?.body as { cancel?: () => Promise<void> } | undefined)
+            ?.cancel?.()
+            .catch(() => {})
+          return new Response('upstream error', { status: 502 })
+        }
         const type = /^image\//i.test(upstream.contentType)
           ? upstream.contentType
           : 'image/jpeg'
@@ -240,6 +246,10 @@ export function registerPreviewHandler(): void {
       const rangeHeader = request.headers.get('range')
       const upstream = await openStream(mirror, rangeHeader ? { Range: rangeHeader } : undefined)
       if (!upstream.ok || !upstream.body) {
+        // 审查修复：同上，释放非 ok 上游流
+        await (upstream.body as { cancel?: () => Promise<void> } | undefined)
+          ?.cancel?.()
+          .catch(() => {})
         return new Response('upstream error', { status: 502 })
       }
       const headers = new Headers({ 'Content-Type': upstream.contentType })

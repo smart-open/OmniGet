@@ -18,7 +18,7 @@ export default function MiniWidget() {
   // 与主窗同源的事件流：速度曲线 / 计数 / 引擎健康
   useEffect(() => wireTaskEvents(), [])
 
-  // 主题跟随全局设置（悬浮窗独立加载 bundle，不会收到主窗的主题广播）
+  // 主题跟随全局设置（悬浮窗独立加载 bundle，经 IPC 桥接跟随主窗换肤）
   useEffect(() => {
     void window.omniget
       .settingsGet('ui.theme')
@@ -29,7 +29,12 @@ export default function MiniWidget() {
       if (id) applyTheme(id)
     }
     window.addEventListener('app:theme-changed', onThemeChanged)
-    return () => window.removeEventListener('app:theme-changed', onThemeChanged)
+    // 审查修复：主进程广播的主题变更经 IPC 桥接消费（此前链路断在 preload）
+    const offTheme = window.omniget.onThemeChanged((id) => applyTheme(parseStoredTheme(id)))
+    return () => {
+      window.removeEventListener('app:theme-changed', onThemeChanged)
+      offTheme()
+    }
   }, [])
 
   return (

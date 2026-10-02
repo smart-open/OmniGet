@@ -217,7 +217,11 @@ export async function fetchJson<T = unknown>(
       })
       // M5 修复：响应体大小上限——恶意/被投毒镜像可返回数百 MB JSON 撑爆主进程内存
       if (res.ok) return (await readBodyCapped(res, 8 * 1024 * 1024, url).then((s) => JSON.parse(s))) as T
-      if (!RETRY_STATUS.has(res.status)) throw new NonRetryableError(`接口异常（HTTP ${res.status}）`)
+      if (!RETRY_STATUS.has(res.status)) {
+        // 审查修复：4xx 路径同样消费响应体（防 undici socket 挂起，与 5xx 路径对称）
+        await res.body?.cancel().catch(() => {})
+        throw new NonRetryableError(`接口异常（HTTP ${res.status}）`)
+      }
       // 5xx：消费掉旧响应体再重试（防 undici socket 挂起）
       await res.body?.cancel().catch(() => {})
       if (attempt >= RETRY_TOTAL) throw new Error(`接口异常（HTTP ${res.status}）`)
@@ -295,7 +299,11 @@ export async function getText(url: string, headers?: Record<string, string>, opt
     logHttpFailure(url, err)
     throw new Error(humanizeNetworkError(err, url))
   }
-  if (!res.ok) throw new Error(`接口异常（HTTP ${res.status}）`)
+  if (!res.ok) {
+    // 审查修复：非 ok 同样释放响应体（防 socket 挂起）
+    await res.body?.cancel().catch(() => {})
+    throw new Error(`接口异常（HTTP ${res.status}）`)
+  }
   // M5：歌词等文本同样限 2MB
   return readBodyCapped(res, 2 * 1024 * 1024, url)
 }
@@ -328,19 +336,25 @@ async function readBodyCapped(
 export async function fetchToFile(
   url: string,
   dest: string,
-  opts: HttpOpts & { minBytes?: number } = {}
+  opts: HttpOpts & { minBytes?: number; maxBytes?: number } = {}
 ): Promise<number> {
-  const { signal, minBytes = 1024 } = opts
+  const { signal, minBytes = 1024, maxBytes = 512 * 1024 * 1024 } = opts
   url = rewriteUrl(url)
   const { mkdir, rename, unlink } = await import('fs/promises')
   const { dirname } = await import('path')
   const tmp = `${dest}.part`
+  // R5 修复同源：文件链路同样固定 Accept-Encoding——咪咕等 CDN 返回 brotli 时
+  // undici 不会解压，写盘的是压缩字节流 = 播放不了的「假成功」音频
+  const reqHeaders = new Headers(opts.headers ?? { 'User-Agent': 'Mozilla/5.0' })
+  if (!reqHeaders.has('accept-encoding')) {
+    reqHeaders.set('accept-encoding', 'gzip, deflate')
+  }
   try {
     // 流式下载：headers 10s / body 不限时（大文件慢镜像不被总超时掐断）；
     // 对 5xx 做与 Python Retry(total=2) 一致的重试
     let res = await undiciFetch(url, {
       method: 'GET',
-      headers: opts.headers ?? { 'User-Agent': 'Mozilla/5.0' },
+      headers: reqHeaders,
       signal,
       dispatcher: streamingDispatcherFor(url)
     })
@@ -349,7 +363,7 @@ export async function fetchToFile(
       await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS * (attempt + 1)))
       res = await undiciFetch(url, {
         method: 'GET',
-        headers: opts.headers ?? { 'User-Agent': 'Mozilla/5.0' },
+        headers: reqHeaders,
         signal,
         dispatcher: streamingDispatcherFor(url)
       })
@@ -374,6 +388,13 @@ export async function fetchToFile(
       }
       nodeStream.on('data', (chunk: Buffer) => {
         total += chunk.length
+        // 审查修复：总字节上限——被投毒/异常镜像可无限流灌满磁盘（JSON 链路有
+        // 8MB cap，文件链路此前刻意遗漏）；超限走 reject → catch 统一清理 part
+        if (total > maxBytes) {
+          cleanup()
+          reject(new Error(`下载超过 ${Math.round(maxBytes / 1024 / 1024)}MB 上限，疑似异常数据（${hostOf(url)}）`))
+          return
+        }
         if (!ws.write(chunk)) nodeStream.pause()
       })
       // drain 是可写流事件：写缓冲排空后恢复读取（挂在 nodeStream 上会永久挂起）
@@ -418,11 +439,16 @@ export async function openStream(
   body: unknown
 }> {
   url = rewriteUrl(url)
+  // R5 修复同源：试听流固定 gzip/deflate（brotli 流不解压 = 坏音频流）
+  const headers = new Headers({ 'User-Agent': 'Mozilla/5.0', ...extraHeaders })
+  if (!headers.has('accept-encoding')) {
+    headers.set('accept-encoding', 'gzip, deflate')
+  }
   let res: Awaited<ReturnType<typeof undiciFetch>>
   try {
     res = await undiciFetch(url, {
       method: 'GET',
-      headers: { 'User-Agent': 'Mozilla/5.0', ...extraHeaders },
+      headers,
       dispatcher: streamingDispatcherFor(url)
     })
   } catch (err) {

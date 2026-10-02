@@ -109,11 +109,20 @@ export const useTasks = create<TasksState>()((set, get) => ({
     const tasks = new Map(get().tasks)
     const stageById = { ...get().stageById }
     let speed = 0
+    let removed = false
     // M10 修复：本地未知的任务事件（新建任务的首批事件 / 跨过滤器列表）不做
     // 无中生有的灰记录（缺字段会渲染出残行），标记后按 400ms 防抖重载当前视图
     // 补全——此前直接 continue 且不重载，音乐下载后列表不刷新
     let unknownTask = false
     for (const e of events) {
+      // 审查修复：删除事件从列表移除条目——否则悬浮窗等只靠事件流刷新的视图
+      // 在主窗口删除任务后计数虚高（无自愈路径）
+      if (e.removed) {
+        tasks.delete(e.taskId)
+        delete stageById[e.taskId]
+        removed = true
+        continue
+      }
       const prev = tasks.get(e.taskId)
       if (!prev) {
         unknownTask = true
@@ -150,6 +159,7 @@ export const useTasks = create<TasksState>()((set, get) => ({
     }
     const history = [...get().speedHistory, speed].slice(-SPEED_HISTORY_MAX)
     set({ tasks, globalSpeedBps: speed, speedHistory: history, stageById })
+    if (removed) void get().refreshCounts()
   },
 
   select: (id) => set({ selectedTaskId: id }),

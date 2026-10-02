@@ -400,8 +400,15 @@ export class PlatformEngine {
   }
 
   /** F1 试听直链（网易云镜像，engine.previewUrl 调用）。
-   *  此前只试 haitangw 单镜像——该域不可达时试听必败；改为四镜像顺序回退。 */
+   *  此前只试 haitangw 单镜像——该域不可达时试听必败；改为四镜像顺序回退。
+   *  审查修复：quality 白名单透传的是应用层口径（standard/high/lossless），而镜像
+   *  level 需网易云有效值（standard/higher/exhigh/lossless）——'high' 直接透传会让
+   *  四镜像全部失败，这里按 QUALITY_MAP 同口径映射 */
   async previewNetease(sid: string, quality = 'standard'): Promise<string> {
+    const q: Quality = (['standard', 'high', 'lossless'] as const).includes(quality as Quality)
+      ? (quality as Quality)
+      : 'standard'
+    const level = QUALITY_MAP.netease?.[q] ?? 'standard'
     const fetchers: Array<[string, (id: string, lvl: string) => Promise<string>]> = [
       ['cenguigui', (id, lvl) => this.neteaseUrlCenguigui(id, lvl)],
       ['haitangw', (id, lvl) => this.neteaseUrlHaitangw(id, lvl)],
@@ -410,7 +417,7 @@ export class PlatformEngine {
     ]
     for (const [name, fetcher] of fetchers) {
       try {
-        const url = await fetcher(sid, quality)
+        const url = await fetcher(sid, level)
         // H4：试听直链同样过白名单（engine.previewNetease 有二次校验，此处提前拦截）
         if (url && trustedAudioUrl(url)) return url
       } catch (err) {

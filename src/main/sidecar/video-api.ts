@@ -76,7 +76,11 @@ export async function probeVideoSidecar(raw: string): Promise<SidecarProbeResult
       headers: { accept: 'application/json' },
       signal: AbortSignal.timeout(8000)
     })
-    if (!res.ok) return { ok: false, detail: `服务响应异常（HTTP ${res.status}）` }
+    if (!res.ok) {
+      // 审查修复：非 ok 响应体同样释放（防 socket 悬挂）
+      await res.body?.cancel().catch(() => {})
+      return { ok: false, detail: `服务响应异常（HTTP ${res.status}）` }
+    }
     // Evil0ctal 实例根路径返回 JSON 应用信息；识别到即明确提示，非 JSON（反代网页）不判失败
     let detail = `服务可达（HTTP ${res.status}）`
     try {

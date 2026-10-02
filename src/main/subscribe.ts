@@ -67,6 +67,9 @@ export function addSubscription(input: SubscriptionAddInput): Subscription {
   const url = String(input.url ?? '').trim()
   if (!name) throw new Error('订阅名称不能为空')
   if (!/^https?:\/\//i.test(url)) throw new Error('订阅地址必须以 http:// 或 https:// 开头')
+  // 审查修复：同一 URL 可重复添加——列表出现重复订阅、检查与通知翻倍
+  const dup = listSubscriptions().find((s) => s.url === url)
+  if (dup) throw new Error(`该地址已订阅为「${dup.name}」`)
   const sub: Subscription = {
     id: uuidv7(),
     name,
@@ -151,26 +154,34 @@ export async function checkSubscription(
 }
 
 async function checkById(id: string, host: SubscriptionHost): Promise<{ added: number }> {
-  const sub = listSubscriptions().find((s) => s.id === id)
-  if (!sub) throw new Error('订阅不存在或已删除')
-  let added = 0
-  let error: string | null = null
+  // 审查修复：并发防护——定时 tick 与手动「立即检查」重叠时，双方都在对方
+  // addArchiveKey 之前通过 isArchived，同一 URL 会建两个任务
+  if (inflightChecks.has(id)) return { added: 0 }
+  inflightChecks.add(id)
   try {
-    added = await checkSubscription(sub, host)
-  } catch (err) {
-    error = err instanceof Error ? err.message : String(err)
+    const sub = listSubscriptions().find((s) => s.id === id)
+    if (!sub) throw new Error('订阅不存在或已删除')
+    let added = 0
+    let error: string | null = null
+    try {
+      added = await checkSubscription(sub, host)
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err)
+    }
+    getDb()
+      .prepare(
+        'UPDATE subscriptions SET last_checked_at = ?, last_error = ?, added_total = added_total + ? WHERE id = ?'
+      )
+      .run(Date.now(), error, added, id)
+    if (added > 0) {
+      broadcastNotices([
+        { level: 'info', message: `订阅「${sub.name}」新增 ${added} 个内容，已自动入队` }
+      ])
+    }
+    return { added }
+  } finally {
+    inflightChecks.delete(id)
   }
-  getDb()
-    .prepare(
-      'UPDATE subscriptions SET last_checked_at = ?, last_error = ?, added_total = added_total + ? WHERE id = ?'
-    )
-    .run(Date.now(), error, added, id)
-  if (added > 0) {
-    broadcastNotices([
-      { level: 'info', message: `订阅「${sub.name}」新增 ${added} 个内容，已自动入队` }
-    ])
-  }
-  return { added }
 }
 
 export async function checkSubscriptionNow(
@@ -183,19 +194,30 @@ export async function checkSubscriptionNow(
 // ── 定时调度 ────────────────────────────────────────────────────────
 
 let timer: NodeJS.Timeout | null = null
+/** 审查修复：并发防护——在途检查的订阅 id 集合 + tick 重入标志 */
+const inflightChecks = new Set<string>()
+let tickRunning = false
 
 async function runDueChecks(host: SubscriptionHost): Promise<void> {
-  const now = Date.now()
-  for (const sub of listSubscriptions()) {
-    if (sub.lastCheckedAt !== null && now - sub.lastCheckedAt < sub.intervalMin * 60_000) {
-      continue
+  // 审查修复：单源 flat-parse 最长 120s × N 源串行，检查期间完全可能超过 10min tick
+  // ——tick 重叠会重复入队；上一次未跑完则本轮整体跳过
+  if (tickRunning) return
+  tickRunning = true
+  try {
+    const now = Date.now()
+    for (const sub of listSubscriptions()) {
+      if (sub.lastCheckedAt !== null && now - sub.lastCheckedAt < sub.intervalMin * 60_000) {
+        continue
+      }
+      try {
+        const r = await checkById(sub.id, host)
+        log.info(`subscription checked: ${sub.name}, +${r.added}`)
+      } catch (err) {
+        log.warn(`subscription check failed: ${sub.name}`, err)
+      }
     }
-    try {
-      const r = await checkById(sub.id, host)
-      log.info(`subscription checked: ${sub.name}, +${r.added}`)
-    } catch (err) {
-      log.warn(`subscription check failed: ${sub.name}`, err)
-    }
+  } finally {
+    tickRunning = false
   }
 }
 

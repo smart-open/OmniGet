@@ -143,7 +143,12 @@ export default function App() {
       if (id) setTheme(id)
     }
     window.addEventListener('app:theme-changed', onThemeChanged)
-    return () => window.removeEventListener('app:theme-changed', onThemeChanged)
+    // 审查修复：主进程广播的主题变更（含悬浮窗发起的）经 IPC 桥接同步
+    const offTheme = window.omniget.onThemeChanged((id) => setTheme(parseStoredTheme(id)))
+    return () => {
+      window.removeEventListener('app:theme-changed', onThemeChanged)
+      offTheme()
+    }
   }, [])
   useEffect(() => watchSystemTheme(theme, () => {}), [theme])
   const changeTheme = (id: ThemeId): void => {

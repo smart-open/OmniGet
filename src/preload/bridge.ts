@@ -18,7 +18,6 @@ import {
 
 const api: OmniGetBridge = {
   createTask: (input: CreateTaskInput) => ipcRenderer.invoke(IPC_CHANNELS.taskCreate, input),
-  parseFile: (path: string) => ipcRenderer.invoke(IPC_CHANNELS.taskParseFile, path),
   confirmSelection: (input: ConfirmSelectionInput) =>
     ipcRenderer.invoke(IPC_CHANNELS.taskConfirmSelection, input),
   controlTask: (input: ControlTaskInput) => ipcRenderer.invoke(IPC_CHANNELS.taskControl, input),
@@ -98,6 +97,13 @@ const api: OmniGetBridge = {
     const wrapped = (_e: unknown, health: EngineHealth[]): void => listener(health)
     ipcRenderer.on(IPC_CHANNELS.eventEngines, wrapped)
     return () => ipcRenderer.removeListener(IPC_CHANNELS.eventEngines, wrapped)
+  },
+  // 审查修复：主题跨窗口热同步此前断在 preload——主进程 app:theme-changed IPC
+  // 消息无人消费，迷你悬浮窗改主题后永不换肤
+  onThemeChanged: (listener: (theme: string) => void) => {
+    const wrapped = (_e: unknown, theme: string): void => listener(theme)
+    ipcRenderer.on('app:theme-changed', wrapped)
+    return () => ipcRenderer.removeListener('app:theme-changed', wrapped)
   },
   onUiAction: (
     listener: (action: { action: 'new-task'; payload?: string }) => void

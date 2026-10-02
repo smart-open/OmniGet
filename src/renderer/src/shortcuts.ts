@@ -32,12 +32,14 @@ export const SHORTCUT_LABELS: Record<ShortcutAction, string> = {
   'new-task': '新建任务',
   search: '搜索任务',
   help: '快捷键帮助',
+  // 审查修复：与 App.tsx NAV_GROUPS 扁平顺序对齐（R6 插入「处理失败」视图后
+  // 文案错位一格，音乐分组从此无快捷键可达）
   group1: '切换到 全部',
   group2: '切换到 处理中',
-  group3: '切换到 处理完成',
-  group4: '切换到 种子磁力',
-  group5: '切换到 视频',
-  group6: '切换到 音乐',
+  group3: '切换到 处理失败',
+  group4: '切换到 处理完成',
+  group5: '切换到 种子磁力',
+  group6: '切换到 视频',
   'pause-toggle': '暂停 / 继续选中',
   trash: '移入回收站（选中）'
 }

@@ -1,7 +1,7 @@
 // IPC handler 注册表（T0-3 + M1 接入真实编排，§6.1 白名单）
 
-import { app, ipcMain, BrowserWindow, shell } from 'electron'
-import { stat, realpath, writeFile, readFile } from 'fs/promises'
+import { app, ipcMain, BrowserWindow, nativeTheme, shell } from 'electron'
+import { stat, writeFile, readFile } from 'fs/promises'
 import { isAbsolute, basename } from 'path'
 import {
   IPC_CHANNELS,
@@ -20,7 +20,6 @@ import { validateSaveDir } from './save-dir'
 import { createLogger } from './logger'
 import type { TaskManager } from './task/manager'
 import type { MusicAdapter } from './music/adapter'
-import { parseTorrentFile } from './torrent/parse'
 import {
   addSubscription,
   checkSubscriptionNow,
@@ -122,93 +121,6 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.taskCreate, async (_e, input: CreateTaskInput) => {
     if (!taskManager) throw new Error('任务系统尚未就绪，请稍候')
     return taskManager.createTask(input)
-  })
-
-  ipcMain.handle(IPC_CHANNELS.taskParseFile, async (_e, path: string) => {
-    // 本地 .torrent 解析：零引擎依赖即时出文件树（§4.2）。
-    // 收口：仅允许 .torrent 扩展 + 拒绝系统/敏感目录（防渲染层被攻破后的任意文件探测）。
-    // P2 修复：此前把整个 USERPROFILE 加入黑名单——Windows 用户下载的 .torrent
-    // 几乎都在 %USERPROFILE%\Downloads，主用例恒失败。改为只拦系统目录与高敏子目录。
-    const p = String(path ?? '').trim()
-    if (!/\.torrent$/i.test(p)) throw new Error('仅支持解析 .torrent 文件')
-    // M1 加固：只收绝对路径；拒绝 UNC——\\server\share 会触发 SMB 出站认证（NTLM 凭据面）
-    if (!isAbsolute(p)) throw new Error('仅支持解析本机绝对路径的 .torrent 文件')
-    if (/^\/\//.test(p.replace(/\\/g, '/'))) throw new Error('不支持解析网络路径中的文件')
-    // M1 加固：大小预检——readFileSync + bencode 全量同步解码跑在主进程事件循环上，
-    // 被攻破的渲染层传大文件会卡死 UI 并撑爆内存（.torrent 实际普遍 <5MB）
-    const sizeErr: string | null = await stat(p)
-      .then((info) =>
-        info.size > 64 * 1024 * 1024 ? '种子文件超过 64MB，疑似非种子文件，已拒绝解析' : null
-      )
-      .catch(() => null) // stat 失败（不存在/权限）：放行由后续读取自然报错
-    if (sizeErr) throw new Error(sizeErr)
-    const profile = (process.env.USERPROFILE ?? process.env.HOME ?? '').replace(/\\/g, '/')
-    const blocked = [
-      process.env.SystemRoot ?? 'C:\\Windows',
-      process.env.WINDIR ?? 'C:\\Windows',
-      'C:\\Windows',
-      'C:\\Program Files',
-      'C:\\Program Files (x86)',
-      '/usr',
-      '/etc',
-      '/bin',
-      '/sbin',
-      '/boot',
-      '/proc',
-      '/sys',
-      '/dev',
-      process.env.TEMP ?? '',
-      process.env.TMP ?? '',
-      // 高敏配置/凭据目录（不整拦用户主目录——Downloads/Desktop/Documents 必须可用）
-      profile ? `${profile}/.ssh` : '',
-      profile ? `${profile}/.gnupg` : '',
-      profile ? `${profile}/.aws` : '',
-      profile ? `${profile}/.kube` : '',
-      profile ? `${profile}/AppData/Roaming` : '',
-      profile ? `${profile}/AppData/Local/Temp` : '',
-      profile ? `${profile}/Library/Keychains` : ''
-    ]
-      .filter(Boolean)
-      .map((d) => d.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase())
-    const norm = p.replace(/\\/g, '/').toLowerCase()
-    // realpath 解析：symlink/junction 与 Windows 8.3 短名可绕过字面路径黑名单，
-    // 先解析真实路径再用同一黑名单校验（解析失败则按原路径继续，文件读取时会自然报错）
-    let realNorm = norm
-    try {
-      const real = await realpath(p)
-      realNorm = real.replace(/\\/g, '/').toLowerCase()
-    } catch {
-      // 保持原路径口径
-    }
-    // 目录本身与子路径一并拒绝（防 C:\Windows 本体绕过）
-    if (
-      blocked.some((d) => norm === d || norm.startsWith(d + '/')) ||
-      blocked.some((d) => realNorm === d || realNorm.startsWith(d + '/'))
-    ) {
-      throw new Error('不允许解析系统或敏感目录中的文件')
-    }
-    let info
-    try {
-      info = parseTorrentFile(p)
-    } catch (err) {
-      // R4-P2：Node 原生 ENOENT/EACCES 英文错误（含本地路径回显）不得直透渲染层
-      const code = (err as NodeJS.ErrnoException | null)?.code
-      if (code === 'ENOENT') {
-        throw new Error('种子文件不存在或已被移动，请重新选择 .torrent 文件')
-      }
-      if (code === 'EACCES') {
-        throw new Error('没有权限读取该种子文件，请检查文件权限后重试')
-      }
-      throw new Error('种子文件解析失败：文件可能已损坏。请重新获取 .torrent 文件后重试')
-    }
-    return {
-      kind: 'torrent',
-      name: info.name,
-      totalBytes: info.files.reduce((s, f) => s + f.size, 0),
-      files: info.files,
-      infohash: info.infohash,
-      magnet: info.magnet
-    }
   })
 
   ipcMain.handle(IPC_CHANNELS.taskConfirmSelection, async (_e, input: ConfirmSelectionInput) => {
@@ -551,6 +463,10 @@ export function registerIpcHandlers(): void {
     // R7 续（backlog #19/#22）：下载行为开关
     'download.dedupe',
     'download.ytdlpAria2c',
+    // 审查修复：BT 网络开关此前漏配白名单——设置页「保存」100% 被
+    // 「不可修改」拒绝，BT 加速功能永久无法启用（两键均为主进程消费的布尔开关）
+    'bt.upnp',
+    'bt.forceEncryption',
     // R7 续（backlog #11）：自托管短视频解析服务地址（http 允许——常部署在局域网/本机）
     'sidecar.videoApiUrl'
   ])
@@ -606,6 +522,22 @@ export function registerIpcHandlers(): void {
       }
     }
     setSetting(k, JSON.stringify(value ?? null))
+    // 审查修复：主题跨窗口热同步真正闭环——syncTheme 无渲染层调用方，ui:theme
+    // 永不触发；设置页改主题走 settingsSet('ui.theme')，在此处广播到所有窗口
+    //（含迷你悬浮窗）并同步窗口底色（frameless 圆角外壳外的一圈）
+    if (k === 'ui.theme' && typeof value === 'string') {
+      const light =
+        value === 'light' ? true : value === 'dark' ? false : !nativeTheme.shouldUseDarkColors
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (win.isDestroyed()) continue
+        win.webContents.send('app:theme-changed', value)
+        try {
+          win.setBackgroundColor(light ? '#F7F8F9' : '#0B0C0E')
+        } catch {
+          // 窗口销毁竞态：忽略
+        }
+      }
+    }
   })
 
   // 窗口底色随主题同步（圆角外壳外的一圈底色）

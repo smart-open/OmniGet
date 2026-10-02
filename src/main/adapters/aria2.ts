@@ -592,23 +592,28 @@ export class Aria2Adapter implements EngineAdapter {
     await this.rpc().call('changeOption', gid, opts)
   }
 
-  async pause(task: Task): Promise<void> {
-    if (!task.engineGid) return
+  /** 返回值（审查修复：gid 终结语义修正）：
+   *  - 'ok'：引擎侧已置为暂停
+   *  - 'complete'/'error'：gid 实际已终结——调用方必须按终态处理而非误标 paused
+   *  - 'removed'：gid 已被移除（并发删除窗口），由调用方自行复核 */
+  async pause(task: Task): Promise<'ok' | 'complete' | 'error' | 'removed'> {
+    if (!task.engineGid) return 'ok'
     try {
       await this.rpc().call('pause', task.engineGid)
+      return 'ok'
     } catch {
       // aria2 在文件预分配、BT 初始化等关键段会拒绝暂停（GID#xxx cannot be paused now）
       // → 降级 forcePause（跳过 Tracker 注销等耗时动作，立即置为暂停态）
       try {
         await this.rpc().call('forcePause', task.engineGid)
+        return 'ok'
       } catch (err2) {
-        // gid 已终结（complete/error/removed）→ 视为已暂停，真实状态由轮询对齐
         const st = (await this.rpc()
           .call('tellStatus', task.engineGid)
           .catch(() => null)) as Aria2Status | null
         if (st && ['complete', 'error', 'removed'].includes(st.status)) {
           log.warn(`pause skipped, gid already ${st.status}: ${task.engineGid}`)
-          return
+          return st.status as 'complete' | 'error' | 'removed'
         }
         throw err2
       }

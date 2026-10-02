@@ -109,17 +109,21 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
         quality: rowQuality[key] ?? quality,
         saveDir: await window.omniget.defaultSaveDir().catch(() => undefined)
       })
+      if (!batchAlive.current) return // 审查修复：await 期间切页后不再 setState
       // P1 修复：成功提示必须在 await 成功之后——此前在 try/catch 之后无条件执行，
       // 失败时同时出现黄条 + 绿色"已加入队列"假成功
       toast(`「${c.name}」已加入下载队列`, 'success')
     } catch (err) {
+      if (!batchAlive.current) return
       toastError('加入下载队列', err)
     } finally {
-      setPosting((prev) => {
-        const next = new Set(prev)
-        next.delete(key)
-        return next
-      })
+      if (batchAlive.current) {
+        setPosting((prev) => {
+          const next = new Set(prev)
+          next.delete(key)
+          return next
+        })
+      }
     }
   }
 
@@ -195,12 +199,14 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
         quality,
         saveDir: await window.omniget.defaultSaveDir().catch(() => undefined)
       })
+      if (!batchAlive.current) return // 审查修复：await 期间切页后不再 setState
       setIdValue('')
       toast('歌曲已加入下载队列', 'success')
     } catch (err) {
+      if (!batchAlive.current) return
       toastError('ID 精确下载', err)
     } finally {
-      setIdBusy(false)
+      if (batchAlive.current) setIdBusy(false)
     }
   }
 

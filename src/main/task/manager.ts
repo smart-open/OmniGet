@@ -32,7 +32,7 @@ import { toolbox } from '../toolbox'
 import { samplePeakSpeed, recordCompletion, reverseCompletion } from '../stats'
 import { recordPlatformOk, recordPlatformDegraded, recordPlatformFailure } from '../health'
 import { getSettingParsed } from '../db'
-import { addArchiveKey, isArchived } from './archive'
+import { addArchiveKey, isArchived, removeArchiveKey } from './archive'
 import { sanitizeFilename } from '@shared/sanitize'
 import {
   getVideoSidecarBase,
@@ -173,11 +173,19 @@ export class TaskManager {
         // 审查修复：sidecar 改道任务的 task.source 已被换成时效直链——必须登记
         // 原分享链接（params.originUrl），否则同链接重复下载
         if (task.type === 'video' && !this.isPlaylistTask(task)) {
-          addArchiveKey(task.source)
+          // 审查修复：sidecar 改道任务的 task.source 已换成时效直链——登记原分享
+          // 链接（params.originUrl），否则与创建期预检键不一致、去重失效
+          addArchiveKey(readTaskOriginUrl(task) ?? task.source)
         } else if (task.type === 'http') {
           const origin = readTaskOriginUrl(task)
           if (origin) addArchiveKey(origin)
         }
+      }
+      if (e.status === 'failed' && task.type === 'video' && !this.isPlaylistTask(task)) {
+        // 审查修复：订阅侧「入队即登记档案」，下载失败必须回滚——否则失败条目被
+        // 永久拉黑（订阅追更从此跳过该视频，唯一解法是手删 download.archive）
+        removeArchiveKey(readTaskOriginUrl(task) ?? task.source)
+        removeArchiveKey(task.source)
       }
       // P1 加固：yt-dlp 单视频完成时产物落 task_files（此前 video/music 无 task_files，
       // 回收站「删除（含文件）」对这两类任务一个文件都不删）
@@ -307,7 +315,7 @@ export class TaskManager {
           const message = err instanceof Error ? err.message : String(err)
           // P3 加固：await 期间状态可能已被轮询改写（如用户刚暂停）——重读复核再转移
           const fresh = getTask(taskId) as TaskExt | null
-          if (!fresh) return
+          if (!fresh || isTrashed(fresh.id)) return
           // M1 修复：用户刚暂停（queued→paused 合法）后，在途引擎调用的迟到报错
           // 不得把 paused 覆写成 failed——保持暂停态，仅记录错误供展示
           if (fresh.status === 'paused') {
@@ -402,6 +410,19 @@ export class TaskManager {
       return {
         kind: 'failed',
         error: '该内容已下载过（已下载去重）。如需重新下载，请在设置 → 队列与归档 中关闭去重。'
+      }
+    }
+
+    // 审查修复：在途去重——同一视频链接进行中（解析/待确认/排队/运行）时拒绝重复创建。
+    // 此前无互斥：对话框、Web 面板、订阅多入口可对同一 URL 双开 yt-dlp 并发写同名产物
+    //（NewTaskDialog 的 submitting 只防单对话框双击）
+    if (s.type === 'video') {
+      const dupSource = s.source
+      const dup = listTasks({ status: ['parsing', 'awaiting', 'queued', 'running'] }).find(
+        (t) => t.type === 'video' && (t.source === dupSource || readTaskOriginUrl(t) === dupSource)
+      )
+      if (dup) {
+        return { kind: 'failed', error: '相同链接的任务正在进行中，请勿重复创建' }
       }
     }
 
@@ -716,11 +737,10 @@ export class TaskManager {
       // P1 修复：selection 必须经 selectionFor() 取（indexes+paths 双通道）——
       // 此前只传 paths，.torrent 任务的 select-file 永不注入 → aria2 全量重下。
       log.info(`re-add completed task ${task.id} for incremental download`)
-      // L-3：撤销原完成记账，保持增量 daily_stats 与全量重算口径一致
+      // L-3：撤销原完成记账，保持增量 daily_stats 与全量重算口径一致。
+      // 审查修复：回撤延后到 re-add 真正启动成功——若在启动前回撤而启动失败
+      // （同名冲突/aria2 拒绝），任务落 failed 后统计被永久吞掉（单向漂移）
       const prevCompletedAt = getTaskCompletedAt(task.id)
-      if (prevCompletedAt) {
-        reverseCompletion(prevCompletedAt, task.totalBytes ?? 0)
-      }
       updateTaskFields(task.id, {
         status: 'queued',
         threads: input.threads,
@@ -735,6 +755,9 @@ export class TaskManager {
             ...this.selectionFor(cur),
             allowOverwrite: true
           })
+          if (prevCompletedAt) {
+            reverseCompletion(prevCompletedAt, task.totalBytes ?? 0)
+          }
           updateTaskFields(cur.id, { engineGid: gid })
         })
       )
@@ -765,8 +788,10 @@ export class TaskManager {
       )
       updateTaskFields(task.id, { engineGid: gid, threads: input.threads })
     } else if (task.engine === 'nm3u8') {
-      // R7 续（backlog #17）：HLS 任务 → N_m3u8DL-RE spawn（formatId = 变体 URI）
-      if (input.video) this.nm3u8?.setVideoOptions(task.id, { formatId: input.video.formatId })
+      // R7 续（backlog #17）：HLS 任务 → N_m3u8DL-RE spawn（formatId = 变体 URI）。
+      // 审查修复：必须整对象透传 input.video——此前白名单只取 formatId，
+      // liveRecordMinutes 被丢弃，用户设置的直播录制时长永不生效（RE 无限录制）
+      if (input.video) this.nm3u8?.setVideoOptions(task.id, input.video)
       const gid = await this.nm3u8!.start(task)
       updateTaskFields(task.id, { engineGid: gid, threads: input.threads })
     } else if (task.pendingGid) {
@@ -820,10 +845,29 @@ export class TaskManager {
             // 仍转移 paused（UI 显示已暂停、进程实际继续跑）。显式拒绝并给出路
             throw new Error('工具任务不支持暂停。如需中断请移除任务（可保留文件），稍后重新提交。')
           } else {
-            await this.aria2.pause(task).catch(() => {
+            const outcome = await this.aria2.pause(task).catch(() => null)
+            if (outcome === null) {
               // 极端竞态：forcePause 仍被拒（如刚重启 aria2 会话丢失）→ 不转状态，抛友好提示
               throw new Error('任务正忙，无法立即暂停，请稍候重试')
-            })
+            }
+            if (outcome === 'complete' || outcome === 'error') {
+              // 审查修复：gid 终结语义修正——complete ≠ paused。此前会把刚下载完的
+              // 任务标成「已暂停」。改走引擎事件流转移终态（补齐完成记账/去重登记/
+              // 产物落库；直接 transition 会绕过 applyEngineEvents 的全部收尾）
+              const fresh = getTask(input.taskId) as TaskExt | null
+              if (fresh && (fresh.status === 'running' || fresh.status === 'queued')) {
+                this.merger.push(
+                  outcome === 'complete'
+                    ? { taskId: fresh.id, status: 'completed' }
+                    : {
+                        taskId: fresh.id,
+                        status: 'failed',
+                        error: '引擎侧任务已失败（aria2 终止）。请点击重试。'
+                      }
+                )
+              }
+              return
+            }
           }
           // P2 加固：await 期间轮询事件可能已把任务转移到 completed/failed——
           // 用旧快照 transition 会把 DB 状态回写覆盖，必须重读复核
@@ -915,6 +959,9 @@ export class TaskManager {
         // P3 修复：删除运行中任务时速度快照表此前只增不减（removed→failed 事件
         // 被 isTrashed 守卫拦截，currentEvents.delete 永不执行）
         this.currentEvents.delete(task.id)
+        // 审查修复：广播删除事件——否则悬浮窗等只靠事件流刷新的视图计数虚高
+        //（主窗口靠调用点显式 load 自愈，MiniWidget 没有这条自愈路径）
+        this.pushEvent({ taskId: task.id, removed: true })
         // R2：移除释放并发槽
         this.pumpStarts()
         break
@@ -972,6 +1019,10 @@ export class TaskManager {
       // R4-P2：seeding 纳入归位（与 recoverOnStartup 口径一致）——移入回收站时
       // 引擎 gid 已销毁，漏掉会让任务永久显示「做种中」且无重试入口
       updateTaskFields(taskId, { status: 'queued', engineGid: null })
+      // 审查修复：nm3u8.remove() 遗留的 userPaused 标记在此处（dropTask 使 exit
+      // 回调不再触发）永远无人清除——恢复后 RE 正常跑完会被误判为「已暂停」，
+      // 完成记账/产物落库全部跳过，任务永久卡在暂停态
+      if (task.engine === 'nm3u8') this.nm3u8?.clearPauseMark(taskId)
       this.pushEvent({ taskId, status: 'queued' })
       if (task.engine === 'aria2' || task.engine === 'ytdlp' || task.engine === 'nm3u8') {
         void this.recoverEngineTasks()
@@ -1007,6 +1058,14 @@ export class TaskManager {
             error: makeError('INTERNAL', {
               message: '解析被应用重启中断。请点击重试重新解析。'
             }).message
+          })
+        } else if (t.engine === 'tool' && ['queued', 'running'].includes(t.status)) {
+          // 审查修复：tool 引擎不在 recoverEngineTasks 泵名单（仅 aria2/ytdlp/nm3u8），
+          // 归位 queued 后无人派发 = 永久卡死且无暂停/重试出口；按 failed 落定给重试入口
+          //（与 tool 的「running 中断不续传」语义一致）
+          updateTaskFields(t.id, {
+            status: 'failed',
+            error: '工具任务被应用重启中断。请点击重试重新执行。'
           })
         } else if (['queued', 'running', 'paused', 'verifying', 'seeding'].includes(t.status)) {
           updateTaskFields(t.id, { status: 'queued', engineGid: null })
@@ -1061,8 +1120,13 @@ export class TaskManager {
   /** F5：单任务失败重试（failed → queued → re-add），不影响其他任务 */
   async retryTask(taskId: string): Promise<void> {
     const task = getTask(taskId) as TaskExt | null
-    if (!task || task.status !== 'failed') return
+    if (!task || task.status !== 'failed' || isTrashed(taskId)) return
     this.transition(task, 'queued')
+    // 审查修复：失败任务的旧 engineGid 仍指向已终结的引擎条目——重试置回 queued 后
+    // 1s 内的轮询会拿旧 gid 回一帧 failed 把任务打回 failed（并发槽满时 pumpStarts
+    // 直接放弃 = 重试毫无效果且无反馈）。重试必须换新句柄并丢弃旧事件流
+    updateTaskFields(taskId, { engineGid: null })
+    this.merger.drop(taskId)
     if (task.engine !== 'aria2' && task.engine !== 'ytdlp' && task.engine !== 'nm3u8') {
       this.pushEvent({ taskId, status: 'queued' })
       // 音乐/工具失败重试：立即重泵对应队列（否则任务卡 queued 直到引擎重启）
@@ -1253,7 +1317,7 @@ export class TaskManager {
   private pushEvent(e: TaskEvent): void {
     // P2 加固：终态事件不进入速度快照表——music/tool 直推路径此前只增不减，
     // 长驻会话 Map 无界增长（违背本表"防无界增长"的设计初衷）
-    if (e.status !== 'completed' && e.status !== 'failed') {
+    if (e.status !== 'completed' && e.status !== 'failed' && !e.removed) {
       this.currentEvents.set(e.taskId, e)
     }
     broadcastTasks([e])
@@ -1342,7 +1406,7 @@ export class TaskManager {
       song = input.q
     }
     const display = input.neteaseId
-      ? `${artist || '歌曲'} - ${song || `ID ${input.neteaseId}`}（ID 精确下载）`
+      ? `${artist && song ? `${artist} - ${song}` : artist || song || `ID ${input.neteaseId}`}（ID 精确下载）`
       : artist
         ? `${artist} - ${song}`
         : song
@@ -1367,6 +1431,14 @@ export class TaskManager {
       speedBps: 0,
       threads: 0,
       quality: input.quality,
+      // 审查修复：真实 artist/song 持久化进 params——此前引擎侧从展示名反解析，
+      // 「（ID 精确下载）」后缀与占位词会污染产物文件名与库记录，且
+      // engine.getNeteaseDetail 的补全永远不生效
+      params: JSON.stringify({
+        musicArtist: artist || undefined,
+        musicSong: song || undefined,
+        neteaseId: input.neteaseId
+      }),
       createdAt: Date.now()
     }
     insertTask(task)
@@ -1408,19 +1480,33 @@ export class TaskManager {
     try {
       let req: Parameters<MusicAdapter['download']>[0]
       if (task.source.startsWith('id:')) {
-        // F1：ID 精确下载（§4.4 兜底通道）
+        // F1：ID 精确下载（§4.4 兜底通道）。
+        // 审查修复：artist/song 改从 params 读真实值（缺省时 engine.getNeteaseDetail
+        // 补全）——此前从展示名反解析，「（ID 精确下载）」后缀/占位词污染产物名
+        const p = parseParamsJson(task.params)
         req = {
           neteaseId: task.source.slice(3),
-          artist: task.name.includes(' - ') ? task.name.split(' - ')[0] : undefined,
-          song: task.name.includes(' - ') ? task.name.split(' - ').slice(1).join(' - ') : undefined,
+          artist: typeof p.musicArtist === 'string' && p.musicArtist ? p.musicArtist : undefined,
+          song: typeof p.musicSong === 'string' && p.musicSong ? p.musicSong : undefined,
           quality: task.quality ?? 'high',
           saveDir: task.saveDir
         }
       } else {
+        const p = parseParamsJson(task.params)
         const dash = task.source.indexOf(' - ')
         req = {
-          artist: dash > 0 ? task.source.slice(0, dash) : undefined,
-          song: dash > 0 ? task.source.slice(dash + 3) : task.source,
+          artist:
+            typeof p.musicArtist === 'string' && p.musicArtist
+              ? p.musicArtist
+              : dash > 0
+                ? task.source.slice(0, dash)
+                : undefined,
+          song:
+            typeof p.musicSong === 'string' && p.musicSong
+              ? p.musicSong
+              : dash > 0
+                ? task.source.slice(dash + 3)
+                : task.source,
           quality: task.quality ?? 'high',
           saveDir: task.saveDir
         }

@@ -250,6 +250,8 @@ export interface TaskDiagnosis {
 export interface TaskEvent {
   taskId: string
   status?: TaskStatus
+  /** 审查修复：任务已删除（软删/物理删）——渲染层据此从列表移除条目并刷新计数 */
+  removed?: boolean
   downloadedBytes?: number
   totalBytes?: number
   speedBps?: number
@@ -398,7 +400,6 @@ export interface AdapterScriptInfo {
 export interface OmniGetBridge {
   // task
   createTask(input: CreateTaskInput): Promise<CreateTaskResult>
-  parseFile(path: string): Promise<ParsedResource>
   confirmSelection(input: ConfirmSelectionInput): Promise<void>
   controlTask(input: ControlTaskInput): Promise<void>
   retryTask(taskId: string): Promise<void>
@@ -430,6 +431,8 @@ export interface OmniGetBridge {
   readonly platform: NodeJS.Platform
   /** 降级黄条等通知（§4.4 降级告警） */
   onNotices(listener: (notices: UiNotice[]) => void): () => void
+  /** 审查修复：主题跨窗口热同步（含迷你悬浮窗跟随主窗换肤） */
+  onThemeChanged(listener: (theme: string) => void): () => void
   // engine
   engineUpdate(engine: 'ytdlp'): Promise<EngineUpdateResult>
   // tool
@@ -504,7 +507,6 @@ export interface OmniGetBridge {
 // IPC 通道白名单（主进程 ipc.ts 据此注册 handler，preload 据此暴露）
 export const IPC_CHANNELS = {
   taskCreate: 'task:create',
-  taskParseFile: 'task:parseFile',
   taskConfirmSelection: 'task:confirmSelection',
   taskControl: 'task:control',
   taskRetry: 'task:retry',

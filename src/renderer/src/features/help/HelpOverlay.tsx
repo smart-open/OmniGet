@@ -12,10 +12,11 @@ const ACTIONS: Array<{ action: ShortcutAction; desc: string; fallback: string }>
   { action: 'help', desc: '快捷键帮助', fallback: 'Ctrl+/' },
   { action: 'group1', desc: '分组 1 · 全部', fallback: 'Ctrl+1' },
   { action: 'group2', desc: '分组 2 · 处理中', fallback: 'Ctrl+2' },
-  { action: 'group3', desc: '分组 3 · 处理完成', fallback: 'Ctrl+3' },
-  { action: 'group4', desc: '分组 4 · 种子磁力', fallback: 'Ctrl+4' },
-  { action: 'group5', desc: '分组 5 · 视频', fallback: 'Ctrl+5' },
-  { action: 'group6', desc: '分组 6 · 音乐', fallback: 'Ctrl+6' },
+  // 审查修复：与 NAV_GROUPS 扁平顺序对齐（此前错位一格）
+  { action: 'group3', desc: '分组 3 · 处理失败', fallback: 'Ctrl+3' },
+  { action: 'group4', desc: '分组 4 · 处理完成', fallback: 'Ctrl+4' },
+  { action: 'group5', desc: '分组 5 · 种子磁力', fallback: 'Ctrl+5' },
+  { action: 'group6', desc: '分组 6 · 视频', fallback: 'Ctrl+6' },
   { action: 'pause-toggle', desc: '暂停 / 继续选中任务', fallback: 'Space' },
   { action: 'trash', desc: '移入回收站', fallback: 'Delete' }
 ]

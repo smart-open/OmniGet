@@ -43,7 +43,10 @@ function KeysSection({ onOpenHelp }: { onOpenHelp?: () => void }) {
   )
 
   useEffect(() => {
-    void window.omniget.settingsGet('ui.keymap').then((v) => setOverrides(parseKeymap(v)))
+    void window.omniget
+      .settingsGet('ui.keymap')
+      .then((v) => setOverrides(parseKeymap(v)))
+      .catch(() => {}) // 读取失败保持默认键位（防 unhandledrejection）
   }, [])
 
   const keys = effectiveKeys(overrides)
@@ -167,11 +170,14 @@ function AppearanceSection() {
   const setLocale = useI18n((s) => s.setLocale)
 
   useEffect(() => {
-    void window.omniget.settingsGet('ui.theme').then((v) => {
-      const id = parseStoredTheme(v)
-      setTheme(id)
-      applyTheme(id)
-    })
+    void window.omniget
+      .settingsGet('ui.theme')
+      .then((v) => {
+        const id = parseStoredTheme(v)
+        setTheme(id)
+        applyTheme(id)
+      })
+      .catch(() => applyTheme('system')) // 读取失败按默认主题继续（防 unhandledrejection）
   }, [])
   useEffect(() => watchSystemTheme(theme, () => {}), [theme])
 
@@ -758,13 +764,22 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                         size="sm"
                         variant="outline"
                         onClick={() => {
-                          window.omniget
-                            .subscribeRemove(s.id)
-                            .then(() => {
-                              setSubs(subs.filter((x) => x.id !== s.id))
-                              flash('订阅已删除')
-                            })
-                            .catch((err) => toastError('删除订阅', err))
+                          // UX 硬性标准：删除类操作必须二次确认（此前一击即删且不可恢复）
+                          void confirmAction({
+                            title: '删除订阅',
+                            message: `确定删除订阅「${s.name}」吗？其去重档案与自动追更将一并停止。`,
+                            confirmLabel: '删除',
+                            danger: true
+                          }).then((ok) => {
+                            if (!ok) return
+                            window.omniget
+                              .subscribeRemove(s.id)
+                              .then(() => {
+                                setSubs(subs.filter((x) => x.id !== s.id))
+                                flash('订阅已删除')
+                              })
+                              .catch((err) => toastError('删除订阅', err))
+                          })
                         }}
                       >
                         删除

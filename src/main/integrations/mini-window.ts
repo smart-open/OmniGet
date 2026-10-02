@@ -2,16 +2,25 @@
 // 复用主窗口渲染层 bundle——?view=mini 时渲染 MiniWidget 分支（App.tsx 全套布局跳过）。
 // 窗口特性：frameless / alwaysOnTop / skipTaskbar / 不可缩放；关闭即销毁，托盘菜单可随时重开。
 
-import { BrowserWindow, screen } from 'electron'
+import { BrowserWindow, nativeTheme, screen } from 'electron'
 import { join } from 'path'
 import { existsSync } from 'fs'
 import { runtimeBase } from '../env'
+import { getSettingParsed } from '../db'
 import { createLogger } from '../logger'
 
 const log = createLogger('integrations')
 
 const MINI_WIDTH = 236
 const MINI_HEIGHT = 58
+
+/** 圆角外壳外的窗口底色随主题（审查修复：此前硬编码深色，浅色主题首帧闪白底突兀） */
+function shellBackground(): string {
+  const t = getSettingParsed<string>('ui.theme')
+  const light =
+    t === 'light' ? true : t === 'dark' ? false : !nativeTheme.shouldUseDarkColors
+  return light ? '#F7F8F9' : '#0B0C0E'
+}
 
 let miniWin: BrowserWindow | null = null
 
@@ -87,7 +96,7 @@ export function createMiniWindow(): void {
     skipTaskbar: true,
     alwaysOnTop: true,
     hasShadow: true,
-    backgroundColor: '#0B0C0E',
+    backgroundColor: shellBackground(),
     icon: miniIcon(),
     webPreferences: {
       preload: join(__dirname, '../preload/bridge.js'),

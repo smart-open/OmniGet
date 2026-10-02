@@ -6,7 +6,7 @@
 //   yt-dlp——合集内条目级去重 + extractor ID 记录；与自有文件分离避免格式互污
 
 import { createHash } from 'crypto'
-import { appendFileSync, existsSync, readFileSync, statSync } from 'fs'
+import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { userDataDir } from '../env'
 import { createLogger } from '../logger'
@@ -21,9 +21,46 @@ export function ytdlpArchiveFile(): string {
   return join(userDataDir(), 'ytdlp.archive')
 }
 
-/** source URL → 档案键（归一化：trim；sha1 防超长 URL/隐私明文落盘） */
+/** source URL → 档案键（归一化：trim + URL 规范化；sha1 防超长 URL/隐私明文落盘） */
 export function archiveKey(source: string): string {
-  return `sha1:${createHash('sha1').update(source.trim()).digest('hex')}`
+  return `sha1:${createHash('sha1').update(normalizeSourceUrl(source)).digest('hex')}`
+}
+
+/** 审查修复：URL 归一化——同一视频换链接形态（youtu.be、tracking 参数、尾斜杠、
+ * http/https、fragment）此前全部判为不同键，去重对最常见场景失效 */
+function normalizeSourceUrl(source: string): string {
+  const raw = source.trim()
+  try {
+    const u = new URL(raw)
+    u.protocol = 'https:'
+    u.hash = ''
+    // 常见追踪/分享参数（不存在时 delete 为 no-op）
+    for (const p of [
+      't',
+      'si',
+      'feature',
+      'spm',
+      'share_source',
+      'share_medium',
+      'share_token',
+      'utm_source',
+      'utm_medium',
+      'utm_campaign'
+    ]) {
+      u.searchParams.delete(p)
+    }
+    // youtu.be 短链 → 标准 watch 链接
+    if (u.hostname === 'youtu.be' && u.pathname.length > 1) {
+      return `https://www.youtube.com/watch?v=${u.pathname.slice(1)}${
+        u.search ? u.search : ''
+      }`
+    }
+    let out = u.toString()
+    if (out.endsWith('/')) out = out.slice(0, -1)
+    return out
+  } catch {
+    return raw
+  }
 }
 
 /** mtime 缓存：创建期逐任务读文件，mtime 未变直接命中 */
@@ -62,5 +99,19 @@ export function addArchiveKey(source: string): void {
     cache = null // 失效缓存（mtime 粒度不足以感知同秒两次追加）
   } catch (err) {
     log.warn('download.archive 追加失败', err)
+  }
+}
+
+/** 审查修复：回滚档案键（订阅侧「入队即登记」后任务失败时调用，防失败条目被永久拉黑） */
+export function removeArchiveKey(source: string): void {
+  const key = archiveKey(source)
+  const keys = loadKeys()
+  if (!keys.has(key)) return
+  try {
+    const rest = [...keys].filter((k) => k !== key)
+    writeFileSync(archivePath(), rest.length > 0 ? `${rest.join('\n')}\n` : '', 'utf8')
+    cache = null
+  } catch (err) {
+    log.warn('download.archive 回滚失败', err)
   }
 }

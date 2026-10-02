@@ -14,7 +14,9 @@ export interface EngineAdapter {
   parse(task: Task, isAborted?: () => boolean): Promise<ParseOutput>
   /** 启动任务；selection 提供恢复/re-add 时的勾选回放（相对路径或索引） */
   start(task: Task, selection?: { indexes?: number[]; paths?: string[] }): Promise<string>
-  pause(task: Task): Promise<void>
+  /** 暂停；aria2 实现返回 gid 终结语义（complete/error/removed = 未暂停但引擎侧已终结），
+   *  其余引擎恒 'ok'（调用方据此走终态事件流而非误标 paused） */
+  pause(task: Task): Promise<'ok' | 'complete' | 'error' | 'removed'>
   resume(task: Task): Promise<void>
   /** 仅移除引擎侧任务；文件删除由管理器按 task_files 精确执行 */
   remove(task: Task): Promise<void>
