@@ -8,7 +8,11 @@
 
 **权威文档**（本目录 docs/，改动须同步）：
 - `OmniGet-产品技术设计文档.md`（§1–§11 + 附录，所有实现的唯一依据）
-- `OmniGet-开发任务计划.md`（T0/M1–M4 任务表，含 ✅ 标记与完成记录）
+- `产品规划-竞品分析与路线图.md`（竞品分析 + Backlog 状态 + 里程碑完成存档）
+- `遗留问题清单.md`（发布阻塞/人工走查项追踪）
+- `下载引擎优化方案-BT磁力-短视频-P2SP.md`（R7 调研落地方案）
+
+> 2026-10-02 整理：《OmniGet-开发任务计划.md》压缩并入产品规划末章、《M4-10-三态走查清单.md》人工项并入遗留问题清单后删除（原文见 git 历史）。
 
 ## 2. 技术栈与版本基线
 
@@ -153,6 +157,16 @@ npm run dev               # GUI 冒烟（看日志：aria2 online / tray created
 - Windows 冒烟清理命令（Stop-Process/taskkill）需审批，脚本化时注意
 
 ## 10. 审查与修复记录
+
+**音乐下载链路修复 + 失败视图/搜索列表/试听播放器（2026-10-02，R6，用户反馈"音乐还是下载失败但 skill 可正常下载"）**：typecheck 双端 + 65/65 单测 + 端到端实测（空歌手「童年」→ 网易云 2.87MB 完整音频 + LRC，26s）。归因（两轮逐端点探测 + 运行时日志比对 skill 源码）与修复——
+
+1. **P0 网易云搜索歌手字段失效**：cloudsearch/pc 新版响应歌手在 `ar` 字段（旧 `artists` 已不下发，实测 2026-10-02）→ searchNetease 双字段兼容；候选行与原唱校验数据源恢复
+2. **P0 空歌手下载全平台必败**：用户只输歌名（日志实证「所有平台均无法下载:  童年」）时 artistMatches('', song) 恒 false → 网易云永远跳过，QQ/酷狗/汽水又全死 → 必然失败；修：singer 为空时跳过原唱匹配、按原版度择优取前 5 候选
+3. **P1 咪咕 listen-url 接口返回二进制垃圾**（非 brotli、brotli 解压也失败，R5 的 Accept-Encoding 修复对其无效）→ tryMigu 重构：接口失败也落到 listenSong.do 兜底直链（实测 4MB audio/mpeg 可用），并带 Referer 头
+4. **P1 侧栏新增「下载失败」视图**：NAV_GROUPS 加 failed 项（WarningCircle 红色角标=counts.failed）+ ipc taskList 'failed' 过滤 + TaskList FILTERS/标题/空态 + 失败行内一键重试（此前失败任务只能混在列表里看红字）
+5. **P2 搜索列表信息增强**：候选行新增歌曲时长（netease dt/qq interval/kugou Duration）、专辑名、逐行音质下拉（默认展示全部三档，跟随全局默认）；PlatformSong/MusicCandidate 加 durationMs/album
+6. **P2 试听改长条播放器**：播放中行下方展开内嵌播放条（播放/暂停圆形钮 + 原生 range 可拖动进度条 + 当前/总时长）；preview 协议 music 分支透传 Range（openStream 加 extraHeaders，回传 206/Content-Range/Accept-Ranges）——此前不透传时 <audio> 无法 seek 超出缓冲区的位置
+7. 第三方接口现状快照（2026-10-02 实测）：**活**=网易云(搜索/详情/haitangw 镜像/126.net CDN)、咪咕(搜索+listenSong.do)、酷狗搜索；**死**=cenguigui(DNS)、317ak(403/HTML)、QQ 搜索(0 结果)、vkeys(空 url)、rrvenn(522)、toubiec(400)、咪咕 listen-url(二进制)、汽水搜索(空响应)。skill 与工程同链路，工程修复后行为对齐
 
 **dev 冒烟修复（2026-10-01 晚，R5，用户反馈"音乐无法下载/日志乱码"）**：typecheck + 65/65 单测。修复——
 1. **P0 aria2c 启动即崩**：第三轮 P3 引入的 `--rpc-secret-file` 是**不存在的选项**（aria2c 无此参数，实测 exit 28 无限重启，BT/HTTP 引擎全挂）→ 改用 `--conf-path` 携带只含 `rpc-secret=` 的配置文件（保持 secret 不进命令行，用后即删）。⚠ 教训：改造 CLI 参数前先 `--help` 验证选项存在

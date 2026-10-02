@@ -25,7 +25,7 @@ src/renderer/    React UI（app/ features/ components/ui stores/ styles/tokens.c
 src/shared/      双端共享类型（任务模型、IPC 通道、错误码表）
 resources/engines/   sidecar 二进制（aria2c/yt-dlp/ffmpeg，按平台目录）
 scripts/         e2e / 探测 / 图标 / 测试辅助脚本
-docs/            产品技术设计文档 + 开发任务计划 + 遗留问题清单
+docs/            技术设计文档 + 产品规划/路线图 + 遗留问题清单 + 引擎优化方案
 ```
 
 ## 跨平台约定
@@ -61,7 +61,7 @@ cd node_modules/better-sqlite3; npx prebuild-install -r electron -t <electron版
 $env:ELECTRON_MIRROR='https://npmmirror.com/mirrors/electron/'; node node_modules/electron/install.js
 ```
 
-## 当前状态（依据 docs/OmniGet-开发任务计划.md）
+## 当前状态（T0~M4 已收口，详见 docs/产品规划-竞品分析与路线图.md「里程碑完成存档」）
 
 - [x] T0 工程基建（T0-1 ~ T0-8）
 - [x] M1 骨架 + BT/磁力/HTTP（M1-1 ~ M1-12 全部）
