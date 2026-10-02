@@ -1,8 +1,8 @@
 // IPC handler 注册表（T0-3 + M1 接入真实编排，§6.1 白名单）
 
 import { app, ipcMain, BrowserWindow, shell } from 'electron'
-import { stat, realpath } from 'fs/promises'
-import { isAbsolute } from 'path'
+import { stat, realpath, writeFile, readFile } from 'fs/promises'
+import { isAbsolute, basename } from 'path'
 import {
   IPC_CHANNELS,
   type AppUpdateCheck,
@@ -562,7 +562,7 @@ export function registerIpcHandlers(): void {
   })
 
   // 窗口底色随主题同步（圆角外壳外的一圈底色）
-  ipcMain.on('ui:theme', (_e, theme: string) => {
+  ipcMain.on('ui:theme', (e, theme: string) => {
     const light = theme === 'light'
     for (const win of BrowserWindow.getAllWindows()) {
       try {
@@ -570,6 +570,12 @@ export function registerIpcHandlers(): void {
       } catch {
         // 忽略
       }
+    }
+    // 审查修复：主题变更热同步到其他窗口——`app:theme-changed` 是窗口内 DOM 事件，
+    // 迷你悬浮窗（独立 webContents）原收不到，改主题后悬浮窗要重开才换肤
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.webContents === e.sender || win.isDestroyed()) continue
+      win.webContents.send('app:theme-changed', theme)
     }
   })
 
@@ -588,6 +594,52 @@ export function registerIpcHandlers(): void {
       properties: ['openDirectory', 'createDirectory']
     })
     return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
+  })
+
+  // R4 续（backlog #4）：预设导出/导入——对话框 + 读写盘收口在主进程（渲染层无 Node 能力，§9）
+  ipcMain.handle('app:exportFile', async (e, defaultName: string, content: string) => {
+    const { dialog } = await import('electron')
+    const safeName = String(defaultName ?? 'export.json').replace(/[<>:"|?*\r\n\t\\/]/g, '_')
+    // 审查修复：挂 parent——主窗隐藏到托盘时无属主对话框可能落到其他窗口后面
+    const parent = BrowserWindow.fromWebContents(e.sender)
+    const result = await (parent
+      ? dialog.showSaveDialog(parent, {
+          defaultPath: safeName,
+          filters: [{ name: 'JSON', extensions: ['json'] }]
+        })
+      : dialog.showSaveDialog({
+          defaultPath: safeName,
+          filters: [{ name: 'JSON', extensions: ['json'] }]
+        }))
+    if (result.canceled || !result.filePath) return null
+    // 1MB 上限：预设文件是纯文本 JSON，超限即异常输入，拒绝落盘
+    const body = String(content ?? '')
+    if (body.length > 1024 * 1024) throw new Error('导出内容超过 1MB 上限')
+    await writeFile(result.filePath, body, 'utf-8')
+    log.info(`export file → ${result.filePath}`)
+    return result.filePath
+  })
+
+  ipcMain.handle('app:importFile', async (e, ext = 'json') => {
+    const { dialog } = await import('electron')
+    const ex = String(ext ?? 'json').replace(/[^a-z0-9]/gi, '') || 'json'
+    const parent = BrowserWindow.fromWebContents(e.sender)
+    const result = await (parent
+      ? dialog.showOpenDialog(parent, {
+          properties: ['openFile'],
+          filters: [{ name: ex.toUpperCase(), extensions: [ex] }]
+        })
+      : dialog.showOpenDialog({
+          properties: ['openFile'],
+          filters: [{ name: ex.toUpperCase(), extensions: [ex] }]
+        }))
+    if (result.canceled || result.filePaths.length === 0) return null
+    const filePath = result.filePaths[0]
+    if (!filePath) return null
+    const stat1 = await stat(filePath)
+    if (stat1.size > 1024 * 1024) throw new Error('文件超过 1MB 上限')
+    const content = await readFile(filePath, 'utf-8')
+    return { name: basename(filePath), content }
   })
 
   // F1 试听：返回预览流 URL（主进程经 omniget-preview:// 协议代理镜像音频）

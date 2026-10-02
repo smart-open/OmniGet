@@ -8,6 +8,7 @@ import { sniff, launchDedupe } from '../sniffer'
 import { createLogger } from '../logger'
 import { runtimeBase } from '../env'
 import { getSetting, setSetting } from '../db'
+import { getMainWindow, miniWindowVisible, toggleMiniWindow } from './mini-window'
 import type { TaskEvent } from '@shared/types'
 
 const log = createLogger('integrations')
@@ -69,7 +70,8 @@ function buildTrayIcon(): Electron.NativeImage {
 // ── 主窗口切换（左键单击）────────────────────────────────────────────
 
 export function toggleMainWindow(): void {
-  const win = BrowserWindow.getAllWindows()[0]
+  // R4 续（backlog #8）：多窗口后 getAllWindows()[0] 不再可靠——按身份标记取主窗
+  const win = getMainWindow()
   if (!win) return
   if (win.isVisible() && !win.isMinimized()) {
     win.hide()
@@ -106,7 +108,7 @@ function buildTrayMenu(): Electron.Menu {
     {
       label: '显示主界面',
       click: () => {
-        const win = BrowserWindow.getAllWindows()[0]
+        const win = getMainWindow()
         if (win) {
           if (win.isMinimized()) win.restore()
           win.show()
@@ -117,7 +119,7 @@ function buildTrayMenu(): Electron.Menu {
     {
       label: '新建任务…',
       click: () => {
-        const win = BrowserWindow.getAllWindows()[0]
+        const win = getMainWindow()
         if (win) {
           if (win.isMinimized()) win.restore()
           win.show()
@@ -125,6 +127,13 @@ function buildTrayMenu(): Electron.Menu {
           sendUiAction(win, 'new-task')
         }
       }
+    },
+    {
+      // R4 续（backlog #8）：迷你悬浮窗（置顶小窗显示聚合速度）
+      label: '迷你悬浮窗',
+      type: 'checkbox',
+      checked: miniWindowVisible(),
+      click: () => toggleMiniWindow()
     },
     { type: 'separator' },
     {
@@ -232,7 +241,7 @@ export function startClipboardWatcher(onSource: (source: string) => void): void 
     // P3 修复：去重键用完整文本——前 120 字符截断会让长 URL 前缀相同的两条不同链接被误判重复
     if (!dedupe.check(text)) return
     log.info(`clipboard detected ${s.type} link`)
-    const win = BrowserWindow.getAllWindows()[0]
+    const win = getMainWindow()
     if (win) {
       if (win.isMinimized()) win.restore()
       win.show()

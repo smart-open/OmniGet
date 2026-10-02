@@ -34,3 +34,24 @@ test('相对路径分段清洗且保留结构', () => {
 test('空名兜底', () => {
   assert.equal(sanitizeFilename('...'), '_unnamed')
 })
+
+// ── 平台差异化（backlog #6）────────────────────────────────────────────
+
+test('POSIX 不改写保留名与末尾空格/点', () => {
+  assert.equal(sanitizeFilename('aux.txt', 'linux'), 'aux.txt')
+  assert.equal(sanitizeFilename('name... ', 'darwin'), 'name... ')
+  assert.equal(sanitizeFilename('a<b>c|d', 'linux'), 'a<b>c|d')
+  assert.equal(sanitizeFilename('a\\b', 'linux'), 'a\\b') // POSIX 上 `\` 合法
+})
+
+test('POSIX 仍清洗控制字符与路径分隔符 `/`', () => {
+  assert.equal(sanitizeFilename('a\x00b\x1fc', 'linux'), 'abc')
+  assert.equal(sanitizeFilename('a/b', 'linux'), 'a_b')
+  assert.equal(sanitizeFilename('.', 'linux'), '_')
+  assert.equal(sanitizeFilename('..', 'darwin'), '_')
+})
+
+test('超长截断对全平台生效', () => {
+  const long = 'y'.repeat(300)
+  assert.ok(sanitizeFilename(long, 'linux').length <= 200)
+})

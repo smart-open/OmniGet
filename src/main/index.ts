@@ -38,6 +38,7 @@ import {
   setSpeedProvider,
   startClipboardWatcher
 } from './integrations/tray'
+import { getMainWindow } from './integrations/mini-window'
 import { sniff, launchDedupe as sharedDedupe } from './sniffer'
 
 const log = createLogger('main')
@@ -54,7 +55,8 @@ if (!gotLock) {
   app.on('second-instance', (_e, argv) => {
     // magnet: 协议唤起：从 argv 提取链接并转发到窗口（§4.6；30s 去重防止重复唤起开重复任务）
     const source = argv.find((a) => /^magnet:\?/i.test(a) || /^https?:\/\//i.test(a))
-    const win = BrowserWindow.getAllWindows()[0]
+    // R4 续（backlog #8）：多窗口后须排除迷你悬浮窗
+    const win = getMainWindow()
     if (win) {
       if (win.isMinimized()) win.restore()
       win.show()
@@ -253,7 +255,7 @@ async function bootstrap(): Promise<void> {
     () => adapter.resumeAll()
   )
   app.whenReady().then(() => {
-    const win = BrowserWindow.getAllWindows()[0]
+    const win = getMainWindow()
     if (win) {
       createTray()
       interceptCloseToTray(win)
@@ -309,7 +311,8 @@ async function bootstrap(): Promise<void> {
   })
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    // 仅迷你悬浮窗存活时也要重建主窗
+    if (!getMainWindow()) createWindow()
   })
 }
 

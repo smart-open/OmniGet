@@ -3,13 +3,16 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import {
+  CaretRight,
   DownloadSimple,
   FilePlus,
   FloppyDisk,
   FolderOpen,
   LinkSimple,
   MagnifyingGlass,
+  UploadSimple,
   Warning,
   X
 } from '@phosphor-icons/react'
@@ -34,7 +37,8 @@ interface Props {
   onClose: () => void
 }
 
-/** R4：视频下载参数预设（download.videoPresets 持久化） */
+/** R4：视频下载参数预设（download.videoPresets 持久化）；
+ * R4 续（backlog #4）：opts.template 命名模板纳入预设，导出/导入为 JSON 分享 */
 interface VideoPreset {
   id: number
   name: string
@@ -44,8 +48,12 @@ interface VideoPreset {
     embedSubs: boolean
     embedThumbnail: boolean
     delogo: boolean
+    template?: string
   }
 }
+
+/** 预设分享文件信封（Stacher Preset 范式：自描述 JSON） */
+const PRESET_EXPORT_KIND = 'omniget-video-presets'
 
 type Phase = 'input' | 'parsing' | 'awaiting'
 
@@ -82,6 +90,8 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
   const [presets, setPresets] = useState<VideoPreset[]>([])
   const [presetName, setPresetName] = useState('')
   const [activePreset, setActivePreset] = useState<number | null>(null)
+  // R4 续（backlog #4）：任务级命名模板（默认取全局 naming.template，可被预设覆盖）
+  const [nameTemplate, setNameTemplate] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   // #16 会话计数器：对话框每次打开自增；关闭后未完成的异步回调用它判定过期，
@@ -135,6 +145,13 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
           if (sid2 === sessionRef.current) setPresets(Array.isArray(v) ? (v as VideoPreset[]) : [])
         })
         .catch(() => {})
+      // R4 续：命名模板输入初始为全局模板（任务级覆盖仅作用于本次任务）
+      window.omniget
+        .settingsGet('naming.template')
+        .then((v) => {
+          if (sid2 === sessionRef.current) setNameTemplate(typeof v === 'string' ? v : '')
+        })
+        .catch(() => {})
       setTimeout(() => inputRef.current?.focus(), 60)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -172,6 +189,59 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
     if (!query.trim() || files.length === 0) return null
     return matchSelectSyntax(query, files.map((f) => f.path))
   }, [query, files])
+
+  // ── R4 续（backlog #7）：BT 文件树虚拟化 ────────────────────────────
+  // 旧实现递归渲染全树（数千文件大种子在弹窗内卡死）。改为「展开节点扁平化 +
+  // 窗口化」：仅渲染可视区 ± overscan 的行。默认全展开（与旧视觉一致），目录可折叠。
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const treeScrollRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!tree) {
+      setExpanded(new Set())
+      return
+    }
+    const dirs: string[] = []
+    const walk = (n: TreeNode): void => {
+      for (const c of n.children) {
+        if (!c.isLeaf) {
+          dirs.push(c.path)
+          walk(c)
+        }
+      }
+    }
+    walk(tree)
+    setExpanded(new Set(dirs))
+  }, [tree])
+  /** 展开 + 过滤后的可见行（深度优先扁平化；折叠目录的子树整段跳过）。
+   * 审查修复：搜索期间强制全展开——命中文件位于折叠目录内时旧行为必可见，
+   * 折叠功能不得造成「搜得到索引但看不见高亮行」的可用性回归 */
+  const searchActive = query.trim() !== ''
+  const flatRows = useMemo(() => {
+    const out: Array<{ node: TreeNode; depth: number }> = []
+    const walk = (n: TreeNode, depth: number): void => {
+      for (const c of n.children) {
+        out.push({ node: c, depth })
+        if (!c.isLeaf && (searchActive || expanded.has(c.path))) walk(c, depth + 1)
+      }
+    }
+    if (tree) walk(tree, 0)
+    return out
+  }, [tree, expanded, searchActive])
+  const TREE_ROW_H = 28
+  const treeVirtualizer = useVirtualizer({
+    count: flatRows.length,
+    getScrollElement: () => treeScrollRef.current,
+    estimateSize: () => TREE_ROW_H,
+    overscan: 10
+  })
+  function toggleExpand(path: string): void {
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(path)) next.delete(path)
+      else next.add(path)
+      return next
+    })
+  }
 
   // P1 修复：勾选收集必须基于全量文件集——tree 受分类筛选影响，
   // collectSelected(filteredTree) 会把其他分类下的已勾选静默排除（少下文件）
@@ -318,6 +388,8 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
     setEmbedSubs(p.opts.embedSubs)
     setEmbedThumbnail(p.opts.embedThumbnail)
     setDelogo(p.opts.delogo)
+    // R4 续（backlog #4）：预设携带命名模板则一并应用；未携带保留当前值
+    if (typeof p.opts.template === 'string') setNameTemplate(p.opts.template)
   }
 
   /** R4：把当前视频参数存为预设 */
@@ -326,7 +398,7 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
     const p: VideoPreset = {
       id: Date.now(),
       name,
-      opts: { formatId, audioOnly, embedSubs, embedThumbnail, delogo }
+      opts: { formatId, audioOnly, embedSubs, embedThumbnail, delogo, template: nameTemplate.trim() }
     }
     const next = [...presets, p]
     setPresets(next)
@@ -337,6 +409,98 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
       .settingsSet('download.videoPresets', next)
       .then(() => toast(`预设「${name}」已保存`, 'success'))
       .catch((err) => toastError('保存预设', err))
+  }
+
+  /** R4 续（backlog #4）：导出全部预设为自描述 JSON（分享/备份） */
+  async function exportPresets(): Promise<void> {
+    if (presets.length === 0) {
+      toast('暂无可导出的预设', 'warning')
+      return
+    }
+    const payload = JSON.stringify(
+      {
+        app: 'omniget',
+        kind: PRESET_EXPORT_KIND,
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        presets
+      },
+      null,
+      2
+    )
+    try {
+      const saved = await window.omniget.exportFile('omniget-video-presets.json', payload)
+      if (saved) toast(`已导出 ${presets.length} 个预设`, 'success') // 取消 = null，不打扰
+    } catch (err) {
+      toastError('导出预设', err)
+    }
+  }
+
+  /** R4 续（backlog #4）：导入预设 JSON（与现有预设合并；同名同参去重，同名不同参追加「(导入)」） */
+  async function importPresets(): Promise<void> {
+    // 审查修复：导入文件不可信——条数/字段长度设上限，防 O(n²) 合并卡死 UI 与
+    // 超长字段污染 select 渲染；持久化成功后才更新 UI（失败不回滚 = UI 说谎）
+    const MAX_IMPORT = 200
+    try {
+      const file = await window.omniget.importFile('json')
+      if (!file) return
+      const parsed: unknown = JSON.parse(file.content)
+      const raw =
+        parsed && typeof parsed === 'object' && Array.isArray((parsed as { presets?: unknown }).presets)
+          ? (parsed as { presets: unknown[] }).presets
+          : Array.isArray(parsed)
+            ? parsed
+            : null
+      if (!raw) throw new Error('文件结构不符（需要 omniget-video-presets 信封或预设数组）')
+      if (raw.length > MAX_IMPORT) {
+        throw new Error(`单次最多导入 ${MAX_IMPORT} 条预设（文件含 ${raw.length} 条）`)
+      }
+      const incoming: VideoPreset[] = []
+      let skipped = 0
+      let nextId = Math.max(Date.now(), ...presets.map((p) => p.id), 0) + 1
+      for (const item of raw) {
+        const it = item as Partial<VideoPreset> & { opts?: Partial<VideoPreset['opts']> }
+        if (!it || typeof it.name !== 'string' || !it.name.trim() || !it.opts) {
+          skipped++
+          continue
+        }
+        const opts: VideoPreset['opts'] = {
+          formatId: typeof it.opts.formatId === 'string' ? it.opts.formatId.slice(0, 200) : null,
+          audioOnly: it.opts.audioOnly === true,
+          embedSubs: it.opts.embedSubs === true,
+          embedThumbnail: it.opts.embedThumbnail === true,
+          delogo: it.opts.delogo === true,
+          ...(typeof it.opts.template === 'string' && it.opts.template.trim()
+            ? { template: it.opts.template.slice(0, 200) }
+            : {})
+        }
+        const baseName = it.name.trim().slice(0, 50)
+        // 同名同参 = 已存在，跳过（含本文件先前条目）；同名不同参 = 追加「(导入)」后缀
+        const seen = [...presets, ...incoming]
+        if (seen.some((p) => p.name === baseName && JSON.stringify(p.opts) === JSON.stringify(opts))) {
+          skipped++
+          continue
+        }
+        let name = baseName
+        if (seen.some((p) => p.name === name)) {
+          name = `${name}（导入）`
+        }
+        incoming.push({ id: nextId++, name, opts })
+      }
+      if (incoming.length === 0) {
+        toast(`没有新预设可导入（跳过 ${skipped} 条：已存在或格式无效）`, 'warning')
+        return
+      }
+      const next = [...presets, ...incoming]
+      await window.omniget.settingsSet('download.videoPresets', next)
+      setPresets(next)
+      toast(
+        `已导入 ${incoming.length} 个预设${skipped > 0 ? `（跳过 ${skipped} 条）` : ''}`,
+        'success'
+      )
+    } catch (err) {
+      toastError('导入预设', err)
+    }
   }
 
   /** R4：删除当前选中的预设（UX 硬性标准：删除类操作二次确认） */
@@ -413,7 +577,9 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
               audioFormat: 'mp3',
               embedSubs,
               embedThumbnail,
-              delogo: delogo && (sniffType === 'video' ? false : true)
+              delogo: delogo && (sniffType === 'video' ? false : true),
+              // R4 续（backlog #4）：任务级命名模板（空值回落全局 naming.template）
+              template: nameTemplate.trim() || undefined
             }
           : undefined
       })
@@ -676,18 +842,69 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
                     />
                   </div>
 
-                  <div className="max-h-56 overflow-y-auto rounded-panel border border-border">
-                    <TreeNodeView
-                      node={tree}
-                      depth={0}
-                      selected={selected}
-                      match={match?.indexes ?? null}
-                      onToggle={(node, checked) => {
-                        const next = new Set(selected)
-                        setSubtree(node, checked, next)
-                        setSelected(next)
-                      }}
-                    />
+                  {/* R4 续（backlog #7）：虚拟化文件树——仅渲染可视区行（10k+ 文件不卡） */}
+                  <div
+                    ref={treeScrollRef}
+                    className="max-h-56 overflow-y-auto rounded-panel border border-border"
+                  >
+                    <div
+                      style={{ height: treeVirtualizer.getTotalSize(), position: 'relative' }}
+                    >
+                      {treeVirtualizer.getVirtualItems().map((vi) => {
+                        const row = flatRows[vi.index]
+                        if (!row) return null
+                        const { node, depth } = row
+                        const state: CheckState = nodeState(node, selected)
+                        const hit = node.isLeaf && match?.indexes?.has(node.index ?? -1)
+                        return (
+                          <div
+                            key={node.path}
+                            className={`row-line absolute inset-x-0 flex h-7 items-center gap-2 pr-3 text-xs transition-colors ${
+                              hit ? 'bg-accent-soft' : 'hover:bg-surface-2'
+                            }`}
+                            style={{
+                              height: vi.size,
+                              transform: `translateY(${vi.start}px)`,
+                              paddingLeft: 12 + depth * 16
+                            }}
+                          >
+                            {!node.isLeaf && (
+                              <button
+                                onClick={() => toggleExpand(node.path)}
+                                aria-label={expanded.has(node.path) ? '折叠' : '展开'}
+                                className="press flex h-4 w-4 shrink-0 items-center justify-center text-text-3 transition-colors hover:text-accent"
+                              >
+                                <CaretRight
+                                  size={10}
+                                  weight="bold"
+                                  className={expanded.has(node.path) ? 'rotate-90 transition-transform' : 'transition-transform'}
+                                />
+                              </button>
+                            )}
+                            {node.isLeaf && <span className="w-4 shrink-0" />}
+                            <TriStateBox
+                              state={state}
+                              onChange={(c) => {
+                                const next = new Set(selected)
+                                setSubtree(node, c, next)
+                                setSelected(next)
+                              }}
+                            />
+                            <span
+                              className={`min-w-0 flex-1 truncate ${hit ? 'text-accent' : ''}`}
+                            >
+                              {node.name}
+                            </span>
+                            {node.isLeaf && match?.indexes && (
+                              <span className="num text-[9px] text-text-3">#{node.index}</span>
+                            )}
+                            <span className="num shrink-0 text-text-3">
+                              {formatBytes(node.size)}
+                            </span>
+                          </div>
+                        )
+                      })}
+                    </div>
                   </div>
 
                   <p className="num mt-2 text-[11px] text-text-2">
@@ -766,6 +983,21 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
                     >
                       存为预设
                     </button>
+                    {/* R4 续（backlog #4）：预设导出/导入（JSON 分享，Stacher Preset 范式） */}
+                    {presets.length > 0 && (
+                      <button
+                        className="press flex items-center gap-1 rounded-ctl border border-border px-2 py-1 text-[10px] text-text-2 transition-colors hover:text-text-1"
+                        onClick={() => void exportPresets()}
+                      >
+                        <DownloadSimple size={11} /> 导出
+                      </button>
+                    )}
+                    <button
+                      className="press flex items-center gap-1 rounded-ctl border border-border px-2 py-1 text-[10px] text-text-2 transition-colors hover:text-text-1"
+                      onClick={() => void importPresets()}
+                    >
+                      <UploadSimple size={11} /> 导入
+                    </button>
                     {activePreset !== null && (
                       <button
                         className="press rounded-ctl border border-border px-2 py-1 text-[10px] text-text-3 transition-colors hover:text-danger"
@@ -774,6 +1006,22 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
                         删除当前
                       </button>
                     )}
+                  </div>
+
+                  {/* R4 续（backlog #4）：命名模板入预设体系——任务级覆盖，空值回落全局 */}
+                  <div className="mt-3">
+                    <div className="mb-1.5 flex items-center justify-between text-xs">
+                      <span className="text-text-2">命名模板</span>
+                      <span className="num text-[10px] text-text-3">
+                        {'{{title}} {{uploader}} {{date}} {{index:3}}'}
+                      </span>
+                    </div>
+                    <input
+                      value={nameTemplate}
+                      onChange={(e) => setNameTemplate(e.target.value)}
+                      placeholder="留空使用全局模板（设置 → 命名模板）"
+                      className="num h-7 w-full rounded-ctl border border-border bg-surface-2 px-2 text-[11px] outline-none placeholder:text-text-3 focus:border-accent"
+                    />
                   </div>
 
                   {/* 分辨率快筛（§4.3.2 多维筛选） */}
@@ -1001,47 +1249,7 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
   )
 }
 
-// ── 树节点视图（三态复选框 + 语法命中高亮）──────────────────────────
-
-function TreeNodeView(props: {
-  node: TreeNode
-  depth: number
-  selected: Set<string>
-  match: Set<number> | null
-  onToggle: (node: TreeNode, checked: boolean) => void
-}) {
-  const { node, depth, selected, match, onToggle } = props
-  const state: CheckState = nodeState(node, selected)
-  const hit = node.isLeaf && match?.has(node.index ?? -1)
-
-  return (
-    <div>
-      <div
-        className={`row-line flex items-center gap-2 py-1.5 pr-3 text-xs transition-colors ${
-          hit ? 'bg-accent-soft' : 'hover:bg-surface-2'
-        }`}
-        style={{ paddingLeft: 12 + depth * 16 }}
-      >
-        <TriStateBox state={state} onChange={(c) => onToggle(node, c)} />
-        <span className={`min-w-0 flex-1 truncate ${hit ? 'text-accent' : ''}`}>{node.name}</span>
-        {node.isLeaf && match && (
-          <span className="num text-[9px] text-text-3">#{node.index}</span>
-        )}
-        <span className="num shrink-0 text-text-3">{formatBytes(node.size)}</span>
-      </div>
-      {node.children.map((c) => (
-        <TreeNodeView
-          key={c.path}
-          node={c}
-          depth={depth + 1}
-          selected={selected}
-          match={match}
-          onToggle={onToggle}
-        />
-      ))}
-    </div>
-  )
-}
+// ── 树行视图已并入上方虚拟化列表（R4 续，backlog #7）────────────────
 
 /** M3-3 格式行（radio 单选） */
 function FormatRow({

@@ -111,6 +111,8 @@ export interface ConfirmSelectionInput {
     audioFormat?: 'mp3' | 'm4a' | 'opus'
     /** M3-7 短视频 L3 显式选择：delogo 后处理产出 _nowm 副本 */
     delogo?: boolean
+    /** R4 续（backlog #4）：任务级命名模板（预设携带），留空回落全局 naming.template */
+    template?: string
   }
 }
 
@@ -450,6 +452,10 @@ export interface OmniGetBridge {
   defaultSaveDir(): Promise<string>
   /** 系统文件夹选择对话框（取消返回 null） */
   pickFolder(): Promise<string | null>
+  /** R4 续（backlog #4）：预设导出——保存对话框 + 主进程写盘（渲染层无 Node 能力）；取消返回 null */
+  exportFile(defaultName: string, content: string): Promise<string | null>
+  /** R4 续（backlog #4）：预设导入——打开对话框 + 主进程读盘；取消返回 null */
+  importFile(ext?: string): Promise<{ name: string; content: string } | null>
   // events
   onTaskEvents(listener: (events: TaskEvent[]) => void): () => void
   onEngineHealth(listener: (health: EngineHealth[]) => void): () => void

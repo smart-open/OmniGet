@@ -77,6 +77,11 @@ const api: OmniGetBridge = {
   filePath: (file: File): string => webUtils.getPathForFile(file),
   defaultSaveDir: (): Promise<string> => ipcRenderer.invoke('app:defaultSaveDir'),
   pickFolder: (): Promise<string | null> => ipcRenderer.invoke('app:pickFolder'),
+  // R4 续（backlog #4）：预设导出/导入（读写盘收口在主进程）
+  exportFile: (defaultName: string, content: string): Promise<string | null> =>
+    ipcRenderer.invoke('app:exportFile', defaultName, content),
+  importFile: (ext?: string): Promise<{ name: string; content: string } | null> =>
+    ipcRenderer.invoke('app:importFile', ext),
   onTaskEvents: (listener: (events: TaskEvent[]) => void) => {
     const wrapped = (_e: unknown, events: TaskEvent[]): void => listener(events)
     ipcRenderer.on(IPC_CHANNELS.eventTasks, wrapped)

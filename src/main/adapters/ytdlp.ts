@@ -27,6 +27,8 @@ export interface VideoSelection {
   audioOnly?: boolean
   audioFormat?: 'mp3' | 'm4a' | 'opus'
   delogo?: boolean
+  /** R4 续（backlog #4）：任务级命名模板（预设携带），非空时优先于全局 naming.template */
+  template?: string
 }
 
 interface RawFormat {
@@ -235,11 +237,13 @@ export class YtDlpAdapter {
       // 合集但无勾选信息：维持 yt-dlp 默认（全集合下载）
       args.push('-o', join(task.saveDir, '%(uploader)s/%(title)s.%(ext)s'))
     } else {
-      // M4-11：全局命名模板（{{title}}/{{uploader}}/{{date}}/{{index:N}}）
+      // M4-11：全局命名模板（{{title}}/{{uploader}}/{{date}}/{{index:N}}）；
+      // R4 续（backlog #4）：预设可携带任务级命名模板（video.template），非空时优先于全局
       // H8：单视频显式 --no-playlist，防合集 URL 拖全家桶
       args.push('--no-playlist')
       const { toYtDlpOutputTemplate, getNamingTemplate } = await import('../naming')
-      args.push('-o', join(task.saveDir, toYtDlpOutputTemplate(getNamingTemplate())))
+      const tpl = (opts.template ?? '').trim() || getNamingTemplate()
+      args.push('-o', join(task.saveDir, toYtDlpOutputTemplate(tpl)))
     }
 
     this.emit({ taskId: task.id, status: 'running', message: '开始下载' })

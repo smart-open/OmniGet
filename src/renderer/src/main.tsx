@@ -1,6 +1,7 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './app/App'
+import MiniWidget from './app/MiniWidget'
 import './styles/tokens.css'
 import './styles/global.css'
 
@@ -73,6 +74,15 @@ class RootBoundary extends React.Component<
 const root = document.getElementById('root')!
 if (!window.omniget) {
   ReactDOM.createRoot(root).render(<BridgeMissing />)
+} else if (new URLSearchParams(window.location.search).get('view') === 'mini') {
+  // R4 续（backlog #8）：迷你悬浮窗——主进程以 ?view=mini 复用本 bundle 拉起置顶小窗
+  ReactDOM.createRoot(root).render(
+    <React.StrictMode>
+      <RootBoundary>
+        <MiniWidget />
+      </RootBoundary>
+    </React.StrictMode>
+  )
 } else {
   ReactDOM.createRoot(root).render(
     <React.StrictMode>
