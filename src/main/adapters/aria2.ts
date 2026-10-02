@@ -11,6 +11,8 @@ import { readFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { generateMagnet, normalizeInfohash, parseTorrentFile } from '../torrent/parse'
+import { cacheTorrentFile, findCachedTorrent, readCachedTorrent } from '../torrent/cache'
+import { readTaskSpeedLimit, readTaskUrls } from '../task/params'
 import { buildTaskOptions } from '../aria2/options'
 import { createLogger } from '../logger'
 import { diagnose } from '../diagnosis'
@@ -60,6 +62,35 @@ export class Aria2Adapter implements EngineAdapter {
     return this.supervisor.getClient()
   }
 
+  /** R7 P0-3：磁力任务的 bt-tracker = 订阅源 ∪ 磁力自带 tr=（每任务选项，
+   * 不写则继承全局订阅源；写则须显式并集防覆盖） */
+  private magnetTrackerMerge(source: string): Record<string, string> {
+    const extras = extractMagnetTrackers(source)
+    if (extras.length === 0) return {}
+    try {
+      // 惰性 import：trackers 依赖 db，避免适配器在非主进程上下文被连坐初始化
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { joinedTrackers } = require('../trackers') as typeof import('../trackers')
+      const globalCsv = joinedTrackers()
+      const seen = new Set(globalCsv.split(',').filter(Boolean))
+      const fresh = extras.filter((t) => !seen.has(t))
+      if (fresh.length === 0) return {}
+      // 审查修复：按条截断（此前 slice 会从中间截断最后一个 URL 产生畸形 tracker）
+      const parts: string[] = []
+      let total = 0
+      for (const t of [...globalCsv.split(',').filter(Boolean), ...fresh]) {
+        const add = t.length + (parts.length ? 1 : 0)
+        if (total + add > 8000) break
+        parts.push(t)
+        total += add
+      }
+      return { 'bt-tracker': parts.join(',') }
+    } catch {
+      // 订阅源不可用时仅用磁力自带 tr
+      return { 'bt-tracker': extras.join(',') }
+    }
+  }
+
   /** getGlobalStat 缓存（pollEvents 每 1s 顺带刷新；托盘/状态栏上传速度数据源） */
   private lastGlobalStat = { down: 0, up: 0 }
 
@@ -86,16 +117,38 @@ export class Aria2Adapter implements EngineAdapter {
     throw new Error(`aria2 适配器不支持的任务类型：${task.type}`)
   }
 
-  /** 磁力 BEP-9 四步（§4.2）：addUri(pause:true, bt-save-metadata) → 等 metadata → getFiles */
+  /** 磁力 BEP-9 四步（§4.2）：addUri(pause:true, bt-save-metadata) → 等 metadata → getFiles。
+   * R7 P0-3：本地 .torrent 缓存命中时零引擎依赖秒出文件树（跳过 DHT 等待） */
   private async parseMagnet(task: Task, isAborted?: () => boolean): Promise<ParseOutput> {
     const infohash = extractInfohash(task.source)
+
+    // R7：本地元数据缓存快路径——同 infohash 曾解析过（.torrent 已收集）直接本地解析
+    const cached = findCachedTorrent(infohash)
+    if (cached) {
+      try {
+        const info = parseTorrentFile(cached)
+        if (info.files.length > 0) {
+          log.info(`磁力元数据缓存命中 ih=${info.infohash}（${info.files.length} 文件）`)
+          return {
+            name: info.name,
+            files: info.files,
+            totalBytes: info.files.reduce((s, f) => s + f.size, 0),
+            infohash: info.infohash,
+            magnet: info.magnet
+          }
+        }
+      } catch (err) {
+        log.warn(`缓存的 .torrent 解析失败，回退 BEP-9: ${String(err)}`)
+      }
+    }
 
     // D2：元数据落盘到临时目录（不污染用户保存目录）
     const metaDir = join(tmpdir(), 'omniget-metadata', task.id)
     const gid = (await this.rpc().call('addUri', [task.source], {
       dir: metaDir,
       'bt-save-metadata': 'true',
-      pause: 'true' // 必须 pause:true：否则元数据到达后立刻全量下载（§4.2）
+      pause: 'true', // 必须 pause:true：否则元数据到达后立刻全量下载（§4.2）
+      ...this.magnetTrackerMerge(task.source)
     })) as string
 
     // 等 metadata：轮询 tellStatus 直到 status=complete
@@ -117,6 +170,13 @@ export class Aria2Adapter implements EngineAdapter {
           const name = st.bittorrent?.info?.name ?? files[0]?.path.split('/')[0] ?? task.source
           const ih = normalizeInfohash(st.infoHash ?? infohash ?? '')
           succeeded = true
+          // R7 P0-3：元数据产物收集进本地缓存（同 infohash 二次任务秒出文件树）
+          if (ih) {
+            const { readdir } = await import('fs/promises')
+            const saved = await readdir(metaDir).catch(() => [] as string[])
+            const torrentFile = saved.find((f) => f.toLowerCase().endsWith('.torrent'))
+            if (torrentFile) void cacheTorrentFile(join(metaDir, torrentFile), ih)
+          }
           return {
             name,
             files,
@@ -135,8 +195,11 @@ export class Aria2Adapter implements EngineAdapter {
         }
         await sleep(1000)
       }
-      // 超时
-      throw makeError('METADATA_TIMEOUT')
+      // 超时（R7：带出口动作——冷门种建议改用 .torrent 文件）
+      throw makeError('METADATA_TIMEOUT', {
+        message:
+          '磁力元数据获取超时（90s）：种子冷门或 DHT 连通性差。建议改用 .torrent 文件创建任务，或稍后重试'
+      })
     } finally {
       if (!succeeded) {
         await this.rpc().call('remove', gid).catch(() => {})
@@ -159,36 +222,76 @@ export class Aria2Adapter implements EngineAdapter {
     }
   }
 
-  /** HTTP 直链 HEAD 探测（M1-7）：大小/文件名嗅探；带超时防挂起 */
+  /** HTTP 直链 HEAD 探测（M1-7）：大小/文件名嗅探；带超时防挂起。
+   * R7 P1 多源：task.params.urls 携带多个同文件镜像时逐个探测，
+   * 仅保留与主 URL content-length 完全一致的镜像（防错拼不同文件） */
   private async parseHttp(task: Task): Promise<ParseOutput> {
     // M3 修复：拒绝内网/回环目标——主进程代发探测并回显响应头不得成为内网探测通道
     const { isInternalUrl } = await import('../net-guard')
-    if (await isInternalUrl(task.source)) {
+    const candidateUrls = readTaskUrls(task)
+    const probed: { url: string; len: number; res: Response }[] = []
+    let primary: { url: string; len: number; res: Response } | null = null
+    for (const url of candidateUrls) {
+      if (await isInternalUrl(url)) {
+        if (url === task.source) {
+          throw makeError('PARSE_FAILED', {
+            message: '该链接指向内网/回环地址，不允许探测与下载。'
+          })
+        }
+        log.warn(`多源镜像指向内网，已剔除: ${url}`)
+        continue
+      }
+      try {
+        const res = await fetch(url, {
+          method: 'HEAD',
+          redirect: 'follow',
+          signal: AbortSignal.timeout(HTTP_PROBE_TIMEOUT_MS)
+        })
+        if (!res.ok) {
+          if (url === task.source) {
+            const timedOut = [408, 425].includes(res.status) || res.status >= 500
+            throw makeError(timedOut ? 'HTTP_TIMEOUT' : 'PARSE_FAILED', {
+              message:
+                res.status === 429
+                  ? '直链探测失败（HTTP 429）：请求过于频繁被服务端限流，请稍后重试。'
+                  : `直链探测失败（HTTP ${res.status}）。请检查链接是否有效后重试。`
+            })
+          }
+          log.warn(`多源镜像探测失败（HTTP ${res.status}），已剔除: ${url}`)
+          continue
+        }
+        // 重定向后的最终地址同样不得落在内网（防公网 302 跳内网）
+        if (res.url && res.url !== url && (await isInternalUrl(res.url))) {
+          if (url === task.source) {
+            throw makeError('PARSE_FAILED', {
+              message: '该链接重定向至内网/回环地址，已中止探测。'
+            })
+          }
+          log.warn(`多源镜像重定向至内网，已剔除: ${url}`)
+          continue
+        }
+        const len = Number(res.headers.get('content-length') ?? 0)
+        const entry = { url, len, res }
+        if (!primary) primary = entry
+        else if (primary.len > 0 && len === primary.len) probed.push(entry)
+        else if (len !== primary.len) {
+          log.warn(`多源镜像大小不一致（${len} ≠ ${primary.len}），已剔除: ${url}`)
+        }
+      } catch (err) {
+        if (url === task.source) throw err
+        log.warn(`多源镜像探测异常，已剔除: ${url} (${String(err)})`)
+      }
+    }
+    if (!primary) {
       throw makeError('PARSE_FAILED', {
-        message: '该链接指向内网/回环地址，不允许探测与下载。'
+        message: '全部镜像探测失败，请检查链接是否有效后重试。'
       })
     }
-    const res = await fetch(task.source, {
-      method: 'HEAD',
-      redirect: 'follow',
-      signal: AbortSignal.timeout(HTTP_PROBE_TIMEOUT_MS)
-    })
-    if (!res.ok) {
-      // L1 修复：404/403 等非超时状态不再一律归因为"超时"，与诊断五类口径一致
-      // P3 修复：429 是限流而非超时，单独文案（diagnosis.ts 中 429 归 risk 类）
-      const timedOut = [408, 425].includes(res.status) || res.status >= 500
-      throw makeError(timedOut ? 'HTTP_TIMEOUT' : 'PARSE_FAILED', {
-        message:
-          res.status === 429
-            ? '直链探测失败（HTTP 429）：请求过于频繁被服务端限流，请稍后重试。'
-            : `直链探测失败（HTTP ${res.status}）。请检查链接是否有效后重试。`
-      })
-    }
-    // 重定向后的最终地址同样不得落在内网（防公网 302 跳内网）
-    if (res.url && res.url !== task.source && (await isInternalUrl(res.url))) {
-      throw makeError('PARSE_FAILED', {
-        message: '该链接重定向至内网/回环地址，已中止探测。'
-      })
+    const res = primary.res
+    // R7 多源：探测通过的镜像写回 params.urls（start 时 addUri 多 URI 并行）
+    const mirrors = [primary.url, ...probed.map((p) => p.url)]
+    if (mirrors.length > 1) {
+      log.info(`多源下载：${mirrors.length} 个镜像通过 content-length 校验`)
     }
     const len = Number(res.headers.get('content-length') ?? 0)
     const cd = res.headers.get('content-disposition') ?? ''
@@ -206,7 +309,10 @@ export class Aria2Adapter implements EngineAdapter {
     return {
       name,
       totalBytes: len,
-      files: [{ path: name, size: len }]
+      files: [{ path: name, size: len }],
+      // 审查修复：恒返回（至少含主 URL）——manager 据此回写 params.urls，
+      // 保证未通过校验的原始镜像不会残留在 params 里被 start() 直接使用
+      mirrors
     }
   }
 
@@ -247,6 +353,10 @@ export class Aria2Adapter implements EngineAdapter {
       seedRatio: task.seedRatio ?? 0,
       allowOverwrite: selection?.allowOverwrite === true
     })
+    // R7 P1：单任务限速（params.speedLimit；changeOption 合并语义下无需在每个
+    // 后续 changeOption 重复携带，unpause/勾选回放不会清除）
+    const speedLimit = readTaskSpeedLimit(task)
+    if (speedLimit) opts['max-download-limit'] = speedLimit
 
     try {
       if (task.type === 'bt') {
@@ -259,10 +369,33 @@ export class Aria2Adapter implements EngineAdapter {
       }
 
       if (task.type === 'magnet') {
+        // R7 P0-3：本地元数据缓存命中 → 直接 addTorrent（跳过二次 BEP-9 元数据等待）
+        const ih = extractInfohash(task.source)
+        const cachedBase64 = ih ? await readCachedTorrent(ih) : null
+        if (cachedBase64) {
+          log.info(`磁力启动走本地元数据缓存 ih=${ih ?? ''}`)
+          const gid = (await this.rpc().call('addTorrent', cachedBase64, [], {
+            ...opts,
+            pause: 'true'
+          })) as string
+          let ok = false
+          try {
+            if (selection?.paths?.length) {
+              await this.applySelectionByPath(gid, selection.paths, task.threads, task.saveDir, task.seedRatio ?? 0)
+            }
+            await this.rpc().call('unpause', gid)
+            ok = true
+            return gid
+          } finally {
+            if (!ok) await this.rpc().call('remove', gid).catch(() => {})
+          }
+        }
+
         const gid = (await this.rpc().call('addUri', [task.source], {
           dir: task.saveDir,
           'bt-save-metadata': 'true',
-          pause: 'true'
+          pause: 'true',
+          ...this.magnetTrackerMerge(task.source)
         })) as string
         // P2 修复：waitMagnetMetadata 的 RPC 异常此前直接上抛，pause 态 gid 泄漏
         // （此时 engineGid 尚未落库，管理器 remove 路径够不到它）——finally 统一移除
@@ -272,6 +405,10 @@ export class Aria2Adapter implements EngineAdapter {
           if (!ready) {
             throw makeError('METADATA_TIMEOUT')
           }
+          // 审查修复：start 路径拿到的元数据同样收集进本地缓存——此前仅 parse 收集，
+          // 重试/恢复等直接 start 的路径缓存覆盖面打折
+          const readyIh = normalizeInfohash(ready.infoHash ?? '')
+          if (readyIh) await this.collectMetadataToCache(task.saveDir, readyIh)
           if (selection?.paths?.length) {
             await this.applySelectionByPath(gid, selection.paths, task.threads, task.saveDir, task.seedRatio ?? 0)
           }
@@ -283,7 +420,9 @@ export class Aria2Adapter implements EngineAdapter {
         }
       }
 
-      return (await this.rpc().call('addUri', [task.source], opts)) as string
+      // R7 P1 多源：task.params.urls 携带同文件镜像列表 → addUri 多 URI 并行分段
+      const urls = readTaskUrls(task)
+      return (await this.rpc().call('addUri', urls, opts)) as string
     } catch (err) {
       // P1 加固：allow-overwrite 默认关闭后，同名文件直接报 aria2 原生英文错误——
       // 归一为带出口动作的中文提示
@@ -297,15 +436,38 @@ export class Aria2Adapter implements EngineAdapter {
     }
   }
 
-  private async waitMagnetMetadata(gid: string): Promise<boolean> {
+  /** 等待磁力元数据：成功返回终结态 status（含 infoHash），失败/超时返回 null */
+  private async waitMagnetMetadata(gid: string): Promise<Aria2Status | null> {
     const deadline = Date.now() + METADATA_TIMEOUT_MS
     while (Date.now() < deadline) {
       const st = (await this.rpc().call('tellStatus', gid)) as Aria2Status
-      if (st.status === 'complete') return true
-      if (st.status === 'error' || st.status === 'removed') return false
+      if (st.status === 'complete') return st
+      if (st.status === 'error' || st.status === 'removed') return null
       await sleep(1000)
     }
-    return false
+    return null
+  }
+
+  /** 审查修复（P2-6）：从 saveDir 中按 infohash 精确匹配收集 bt-save-metadata 产物
+   * 进本地缓存。saveDir 可能有用户自己的 .torrent，逐个解析比对 infohash 防误收 */
+  private async collectMetadataToCache(saveDir: string, infohash: string): Promise<void> {
+    try {
+      const { readdir } = await import('fs/promises')
+      const names = (await readdir(saveDir)).filter((f) => f.toLowerCase().endsWith('.torrent'))
+      for (const n of names) {
+        try {
+          const info = parseTorrentFile(join(saveDir, n))
+          if (normalizeInfohash(info.infohash) === infohash) {
+            void cacheTorrentFile(join(saveDir, n), infohash)
+            return
+          }
+        } catch {
+          // 非法 .torrent：跳过
+        }
+      }
+    } catch (err) {
+      log.debug(`元数据收集失败（不阻断任务）: ${String(err)}`)
+    }
   }
 
   /** 按相对路径回放 select-file（tellStatus 绝对路径裁掉 dir 后比对） */
@@ -331,6 +493,14 @@ export class Aria2Adapter implements EngineAdapter {
       .map((p) => indexByRel.get(p.replace(/\\/g, '/').toLowerCase()))
       .filter((v): v is string => v !== undefined)
       .map(Number)
+    // #17 加固（与 confirmSelection 同防线）：勾选与元数据 0 命中时不带 select-file
+    // 的 unpause 会静默全量下载——明确失败并给出口动作（磁力缓存路径复用此方法）
+    if (relativePaths.length > 0 && indexes.length === 0) {
+      throw new Error(
+        `勾选的 ${relativePaths.length} 个文件与种子元数据 0 命中（文件清单可能已变化）。` +
+          '请删除该任务后重新解析，在文件树中重新勾选'
+      )
+    }
     await this.rpc().call('changeOption', gid, {
       ...buildTaskOptions({ type: 'bt', threads, saveDir, seedRatio, selectedFileIndexes: indexes })
     })
@@ -506,6 +676,19 @@ function extractInfohash(source: string): string | null {
   const m = /xt=urn:btih:([a-zA-Z0-9]+)/.exec(source)
   return m?.[1] ? normalizeInfohash(m[1]) : null
 }
+
+/** R7 P0-3：磁力自带 tr= 参数与订阅源并集（bt-tracker 为 CSV，逐条注入防覆盖全局） */
+function extractMagnetTrackers(source: string): string[] {
+  try {
+    return [...new URL(source).searchParams.getAll('tr')]
+      .map((t) => t.trim())
+      .filter((t) => /^[a-z]+:\/\//i.test(t) && !/[\s,]/.test(t) && t.length <= 500)
+  } catch {
+    return []
+  }
+}
+
+/** R7 P1 多源：读任务镜像 URL 列表（params.urls JSON；缺省仅 source 本身）——见 task/params.ts */
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))

@@ -1,6 +1,6 @@
 # OmniGet 产品技术设计文档
 
-> ⚠️ **架构变更注记（2026-09-30）**：音乐链路已从 Python omni-service sidecar 迁移为主进程内嵌 TS 引擎（`src/main/music/`），本文档中涉及 FastAPI / 16801 端口 / sidecar 音乐服务 / WS 鉴权的章节均为历史设计，现状以 `AGENT.md` 与 `docs/遗留问题清单.md` #20 为准。
+> ⚠️ **架构变更注记（2026-09-30）**：音乐链路已从 Python omni-service sidecar 迁移为主进程内嵌 TS 引擎（`src/main/music/`），本文档中涉及 FastAPI / 16801 端口 / sidecar 音乐服务 / WS 鉴权的章节均为历史设计，现状以 `AGENT.md` 与 `docs/backlog.md` 为准。
 >
 > **工作代号**：OmniGet（可替换）
 > **版本**：v1.0 ｜ **日期**：2026-09-29 ｜ **状态**：设计评审稿

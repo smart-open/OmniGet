@@ -34,7 +34,13 @@ const LABELS: Record<string, string> = {
   qq: 'QQ 音乐',
   kugou: '酷狗',
   migu: '咪咕',
-  soda: '汽水'
+  soda: '汽水',
+  // R7 P1：短视频平台（yt-dlp 提取，按任务平台归因）
+  douyin: '抖音',
+  kuaishou: '快手',
+  xiaohongshu: '小红书',
+  weibo: '微博',
+  xigua: '西瓜视频'
 }
 
 function entry(id: string, engine: string): Entry {
@@ -117,6 +123,11 @@ export function recordPlatformDegraded(
     MAX_RECENT_ERRORS
   )
   if (hint) e.hint = hint
+}
+
+/** R7 P1：预置平台条目（unknown 态出现在面板，用户可见覆盖面；有事件后自动翻转） */
+export function seedPlatforms(ids: string[], engine: string): void {
+  for (const id of ids) entry(id, engine)
 }
 
 /** 面板快照（含引擎级 + 音乐平台级；未出现过的平台不列出） */

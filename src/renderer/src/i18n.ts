@@ -16,9 +16,9 @@ type Dict = Record<string, string>
 const zh: Dict = {
   // 侧栏导航
   'nav.all': '全部',
-  'nav.downloading': '下载中',
-  'nav.completed': '已完成',
-  'nav.failed': '下载失败',
+  'nav.downloading': '处理中',
+  'nav.failed': '处理失败',
+  'nav.completed': '处理完成',
   'nav.bt': '种子磁力',
   'nav.video': '视频',
   'nav.music': '音乐',
@@ -85,7 +85,7 @@ const zh: Dict = {
 
 const en: Dict = {
   'nav.all': 'All',
-  'nav.downloading': 'Downloading',
+  'nav.downloading': 'Processing',
   'nav.completed': 'Completed',
   'nav.failed': 'Failed',
   'nav.bt': 'Torrent',

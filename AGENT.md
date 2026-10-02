@@ -8,11 +8,10 @@
 
 **权威文档**（本目录 docs/，改动须同步）：
 - `OmniGet-产品技术设计文档.md`（§1–§11 + 附录，所有实现的唯一依据）
-- `产品规划-竞品分析与路线图.md`（竞品分析 + Backlog 状态 + 里程碑完成存档）
-- `遗留问题清单.md`（发布阻塞/人工走查项追踪）
-- `下载引擎优化方案-BT磁力-短视频-P2SP.md`（R7 调研落地方案）
+- `OmniGet-竞品分析与路线图.md`（竞品分析 + Backlog 状态 + 里程碑完成存档）
+- `backlog.md`（未完成项统一追踪：发布阻塞/待办/观察项，含 R7 优化遗留）
 
-> 2026-10-02 整理：《OmniGet-开发任务计划.md》压缩并入产品规划末章、《M4-10-三态走查清单.md》人工项并入遗留问题清单后删除（原文见 git 历史）。
+> 2026-10-02 整理：《开发任务计划》《M4-10 三态走查清单》《遗留问题清单》《下载引擎优化方案》已分别合并/归档后删除（未完成项统一收口到 `backlog.md`；原文见 git 历史）。
 
 ## 2. 技术栈与版本基线
 
@@ -157,6 +156,31 @@ npm run dev               # GUI 冒烟（看日志：aria2 online / tray created
 - Windows 冒烟清理命令（Stop-Process/taskkill）需审批，脚本化时注意
 
 ## 10. 审查与修复记录
+
+**下载引擎优化落地（2026-10-02，R7，按 docs/下载引擎优化方案-BT磁力-短视频-P2SP.md 优先级实施）**：typecheck 双端 + 73/73 单测（新增 shortlink/torrent-cache 8 例）+ aria2c 1.37.0 真机全参数启动验证（9 个新选项逐项核实存在且可启动）。
+
+**P0 BT/磁力提速**：
+1. **UPnP/NAT-PMP 端口映射**（新增 `src/main/net/nat.ts`，nat-api 0.3.1 + 手写类型声明）：aria2 online 后映射 TCP 6881（BT 数据）+ UDP 6881（DHT）；autoUpdate 自动续期、before-quit 撤销（TTL 兜底）、失败静默降级、幂等防重启重复映射；设置项 `bt.upnp`（默认开）
+2. **端口范围**：`listen-port` 6881 单端口 → `6881-6891`，新增 `dht-listen-port=6881-6891`
+3. **磁力元数据提速**（新增 `src/main/torrent/cache.ts`）：bt-save-metadata 产物收集进 `userData/torrents/<hex>.torrent`；解析期缓存命中 → 本地 parseTorrentFile 秒出文件树（跳过 DHT 90s 等待）；启动期命中 → addTorrent 直接复用（跳过二次 BEP-9）；magnet 自带 `tr=` 与订阅源并集注入（bt-tracker CSV，每任务作用域防覆盖全局）
+4. **Tracker 每日定时刷新**（修复注释与实现不符）+ 刷新后重注入 changeGlobalOption
+5. **防 QoS/僵尸任务**：`bt-force-encryption=true`（设置项 bt.forceEncryption 默认开，绕运营商 BT QoS）、`bt-stop-timeout=1800`（0 速 30 分钟自停）、`bt-detach-seed-only=true`
+
+**P1（本轮落地部分）**：
+6. **多源聚合下载（P2SP-lite）**：新建对话框粘贴 ≥2 个 URL → 单任务镜像合并；parseHttp 逐镜像 HEAD 校验（content-length 完全一致才保留，内网/失败剔除）→ ParseOutput.mirrors → params.urls 持久化 → start 时 addUri 多 URI 并行分段（aria2 原生多源架构）
+7. **调度选项**：`uri-selector=adaptive`（多镜像测速择优）+ `optimize-concurrent-downloads=true`（按带宽自动扩并发）
+8. **短视频短链/分享文案展开**（新增 `src/main/shortlink.ts`）：分享文案提取 URL（仅接管已知视频/短链域，不误伤音乐查询）→ v.douyin.com / v.kuaishou.com / xhslink.com / b23.tv 302 一跳还原；展开后 noWatermark 默认 true 回填
+
+**⚠ 环境注记**：`scripts/e2e-aria2.ts` 在本机当前状态下连接 16888 ECONNREFUSED（改动前基线同样失败，与本批无关；已用探针验证 toSpawnArgs 全参数 + changeGlobalOption 全量重放均 OK——失败疑为 binaryPath 纯 Node 解析差异，待排查）。
+
+**R7 第二批（同日，P1/P2 收尾）**：
+6. **单任务限速实装**：新建对话框「单任务限速」输入 → `CreateTaskInput.speedLimit` → `params.speedLimit` → `max-download-limit`（HTTP/BT/磁力全路径，磁力确认经 changeOption 补应用）；非法格式忽略。辅助函数收敛至 `src/main/task/params.ts`（纯函数，不把 db 依赖带进 adapter）
+7. **健康页短视频平台项**：health 注册表加 douyin/kuaishou/xiaohongshu/weibo/xigua（`seedPlatforms` 预置 unknown 行）；yt-dlp 完成按平台 recordPlatformOk、失败按平台归因 recordPlatformFailure；manager 经 `markShortVideo(taskId, platform)` 回传平台（params.platform 持久化）
+8. **分站 Cookie**：cookieFile 同目录 `<platform>.txt`（douyin/kuaishou/xiaohongshu/weibo/xigua）优先于全局 cookie；设置页说明；ytdlp 适配器 start 时按平台解析
+9. **peer 指纹伪装（P2-2）**：`--peer-id-prefix=-qB4650-` + `--peer-agent=qBittorrent 4.6.5` 默认启用（真机启动 + changeGlobalOption 重放验证通过）
+10. **补平台评估（P1-4）**：实测 yt-dlp 2026.08.19 有 Douyin/Ixigua/Weibo/TikTok extractor，**无 Kuaishou/Xiaohongshu**——缺口平台需解析服务或独立适配（见方案文档 P1-3 暂缓项）
+
+**遗留（未实施）**：解析服务 sidecar（P1-3 暂缓）、直链解析聚合器（P1-3a 暂缓）、BT 流式预览（P2-1 暂缓）、迅雷 SDK（P2-3 维持不做）。
 
 **音乐下载链路修复 + 失败视图/搜索列表/试听播放器（2026-10-02，R6，用户反馈"音乐还是下载失败但 skill 可正常下载"）**：typecheck 双端 + 65/65 单测 + 端到端实测（空歌手「童年」→ 网易云 2.87MB 完整音频 + LRC，26s）。归因（两轮逐端点探测 + 运行时日志比对 skill 源码）与修复——
 

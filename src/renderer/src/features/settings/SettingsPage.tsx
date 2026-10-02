@@ -302,6 +302,8 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
   // R2/R7：并发上限与自动归档
   const [maxConcurrent, setMaxConcurrent] = useState('0')
   const [autoArchive, setAutoArchive] = useState(false)
+  const [upnp, setUpnp] = useState(true)
+  const [btEncrypt, setBtEncrypt] = useState(true)
   const [rules, setRules] = useState<ScheduleRule[]>([])
   const [trackers, setTrackers] = useState<TrackerEntry[]>([])
   const [newTracker, setNewTracker] = useState('')
@@ -311,6 +313,13 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
   const [btDiag, setBtDiag] = useState<
     'checking' | 'listening' | 'not-listening' | 'error' | null
   >(null)
+  // 审查修复：自检结果展示实际探测端口（listen-port 现为区间）+ NAT 映射状态
+  const [btDiagPort, setBtDiagPort] = useState<number | null>(null)
+  const [natDiag, setNatDiag] = useState<{
+    attempted: boolean
+    ok: boolean
+    error: string | null
+  } | null>(null)
   const [btExt, setBtExt] = useState<
     | { state: 'checking' }
     | { state: 'ok' | 'blocked'; ok: number; total: number; ip?: string }
@@ -348,6 +357,8 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
       setSaveDir(String((await window.omniget.settingsGet('download.saveDir')) ?? ''))
       setMaxConcurrent(String((await window.omniget.settingsGet('download.maxConcurrent')) ?? 0))
       setAutoArchive((await window.omniget.settingsGet('download.autoArchive')) === true)
+      setUpnp((await window.omniget.settingsGet('bt.upnp')) !== false)
+      setBtEncrypt((await window.omniget.settingsGet('bt.forceEncryption')) !== false)
       setRules((await window.omniget.getScheduleRules()) ?? [])
       setTrackers(await window.omniget.listTrackers())
       setScripts(await window.omniget.listAdapterScripts())
@@ -539,6 +550,9 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                 mono
                 hint="Netscape 格式 cookies.txt；B 站 1080P / YouTube 登录内容需要"
               />
+              <p className="mt-1 text-[10px] leading-relaxed text-text-3">
+                分站 Cookie（R7）：在 cookie 文件同目录放置 douyin.txt / kuaishou.txt / xiaohongshu.txt / weibo.txt / xigua.txt，对应平台的任务自动优先使用
+              </p>
               <Button
                 size="sm"
                 onClick={() => {
@@ -816,8 +830,50 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
               </Button>
             </div>
             <p className="mt-2 text-[10px] text-text-3">
-              订阅源：ngosang/trackerslist 每日最佳；刷新失败自动降级使用本地缓存；手动条目随任务注入
+              订阅源：ngosang/trackerslist 每日最佳（每日自动刷新）；刷新失败自动降级使用本地缓存；手动条目随任务注入
             </p>
+
+            {/* R7 P0：BT 网络加速（可连接性 = BT 速度第一影响因素） */}
+            <div className="mt-4 border-t border-border pt-3">
+              <p className="mb-2 text-xs font-medium text-text-2">BT 网络加速</p>
+              <label className="flex cursor-pointer items-center gap-2 text-xs text-text-2">
+                <input
+                  type="checkbox"
+                  checked={upnp}
+                  onChange={(e) => setUpnp(e.target.checked)}
+                />
+                UPnP / NAT-PMP 自动端口映射（TCP {`6881`} 数据 + UDP {`6881`} DHT）
+              </label>
+              <p className="mt-1 text-[10px] leading-relaxed text-text-3">
+                在路由器上自动创建端口映射，允许外部 peer 主动连入（可连接性决定 BT/磁力速度）；路由器不支持时静默降级。修改后重启应用生效
+              </p>
+              <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs text-text-2">
+                <input
+                  type="checkbox"
+                  checked={btEncrypt}
+                  onChange={(e) => setBtEncrypt(e.target.checked)}
+                />
+                BT 消息加密（绕运营商 QoS 限速/干扰）
+              </label>
+              <p className="mt-1 text-[10px] leading-relaxed text-text-3">
+                arc4 加密握手，绕运营商 BT QoS 限速/干扰；注意：开启后个别仅支持明文握手的 peer
+                会拒绝连接（关闭可恢复兼容，但流量可能被识别限速）。修改后重启应用生效
+              </p>
+              <Button
+                size="sm"
+                className="mt-3"
+                onClick={() => {
+                  Promise.all([
+                    window.omniget.settingsSet('bt.upnp', upnp),
+                    window.omniget.settingsSet('bt.forceEncryption', btEncrypt)
+                  ])
+                    .then(() => flash('BT 网络加速设置已保存'))
+                    .catch((err) => toastError('保存 BT 网络设置', err))
+                }}
+              >
+                保存
+              </Button>
+            </div>
 
             {/* BT 端口连通性自检（#5） */}
             <div className="mt-4 border-t border-border pt-3">
@@ -830,16 +886,20 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                     setBtDiag('checking')
                     void window.omniget
                       .diagBtPort()
-                      .then((r) => setBtDiag(r.listening ? 'listening' : 'not-listening'))
+                      .then((r) => {
+                        setBtDiag(r.listening ? 'listening' : 'not-listening')
+                        setBtDiagPort(r.port)
+                        setNatDiag(r.nat)
+                      })
                       .catch(() => setBtDiag('error'))
                   }}
                 >
                   BT 端口自检
                 </Button>
                 <span className="text-[10px] text-text-3">
-                  {btDiag === 'listening' && '✓ 6881 端口监听正常'}
+                  {btDiag === 'listening' && `✓ ${btDiagPort ?? 6881} 端口监听正常`}
                   {btDiag === 'not-listening' &&
-                    '✗ 6881 端口未监听——aria2 可能未就绪，请稍后重试'}
+                    `✗ ${btDiagPort ?? 6881} 端口未监听——aria2 可能未就绪，请稍后重试`}
                   {btDiag === 'error' && '自检失败'}
                   {btDiag === 'checking' && '检测中…'}
                   {btDiag === null && '检测 aria2 BT 端口监听状态'}
@@ -848,6 +908,15 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
               <p className="mt-1 text-[10px] text-text-3">
                 提示：本地监听正常 ≠ 外网可达。BT 提速请在路由器/防火墙放行 <span className="num">6881</span> 端口（TCP+UDP）。
               </p>
+              {natDiag && (
+                <p className="mt-1 text-[10px] text-text-3">
+                  {natDiag.attempted
+                    ? natDiag.ok
+                      ? '✓ UPnP/NAT-PMP 端口映射生效（外部 peer 可主动连入）'
+                      : `UPnP/NAT-PMP 映射未生效${natDiag.error ? `：${natDiag.error}` : ''}（路由器不支持时属常态，BT 仍可用但速度可能受限）`
+                    : 'UPnP 端口映射尚未尝试（aria2 未上线或已在上方设置中关闭）'}
+                </p>
+              )}
 
               {/* 外网可达性探测（#5 增强，opt-in：经第三方 check-host.net，会暴露公网 IP） */}
               <div className="mt-3 flex items-center gap-2">

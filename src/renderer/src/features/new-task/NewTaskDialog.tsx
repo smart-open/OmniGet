@@ -60,6 +60,7 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [query, setQuery] = useState('')
   const [threads, setThreads] = useState(16)
+  const [speedLimit, setSpeedLimit] = useState('')
   const [saveDir, setSaveDir] = useState('')
   const [seedAndStop, setSeedAndStop] = useState(true)
   const [dragOver, setDragOver] = useState(false)
@@ -87,6 +88,11 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
   // 防止旧会话的 createTask/confirmSelection 结果回填进新会话状态。
   const sessionRef = useRef(0)
 
+  // R7 P1 审查修复：限速格式即时校验（aria2 格式：数字 + 可选 K/M）——非法值主进程
+  // 会静默忽略，用户会误以为限速已生效；此处前端提示 + 提交阻断
+  const speedLimitTrimmed = speedLimit.trim()
+  const speedLimitValid = speedLimitTrimmed === '' || /^\d+(\.\d+)?[KM]?$/i.test(speedLimitTrimmed)
+
   useEffect(() => {
     if (open) {
       sessionRef.current += 1
@@ -106,6 +112,7 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
       setEmbedSubs(false)
       setEmbedThumbnail(false)
       setDelogo(false)
+      setSpeedLimit('')
       if (!saveDir) {
         const sid = sessionRef.current
         window.omniget
@@ -205,6 +212,10 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
       await submitBatch()
       return
     }
+    if (!speedLimitValid) {
+      setError('单任务限速格式有误：数字 + 可选 K/M，例：2M / 500K')
+      return
+    }
     const sid = sessionRef.current
     setPhase('parsing')
     setError('')
@@ -213,7 +224,8 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
         source: source.trim(),
         threads,
         saveDir,
-        seedRatio: seedAndStop ? 0 : undefined
+        seedRatio: seedAndStop ? 0 : undefined,
+        speedLimit: speedLimit.trim() || undefined
       })
       if (sid !== sessionRef.current) return // #16：会话已关闭/重开，丢弃过期结果
       applyResult(res)
@@ -231,6 +243,10 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
       .map((l) => l.trim())
       .filter(Boolean)
     if (lines.length === 0) return
+    if (!speedLimitValid) {
+      setError('单任务限速格式有误：数字 + 可选 K/M，例：2M / 500K')
+      return
+    }
     const sid = sessionRef.current
     setBatchBusy(true)
     setError('')
@@ -248,7 +264,8 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
           source: line,
           threads,
           saveDir,
-          seedRatio: seedAndStop ? 0 : undefined
+          seedRatio: seedAndStop ? 0 : undefined,
+          speedLimit: speedLimit.trim() || undefined
         })
         if (res.kind === 'failed') {
           failed++
@@ -357,6 +374,10 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
   }
 
   async function submitSourceWithPath(path: string): Promise<void> {
+    if (!speedLimitValid) {
+      setError('单任务限速格式有误：数字 + 可选 K/M，例：2M / 500K')
+      return
+    }
     const sid = sessionRef.current
     setPhase('parsing')
     setError('')
@@ -365,7 +386,8 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
         source: path,
         threads,
         saveDir,
-        seedRatio: seedAndStop ? 0 : undefined
+        seedRatio: seedAndStop ? 0 : undefined,
+        speedLimit: speedLimit.trim() || undefined
       })
       if (sid !== sessionRef.current) return
       applyResult(res)
@@ -884,6 +906,27 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
                       style={{ '--fill': `${((threads - 1) / 63) * 100}%` } as React.CSSProperties}
                       className="w-full"
                     />
+                  </div>
+                  {/* R7 P1：单任务限速（可选；BT/磁力/HTTP 生效，视频引擎走 yt-dlp 自身限速不在列） */}
+                  <div>
+                    <div className="mb-1.5 flex items-center justify-between text-xs">
+                      <span className="text-text-2">单任务限速</span>
+                      <span className="text-text-3">留空不限</span>
+                    </div>
+                    <input
+                      value={speedLimit}
+                      onChange={(e) => setSpeedLimit(e.target.value)}
+                      placeholder="例：2M / 500K"
+                      aria-invalid={!speedLimitValid}
+                      className={`num h-7 w-32 rounded-ctl border bg-surface-2 px-2 text-xs outline-none focus:border-accent ${
+                        speedLimitValid ? 'border-border' : 'border-red-400'
+                      }`}
+                    />
+                    {!speedLimitValid && (
+                      <p className="mt-1 text-[10px] text-red-400">
+                        格式：数字 + 可选 K/M，例：2M / 500K
+                      </p>
+                    )}
                   </div>
 
                   {/* 保存目录 */}

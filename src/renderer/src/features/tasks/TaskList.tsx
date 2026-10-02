@@ -48,9 +48,9 @@ const FILTERS: Record<string, (t: Task) => boolean> = {
 
 const FILTER_TITLES: Record<string, string> = {
   all: '全部任务',
-  downloading: '正在下载',
-  completed: '已完成',
-  failed: '下载失败',
+  downloading: '处理中',
+  completed: '处理完成',
+  failed: '处理失败',
   bt: '种子与磁力',
   video: '视频',
   music: '音乐',

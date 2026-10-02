@@ -1,17 +1,41 @@
 # OmniGet
 
-一站式跨平台桌面下载器：BT/磁力（aria2c）、视频（yt-dlp）、音乐（内嵌引擎）、HTTP 直链 + 本地工具箱（ffmpeg）。
+一站式跨平台桌面下载器：**BT/磁力（aria2c）· 视频（yt-dlp）· 音乐（五平台内嵌引擎）· HTTP 直链**，内置本地 ffmpeg 工具箱。定位「本地优先、无广告、界面现代」。
 
 支持 **Windows / macOS / Linux** 三平台运行与打包（NSIS/MSI/ZIP、DMG、AppImage/DEB）。纯 Node/TS 单运行时，无 Python 依赖。
 
-技术栈：Electron 33 + Vite + React 18 + TS 严格模式 + Tailwind + better-sqlite3。
+技术栈：Electron 33 + Vite + React 18 + TS 严格模式 + Tailwind + zustand + better-sqlite3。
+
+## 功能特性
+
+**下载核心**
+- HTTP 多连接分段 + 断点续传；**多源聚合下载**（粘贴多个镜像 URL 合并单任务，content-length 一致性校验后并行拉取）
+- BT/磁力：BEP-9 元数据流程（先解析后勾选零流量）、文件树三态勾选、**元数据本地缓存**（二次任务秒出文件树）、UPnP/NAT-PMP 自动端口映射、Tracker 多源订阅 + 每日刷新、BT 消息加密（绕运营商 QoS）、0 速自停防僵尸任务
+- 单任务限速、全局并发队列（FIFO 自动派发）、定时/分时段限速计划、按类型自动归档
+
+**视频**
+- yt-dlp 全站提取：合集/播放列表勾选、格式选择器、字幕/封面嵌入、并发分片
+- 短视频三级去水印（源站直取 → 候补通道 → delogo 后处理副本）；分享短链/文案直贴自动展开
+- 视频参数预设（保存/应用）、转音频提取、下载前预览（封面/时长/体积）与多维筛选
+
+**音乐**（五平台回退链：网易 → QQ → 酷狗 → 咪咕 → 汽水）
+- 原唱校验 + 原版度打分（拒绝翻唱/截断片段）、三档音质（逐行可选）、LRC 歌词落盘
+- 试听长条播放器（可拖动进度条）、「下载失败」专属视图 + 一键重试
+
+**生态与体验**
+- 浏览器扩展（MV3：右键发送 + 可选自动拦截）、Web UI 本地面板（回环 + token）
+- 平台健康面板（提取器/音乐/短视频平台可用性公示）、适配脚本热更（声明式 host 重写，合规形态）
+- 本地工具箱：ffmpeg 19+ 工具（转换/裁剪/拼接/压缩/GIF/字幕/人声分离/校验和/种子创建等）
+- 七主题系统、虚拟滚动任务列表（10k+ 行）、Inspector 抽屉、快捷键全集、回收站、统计页、i18n（zh-CN/en）
+
+> 版本历史见 [CHANGELOG.md](./CHANGELOG.md)；未完成项与待办见 [docs/backlog.md](./docs/backlog.md)。
 
 ## 开发
 
 ```bash
 npm install          # 若 better-sqlite3/electron 原生二进制下载失败见下方说明
 npm run dev          # 三端（main/preload/renderer）开发模式
-npm run typecheck    # TS 严格模式类型检查
+npm run typecheck    # TS 严格模式类型检查（node + web 双端）
 npm run build        # 生产构建（out/）
 npm run dist:win     # Windows NSIS/MSI/ZIP 打包（dist:mac / dist:linux 同理）
 ```
@@ -19,13 +43,14 @@ npm run dist:win     # Windows NSIS/MSI/ZIP 打包（dist:mac / dist:linux 同�
 ## 目录
 
 ```
-src/main/        主进程：编排核心（orchestrator/ 引擎监督、music/ 内嵌音乐引擎、task/ 状态机、db/）
+src/main/        主进程：编排核心（orchestrator/ 引擎监督、music/ 内嵌音乐引擎、task/ 状态机、net/ NAT 映射、db/）
 src/preload/     contextBridge 白名单桥
 src/renderer/    React UI（app/ features/ components/ui stores/ styles/tokens.css）
 src/shared/      双端共享类型（任务模型、IPC 通道、错误码表）
 resources/engines/   sidecar 二进制（aria2c/yt-dlp/ffmpeg，按平台目录）
+resources/extension/ 浏览器扩展（MV3）
 scripts/         e2e / 探测 / 图标 / 测试辅助脚本
-docs/            技术设计文档 + 产品规划/路线图 + 遗留问题清单 + 引擎优化方案
+docs/            技术设计文档 + 竞品分析与路线图 + backlog（未完成项追踪）
 ```
 
 ## 跨平台约定
@@ -61,18 +86,14 @@ cd node_modules/better-sqlite3; npx prebuild-install -r electron -t <electron版
 $env:ELECTRON_MIRROR='https://npmmirror.com/mirrors/electron/'; node node_modules/electron/install.js
 ```
 
-## 当前状态（T0~M4 已收口，详见 docs/产品规划-竞品分析与路线图.md「里程碑完成存档」）
+## 项目状态
 
-- [x] T0 工程基建（T0-1 ~ T0-8）
-- [x] M1 骨架 + BT/磁力/HTTP（M1-1 ~ M1-12 全部）
-- [x] M2 音乐（引擎已从 Python sidecar 迁移为主进程内嵌 TS 模块，真取消语义）
-- [x] M3 视频（M3-1 ~ M3-11 全部，yt-dlp/ffmpeg sidecar）
-- [x] M4 打磨发布（引擎热更三平台化 / 进程树终止 / tracker 多源订阅 + 镜像 / BT 加速调优 / 去 Python 单运行时）
+T0 工程基建 → M1 BT/磁力/HTTP → M2 音乐 → M3 视频 → M4 打磨发布 已全部收口；产品化阶段（浏览器扩展 / 任务队列 / 批量抓取 / 预设 / Web UI / 引擎按需下载）与下载引擎优化（UPnP 端口映射 / 元数据缓存 / 多源聚合 / 短链展开）已落地。里程碑明细见 [CHANGELOG.md](./CHANGELOG.md)，未完成项见 [docs/backlog.md](./docs/backlog.md)。
 
 ## 验证
 
 ```bash
-npm test                                    # 47 个单测（状态机/torrent/嗅探/事件合并等；以 npm test 实际输出为准）
+npm test                                    # 73 个单测（状态机/torrent/嗅探/事件合并/短链/元数据缓存等；以 npm test 实际输出为准）
 npx tsx --tsconfig tsconfig.node.json scripts/e2e-aria2.ts   # aria2 端到端（真实 sidecar）
 ```
 

@@ -7,6 +7,9 @@ import { userDataDir } from '../env'
 
 export type Aria2GlobalOptions = {
   'listen-port'?: string
+  'dht-listen-port'?: string
+  'peer-id-prefix'?: string
+  'peer-agent'?: string
   'enable-dht'?: string
   'enable-dht6'?: string
   'bt-enable-lpd'?: string
@@ -24,6 +27,13 @@ export type Aria2GlobalOptions = {
   'dht-file-path6'?: string
   'dht-entry-point'?: string
   'dht-entry-point6'?: string
+  // R7 优化（官方 1.37 手册逐项核实存在）
+  'bt-force-encryption'?: string // arc4 加密握手，绕运营商 BT QoS
+  'bt-stop-timeout'?: string // 连续 0 速自动停止，防死种占并发槽
+  'bt-detach-seed-only'?: string // 并发计数排除纯做种
+  'bt-load-saved-metadata'?: string // 磁力先读本机已存 .torrent，命中秒出元数据
+  'uri-selector'?: string // 多源镜像测速选择
+  'optimize-concurrent-downloads'?: string // 按带宽自动扩并发
   'rpc-listen-port'?: string // 仅启动参数
 }
 
@@ -43,10 +53,16 @@ export type Aria2TaskOptions = {
   'allow-overwrite'?: string
 }
 
-/** 全局选项默认值（继承 torrent_dl.py 推荐值，§附录 A；含下载加速调优） */
-export function defaultGlobalOptions(): Aria2GlobalOptions {
+/** 全局选项默认值（继承 torrent_dl.py 推荐值，§附录 A；含下载加速调优）。
+ * R7 优化：端口范围/DHT UDP 端口/加密/僵尸任务清理/多源调度——全部经官方
+ * 1.37 手册核实存在（dht-bootstrap-node/peer-id 不存在，勿引入）。
+ * btForceEncryption：设置项 bt.forceEncryption（默认开），由调用方读取后传入 */
+export function defaultGlobalOptions(bt?: { btForceEncryption?: boolean }): Aria2GlobalOptions {
   return {
-    'listen-port': '6881',
+    // R7：端口范围（原单端口 6881）——入站可用端口池更大，配合 UPnP 映射提升可连接性
+    'listen-port': '6881-6891',
+    // R7：DHT/UDP tracker 监听端口（默认即 6881-6999，显式声明与 TCP 范围对齐）
+    'dht-listen-port': '6881-6891',
     'enable-dht': 'true',
     'enable-dht6': 'true',
     'bt-enable-lpd': 'true',
@@ -68,8 +84,32 @@ export function defaultGlobalOptions(): Aria2GlobalOptions {
     'dht-file-path6': join(userDataDir(), 'dht6.dat'),
     // 加速：DHT 入口节点引导——dht.dat 缺失/失效时立即入网，避免数分钟空转找 peer
     'dht-entry-point': 'router.bittorrent.com:6881',
-    'dht-entry-point6': 'dht.transmissionbt.com:6881'
+    'dht-entry-point6': 'dht.transmissionbt.com:6881',
+    // R7：BT 消息 arc4 加密握手——绕运营商 BT QoS 限速/干扰（个别客户端拒绝加密
+    // 连接会损失少量 peer，做成设置项可关闭）
+    'bt-force-encryption': bt?.btForceEncryption === false ? 'false' : 'true',
+    // R7：连续 30 分钟 0 速自动停止 BT 任务——死种不再永久占并发槽
+    'bt-stop-timeout': '1800',
+    // R7：maxConcurrentDownloads 闸门计数排除纯做种任务（seeding 不算下载）
+    'bt-detach-seed-only': 'true',
+    // R7：磁力任务优先读本机已存 .torrent（userData/torrents/ 同目录时秒出元数据）
+    'bt-load-saved-metadata': 'true',
+    // R7 多源：adaptive=首连接选最优镜像，其余并发测试未试镜像（P2SP-lite 调度）
+    'uri-selector': 'adaptive',
+    // R7 多源：按带宽自动扩并发（N = 5 + 25·log₁₀(带宽 Mbps)）
+    'optimize-concurrent-downloads': 'true',
+    // R7 P2：peer 指纹伪装为 qBittorrent 4.6.5——部分客户端/站点对 aria2 的
+    // peer-id 降权/拒连，社区通行做法（本机出站指纹，无安全影响）
+    'peer-id-prefix': '-qB4650-',
+    'peer-agent': 'qBittorrent 4.6.5'
   }
+}
+
+/** R7：BT 监听端口池首个端口（UPnP 映射目标；路由器只转发该端口到本机，端口池内其余端口供出站使用） */
+export function btPrimaryPorts(): { tcp: number; udp: number } {
+  const opts = defaultGlobalOptions()
+  const first = (v: string | undefined): number => Number(v?.split(/[,-]/)[0] ?? 6881) || 6881
+  return { tcp: first(opts['listen-port']), udp: first(opts['dht-listen-port']) }
 }
 
 /** 生成 aria2c 启动参数（全局选项仅能经启动参数注入的部分）。

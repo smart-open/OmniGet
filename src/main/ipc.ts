@@ -595,10 +595,11 @@ export function registerIpcHandlers(): void {
     return musicAdapter ? musicAdapter.previewUrl(platform, id) : ''
   })
 
-  // BT 端口自检（#5）：探测 aria2 listen-port 本地 TCP 监听；外网可达性由用户防火墙决定
+  // BT 端口自检（#5）：探测 aria2 listen-port 本地 TCP 监听；外网可达性由用户防火墙决定。
+  // 审查修复：listen-port 现为区间（'6881-6891'），Number() 直接解析得 NaN——改用 btPrimaryPorts
   ipcMain.handle(IPC_CHANNELS.diagBtPort, async () => {
-    const { defaultGlobalOptions } = await import('./aria2/options')
-    const port = Number(defaultGlobalOptions()['listen-port'] ?? '6881')
+    const { btPrimaryPorts } = await import('./aria2/options')
+    const port = btPrimaryPorts().tcp
     const listening = await new Promise<boolean>((resolve) => {
       const { createConnection } = require('net') as typeof import('net')
       const sock = createConnection({ host: '127.0.0.1', port, timeout: 2000 })
@@ -613,7 +614,9 @@ export function registerIpcHandlers(): void {
       sock.once('timeout', fail)
       sock.once('error', fail)
     })
-    return { listening, port }
+    // 审查修复：natMappingStatus 原为无调用方的死代码——接入自检结果供设置页展示
+    const { natMappingStatus } = await import('./net/nat')
+    return { listening, port, nat: natMappingStatus() }
   })
 
   // BT 外网可达性探测（#5 增强，opt-in）：经 check-host.net 免费节点对本机公网 IP:6881
@@ -648,9 +651,9 @@ export function registerIpcHandlers(): void {
       }
       if (!ip) return fail('获取公网 IP 失败：探测相关服务在当前网络不可达')
 
-      // 2. 发起多节点 TCP 探测
-      const { defaultGlobalOptions } = await import('./aria2/options')
-      const port = Number(defaultGlobalOptions()['listen-port'] ?? '6881')
+      // 2. 发起多节点 TCP 探测（listen-port 为区间——经 btPrimaryPorts 取首端口）
+      const { btPrimaryPorts } = await import('./aria2/options')
+      const port = btPrimaryPorts().tcp
       let startRes
       try {
         startRes = await f(

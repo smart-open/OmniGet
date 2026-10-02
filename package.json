@@ -25,6 +25,7 @@
     "bencode": "^2.0.3",
     "better-sqlite3": "^11.10.0",
     "electron-updater": "^6.8.9",
+    "nat-api": "^0.3.1",
     "undici": "^6.29.0",
     "ws": "^8.18.0"
   },

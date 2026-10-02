@@ -5,15 +5,20 @@
 // M3-2：ffmpeg 缺失时降级预合并格式（--ffmpeg-location 仅在存在时注入）
 
 import type { Task, TaskEvent, VideoFormat } from '@shared/types'
-import { join } from 'path'
+import { dirname, join } from 'path'
+import { existsSync } from 'fs'
 import { sanitizeFilename } from '@shared/sanitize'
 import { getSettingParsed } from '../db'
+import { readTaskPlatform } from '../task/params'
 import { createLogger } from '../logger'
 import { getYtDlpSupervisor } from '../orchestrator/ytdlp'
 import { ensureVerified } from '../orchestrator/binaries'
 import type { EngineHealthInfo, ParseOutput } from './types'
 
 const log = createLogger('ytdlp-adapter')
+
+/** 短视频平台（markShortVideo / params.platform 重建共用的口径，与 manager 侧一致） */
+const SHORT_VIDEO_PLATFORMS = ['douyin', 'kuaishou', 'xiaohongshu', 'xigua', 'weibo']
 
 export interface VideoSelection {
   formatId?: string
@@ -63,6 +68,8 @@ export class YtDlpAdapter {
   private running = new Set<string>()
   /** 短视频任务（L1/L2 判定用） */
   private shortVideo = new Set<string>()
+  /** R7 P1：taskId → 平台标识（分站 cookie / 健康归因） */
+  private platformByTask = new Map<string, string>()
   /** taskId → 启动参数（resume 重 spawn 凭据） */
   private argsByTask = new Map<
     string,
@@ -198,7 +205,27 @@ export class YtDlpAdapter {
       const { enginesDir } = await import('../orchestrator/binaries')
       args.push('--ffmpeg-location', enginesDir())
     }
-    if (cookieFile) args.push('--cookies', cookieFile)
+    // R7 P1 分站 cookie：平台专属文件（cookieFile 同目录 <platform>.txt）优先于全局。
+    // 审查修复：platformByTask 是内存态，重启恢复的暂停任务直接 start 时映射为空 →
+    // 从持久化 params 重建（同时恢复短视频标记，L2 候补/delogo 语义不丢）
+    let platform = this.platformByTask.get(task.id)
+    if (!platform) {
+      const stored = readTaskPlatform(task)
+      if (stored) {
+        platform = stored
+        this.platformByTask.set(task.id, stored)
+        if (SHORT_VIDEO_PLATFORMS.includes(stored)) this.shortVideo.add(task.id)
+      }
+    }
+    let effCookie = cookieFile
+    if (platform && cookieFile) {
+      const sibling = join(dirname(cookieFile), `${platform}.txt`)
+      if (existsSync(sibling)) {
+        effCookie = sibling
+        log.info(`platform cookie: ${platform} → ${sibling}`)
+      }
+    }
+    if (effCookie) args.push('--cookies', effCookie)
     if (isPlaylist && indexes.length > 0) {
       // M3-4/8：N–M 集选择 + 上传者分目录 + 元数据 JSON/封面落盘（单选 1 项同样带 --playlist-items）
       args.push('--playlist-items', dedupeRanges(indexes))
@@ -305,6 +332,12 @@ export class YtDlpAdapter {
         wmLevel: wmLevel ?? undefined,
         message
       })
+      // R7 P1：平台级成功记账（健康面板翻绿）
+      const platform = this.platformByTask.get(task.id)
+      if (platform) {
+        const { recordPlatformOk } = await import('../health')
+        recordPlatformOk(platform, 'yt-dlp')
+      }
       this.cleanupTaskState(task.id)
       return
     }
@@ -349,6 +382,11 @@ export class YtDlpAdapter {
         'yt-dlp',
         diagnosis.exitAction === 'update-engine' ? '尝试更新引擎（设置 → 更新）' : undefined
       )
+      // R7 P1：短视频平台级归因（抖音/快手等面板行）
+      const platform = this.platformByTask.get(task.id)
+      if (platform) {
+        recordPlatformFailure(platform, diagnosis.kind, msg, 'yt-dlp')
+      }
     }
     this.cleanupTaskState(task.id)
   }
@@ -358,6 +396,7 @@ export class YtDlpAdapter {
     this.argsByTask.delete(taskId)
     this.videoOpts.delete(taskId)
     this.shortVideo.delete(taskId)
+    this.platformByTask.delete(taskId)
     if (!keepPauseMark) this.userPaused.delete(taskId)
     this.outputFiles.delete(taskId)
     this.running.delete(taskId) // P3：remove 路径进程可能已死、onExit 不会再触发，防 Set 残留
@@ -473,8 +512,9 @@ export class YtDlpAdapter {
     this.videoOpts.set(taskId, video)
   }
 
-  markShortVideo(taskId: string): void {
+  markShortVideo(taskId: string, platform?: string): void {
     this.shortVideo.add(taskId)
+    if (platform) this.platformByTask.set(taskId, platform)
   }
 }
 

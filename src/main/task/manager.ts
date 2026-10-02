@@ -19,6 +19,8 @@ import { broadcastEngineHealth, broadcastTasks, broadcastNotices } from '../ipc'
 import { createLogger } from '../logger'
 import { normalizeInfohash } from '../torrent/parse'
 import { sniff } from '../sniffer'
+import { expandInputSource, extractHttpUrls, isVideoHostUrl } from '../shortlink'
+import { parseParamsJson, readTaskSpeedLimit } from '../task/params'
 import type { Aria2Adapter } from '../adapters/aria2'
 import type { MusicAdapter } from '../music/adapter'
 import type { YtDlpAdapter } from '../adapters/ytdlp'
@@ -311,9 +313,39 @@ export class TaskManager {
     saveDir: string
     noWatermark?: boolean
     seedRatio?: number
+    /** R7 P1：单任务限速（aria2 格式） */
+    speedLimit?: string
   }): Promise<CreateTaskResult> {
-    const s = sniff(input.source)
+    // P3 修复：文本含 ≥2 个 URL 且任一是视频域 → 多为不同视频（非同文件镜像），
+    // 此前短链展开只取第一个、其余静默丢弃——显式报错引导分次/批量创建；
+    // 纯 HTTP 直链多 URL 不受影响，仍走下方镜像合并分支（P2SP-lite）
+    const pastedUrls = extractHttpUrls(input.source)
+    if (pastedUrls.length > 1 && pastedUrls.some((u) => isVideoHostUrl(u))) {
+      return {
+        kind: 'failed',
+        error:
+          '检测到多个视频链接（非同文件镜像）。请逐个创建任务，或在创建对话框中每行一个链接批量创建'
+      }
+    }
+    // R7 P1：短视频短链/分享文案展开——"7.20 xyz:/ https://v.douyin.com/xxx/ 抖音"
+    // → 提取 URL → 302 还原完整链接；纯文本歌名不受影响（仅接管已知视频/短链域）
+    const exp = await expandInputSource(input.source)
+
+    // R7 P1 多源：≥2 个 http URL（非磁力输入）→ 同文件镜像合并为一个任务（P2SP-lite），
+    // 镜像一致性由 parseHttp 的 content-length 校验兜底
+    let s = sniff(exp.source)
+    let multiSource: string[] | null = null
+    if (!s) {
+      const urls = extractHttpUrls(input.source)
+      const first = urls[0]
+      if (urls.length > 1 && first) {
+        multiSource = urls
+        s = { type: 'http', source: first, platform: 'http' }
+      }
+    }
     if (!s) return { kind: 'failed', error: makeError('PARSE_FAILED').message }
+    // 分享短链默认无水印（§4.3.1）：短链已展开为完整链接，按展开标记回填
+    if (exp.wasShortLink && s.type === 'video') s.noWatermark = true
 
     // 音乐查询（纯文本歌名）无解析/勾选阶段：直接走音乐工作台通道创建并入队，
     // 避免 engine=music 落入 aria2.parse 报"不支持的任务类型"
@@ -383,6 +415,12 @@ export class TaskManager {
       threads,
       noWatermark: s.noWatermark ?? input.noWatermark,
       seedRatio: input.seedRatio,
+      // R7 P1：镜像列表 + 单任务限速 + 视频平台标识入 params（parse 阶段校验后回写）
+      params: JSON.stringify({
+        ...(multiSource ? { urls: multiSource } : {}),
+        ...(input.speedLimit?.trim() ? { speedLimit: input.speedLimit.trim() } : {}),
+        ...(s.type === 'video' && s.platform ? { platform: s.platform } : {})
+      }),
       createdAt: Date.now()
     }
     insertTask(task)
@@ -405,18 +443,29 @@ export class TaskManager {
         }
         return { kind: 'failed', error: '任务已删除' }
       }
-      // M3-6：短视频任务标记（L1/L2/L3 判定）
+      // M3-6：短视频任务标记（L1/L2/L3 判定）；R7 P1：回传平台（分站 cookie/健康归因）
       if (task.engine === 'ytdlp' && s.platform && ['douyin', 'kuaishou', 'xiaohongshu', 'xigua', 'weibo'].includes(s.platform)) {
-        this.ytdlp?.markShortVideo(task.id)
+        this.ytdlp?.markShortVideo(task.id, s.platform)
       }
       task.name = parsed.name
       task.infohash = parsed.infohash
       task.pendingGid = parsed.pendingGid
+      // R7 P1 多源 + 审查修复：parse 校验通过的镜像回写 params（剔除探测失败/
+      // 大小不一致/内网项）。必须整体重写且保留旧字段（speedLimit 等）——原实现
+      // ① 覆盖丢 speedLimit；② 仅 >1 镜像通过才回写，未校验的原始镜像（含内网
+      // 地址）残留 params.urls，start() 会绕过 net-guard 直接使用。
+      // parseHttp 现恒返回 mirrors（至少含探测通过的主 URL），此处取 ?? 兜底防脏数据
+      if (task.type === 'http') {
+        const prev = parseParamsJson(task.params)
+        const urls = parsed.mirrors?.length ? parsed.mirrors : [task.source]
+        task.params = JSON.stringify({ ...prev, urls })
+      }
       updateTaskFields(task.id, {
         name: parsed.name,
         infohash: parsed.infohash ?? null,
         totalBytes: parsed.totalBytes,
-        engineGid: parsed.pendingGid ?? null
+        engineGid: parsed.pendingGid ?? null,
+        ...(task.params ? { params: task.params } : {})
       })
       if (parsed.files?.length) {
         saveTaskFiles(
@@ -429,9 +478,12 @@ export class TaskManager {
           }))
         )
       }
-      // M3-4：合集标记持久化（重启恢复后 --playlist-items 回放需要）
+      // M3-4：合集标记持久化（重启恢复后 --playlist-items 回放需要）。
+      // 审查修复：合并写入而非整体覆盖——params 现承载 speedLimit/platform/urls，
+      // 覆盖会让视频合集任务丢失平台标识（分站 cookie/健康归因失效）
       if (parsed.playlist) {
-        updateTaskFields(task.id, { params: JSON.stringify({ playlist: true }) })
+        const prev = parseParamsJson(task.params)
+        updateTaskFields(task.id, { params: JSON.stringify({ ...prev, playlist: true }) })
       }
 
       // awaiting 可跳过：HTTP 单文件 parsing → queued（§4.1 注记）
@@ -554,6 +606,11 @@ export class TaskManager {
         task.saveDir,
         task.seedRatio ?? 0
       )
+      // R7 P1：单任务限速（params.speedLimit；changeOption 合并语义不清除）
+      const speedLimit = readTaskSpeedLimit(task)
+      if (speedLimit) {
+        await this.aria2.changeOption(task.pendingGid, { 'max-download-limit': speedLimit })
+      }
       updateTaskFields(task.id, { engineGid: task.pendingGid, threads: input.threads })
       await this.aria2.resume({ ...task, engineGid: task.pendingGid })
     } else {

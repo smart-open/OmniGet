@@ -60,10 +60,10 @@ const NAV_GROUPS: { title?: string; items: NavItem[] }[] = [
   {
     items: [
       { id: 'all', label: '全部', icon: Tray },
-      { id: 'downloading', label: '下载中', icon: DownloadSimple, badge: 'running' },
-      { id: 'completed', label: '已完成', icon: CheckCircle, badge: 'completed' },
+      { id: 'downloading', label: '处理中', icon: DownloadSimple, badge: 'running' },
       // R6：失败任务专属视图（红色角标提示用户有任务需要重试）
-      { id: 'failed', label: '下载失败', icon: WarningCircle, badge: 'failed' }
+      { id: 'failed', label: '处理失败', icon: WarningCircle, badge: 'failed' },
+      { id: 'completed', label: '处理完成', icon: CheckCircle, badge: 'completed' }
     ]
   },
   {

@@ -92,6 +92,8 @@ export interface CreateTaskInput {
   saveDir: string
   noWatermark?: boolean
   seedRatio?: number
+  /** R7 P1：单任务限速（aria2 格式：2M / 500K / 字节数；缺省不限） */
+  speedLimit?: string
 }
 
 export interface ConfirmSelectionInput {
@@ -384,7 +386,12 @@ export interface OmniGetBridge {
   /** F1 试听：返回主进程代理的预览流 URL（omniget-preview:// 协议，<audio> 播放） */
   musicPreview(platform: string, id: string): Promise<string>
   /** BT 端口自检：检测 aria2 listen-port 本地是否在监听（外网可达性需用户自行放行防火墙） */
-  diagBtPort(): Promise<{ listening: boolean; port: number }>
+  diagBtPort(): Promise<{
+    listening: boolean
+    port: number
+    /** UPnP/NAT-PMP 映射状态（attempted=false 表示尚未尝试） */
+    nat: { attempted: boolean; ok: boolean; error: string | null }
+  }>
   /** BT 外网可达性探测（opt-in：经第三方 check-host.net 发起 TCP 探测，会暴露公网 IP） */
   diagBtExternal(): Promise<BtExternalResult>
   /** 应用更新检查（Linux 手动通道 / 通用版本比对）：GitHub latest release 元数据 */

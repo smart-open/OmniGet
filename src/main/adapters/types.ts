@@ -38,4 +38,6 @@ export interface ParseOutput {
   ffmpegMissing?: boolean
   /** 磁力任务在 parse 期间已 addUri 到 aria2（pause 态），确认勾选时直接 changeOption+unpause */
   pendingGid?: string
+  /** R7 P1 多源：HTTP 探测通过 content-length 校验的同文件镜像列表（start 时 addUri 多 URI 并行） */
+  mirrors?: string[]
 }

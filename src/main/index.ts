@@ -23,6 +23,10 @@ import { startBridge, stopBridge } from './bridge'
 import { toolbox } from './toolbox'
 import { broadcastToolEvents } from './ipc'
 import { refreshTrackers, joinedTrackers } from './trackers'
+import { seedPlatforms } from './health'
+import { defaultGlobalOptions } from './aria2/options'
+import { getSettingParsed } from './db'
+import { setupNatMapping, clearNatMapping } from './net/nat'
 import { startAppUpdater, stopAppUpdaterTimer } from './app-updater'
 import {
   clipboardWatchEnabled,
@@ -154,7 +158,13 @@ async function bootstrap(): Promise<void> {
   }
 
   // M1 编排：任务恢复 → aria2 监督器 → 适配器 → 管理器
-  const supervisor = new Aria2Supervisor(ports.aria2RpcPort, undefined, {
+  // R7 P0-5：BT 加密读取设置项（bt.forceEncryption 默认开，绕运营商 QoS）
+  const supervisor = new Aria2Supervisor(
+    ports.aria2RpcPort,
+    defaultGlobalOptions({
+      btForceEncryption: getSettingParsed<boolean>('bt.forceEncryption') !== false
+    }),
+    {
     onOnline: (port) => {
       log.info(`aria2 online at ${port}`)
       void manager.recoverEngineTasks()
@@ -169,6 +179,8 @@ async function bootstrap(): Promise<void> {
         .call('changeGlobalOption', { 'bt-tracker': trackerCsv })
         .then(() => manager.injectTrackersToRunning(trackerCsv))
         .catch((err) => log.warn('启动期 Tracker 注入失败', { error: String(err) }))
+      // R7 P0-1：UPnP/NAT-PMP 端口映射（幂等：已映射则跳过；失败静默降级）
+      void setupNatMapping()
     },
     onOffline: () => {
       manager.broadcastHealth(false, 'aria2 连续重启失败')
@@ -205,6 +217,19 @@ async function bootstrap(): Promise<void> {
   startScheduler((limit) => supervisor.getClient().call('changeGlobalOption', { 'max-overall-download-limit': limit }))
   // M4-16：Tracker 刷新（注入统一在 aria2 onOnline 后兜底执行，避免启动竞态告警）
   void refreshTrackers().catch((err) => log.warn('tracker refresh failed (使用缓存)', err))
+  // R7 P0-4：每日定时刷新 tracker（原注释与实现不符——只有启动一次）+ 刷新后重注入
+  const TRACKER_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000
+  setInterval(() => {
+    void refreshTrackers()
+      .then(() => {
+        if (supervisor.isOnline) {
+          return supervisor
+            .getClient()
+            .call('changeGlobalOption', { 'bt-tracker': joinedTrackers() })
+        }
+      })
+      .catch((err) => log.warn('每日 tracker 刷新失败（沿用缓存）', err))
+  }, TRACKER_REFRESH_INTERVAL_MS)
 
   // ── M2：音乐线（主进程内嵌引擎，无需 sidecar）────────────────────
   const musicAdapter = new LocalMusicAdapter()
@@ -214,6 +239,9 @@ async function bootstrap(): Promise<void> {
   // B1：恢复上次重启前遗留的 queued 音乐任务（recoverOnStartup 在此之前不泵音乐）
   manager.resumeMusicQueue()
   log.info('music engine online (in-process)')
+  // R7 P1：健康面板预置短视频平台行（unknown 态，有任务后按平台归因翻转）。
+  // 审查修复：health.ts 已在静态依赖链上，动态 import 是多余的一次调度开销
+  seedPlatforms(['douyin', 'kuaishou', 'xiaohongshu', 'weibo', 'xigua'], 'yt-dlp')
 
   // R1+R5：本地桥接（浏览器扩展 + Web UI 远程面板，回环 + token 鉴权）
   startBridge(manager)
@@ -262,6 +290,8 @@ async function bootstrap(): Promise<void> {
       getMusicEngine().shutdown()
       stopAppUpdaterTimer()
       stopBridge()
+      // R7 P0-1：撤销 NAT 端口映射（fire-and-forget；未及撤销由 TTL 过期兜底）
+      clearNatMapping()
     } catch (err) {
       log.error('before-quit 同步清理失败（继续退出）', { error: String(err) })
     }
