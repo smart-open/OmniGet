@@ -46,6 +46,11 @@ export type Aria2TaskOptions = {
   'max-download-limit'?: string
   split?: string
   continue?: string
+  /** R7 续（backlog #11）：sidecar 兜底任务按解析服务标题落盘（http addUri） */
+  out?: string
+  /** R7 续审查加固：sidecar 兜底直链常校验 UA/referer（与探测同源伪装） */
+  'user-agent'?: string
+  referer?: string
   'bt-save-metadata'?: string
   pause?: string
   // P1 加固：allow-overwrite 从全局启动参数收窄为每任务——仅增量补下（re-add 凭

@@ -42,3 +42,21 @@ export function readTaskPlatform(task: Task): string | null {
   const p = parseParams(task)
   return typeof p.platform === 'string' && p.platform ? p.platform : null
 }
+
+/** R7 续（backlog #11）：sidecar 兜底任务的原分享页 URL（aria2 UA/referer 伪装用） */
+export function readTaskOriginUrl(task: Task): string | null {
+  const p = parseParams(task)
+  const u = typeof p.originUrl === 'string' ? p.originUrl.trim() : ''
+  return /^https?:\/\//i.test(u) ? u : null
+}
+
+/** R7 续（backlog #11）：sidecar 兜底产物名（解析服务标题清洗后）。
+ * parseHttp 命名与 aria2 start 的 out 选项共用——两处口径必须一致，
+ * 否则 task_files 记录与磁盘实际文件名脱钩（回收站含文件删除会漏删） */
+export function readTaskOutName(task: Task): string | null {
+  const p = parseParams(task)
+  const n = typeof p.outName === 'string' ? p.outName.trim() : ''
+  if (!n) return null
+  // out 只允许单段文件名：防路径穿越/子目录注入
+  return n.replace(/[\\/]+/g, '_')
+}

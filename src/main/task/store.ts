@@ -107,6 +107,10 @@ export function updateTaskFields(
     error: string | null
     completedAt: number | null
     saveDir: string
+    /** R7 续（backlog #11）：sidecar 兜底命中后任务改道 http 直链管线 */
+    type: Task['type']
+    engine: Task['engine']
+    source: string
   }>
 ): void {
   const sets: string[] = []
@@ -114,6 +118,7 @@ export function updateTaskFields(
   const map: Record<string, string> = {
     name: 'name',
     status: 'status',
+    source: 'source',
     totalBytes: 'total_bytes',
     downloaded: 'downloaded',
     threads: 'threads',
@@ -125,7 +130,9 @@ export function updateTaskFields(
     quality: 'quality',
     error: 'error',
     completedAt: 'completed_at',
-    saveDir: 'save_dir'
+    saveDir: 'save_dir',
+    type: 'type',
+    engine: 'engine'
   }
   for (const [k, col] of Object.entries(map)) {
     if (k in fields) {

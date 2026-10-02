@@ -85,12 +85,11 @@
 
 > ✅ 已完成部分（P0 全部、多源聚合、短链展开、单任务限速、健康页平台项、分站 Cookie、peer 指纹伪装）记于 AGENT.md §10 R7 批次；以下为未完成项。
 
-### 11. 🟠 短视频解析服务 sidecar（快手/小红书补平台）
-- **现状**：实测 yt-dlp 2026.08.19 有 Douyin / Ixigua / Weibo / TikTok extractor，**无 Kuaishou / Xiaohongshu**——两平台任务在 yt-dlp 路径下会失败并在健康页正确公示 down。
-- **待办**：
-  - [ ] 自托管 Evil0ctal/Douyin_TikTok_Download_API v5（Docker 或本地进程）作为元数据兜底 API，yt-dlp 失败时先问解析服务
-  - [ ] 或参照 XHS-Downloader / KS-Downloader 的接口口径独立适配
-- **⚠ 合规边界**：不建议自研 a_bogus/X-Bogus 签名——算法高频变更，头部开源项目已因合规停止维护签名算法。
+### 11. ✅（2026-10-02）短视频解析服务 sidecar（快手/小红书补平台）
+- **现状**：已落地自托管解析服务兜底——设置 → 下载新增「短视频解析服务（可选）」卡片（`sidecar.videoApiUrl`，白名单 + http(s) 校验 + 测试连接）。yt-dlp 解析失败（快手/小红书无 extractor、抖音风控）且平台在 sidecar 覆盖面（douyin/tiktok/kuaishou/xiaohongshu/xigua/weibo）时，自动 POST 自托管 Evil0ctal/Douyin_TikTok_Download_API v5 的 `/api/hybrid/video_data` 混合解析取直链：任务持久化改道 http 直链管线（type/engine 改写 + `params.outName` 标题命名含扩展名，parseHttp 命名与 aria2 `out` 共用），探测/下载统一浏览器 UA + 原分享页 referer（直链校验常见要求），HEAD 被拒时 GET Range 首字节兜底探测；直链有效性仍由 HEAD 探测 + 内网校验把关；命中/失败均回写健康面板（引擎列翻为 sidecar）并经通知条公示。响应提取按「优先级路径 → 启发式兜底」两级容错（play_addr → download_addr → mainMvUrls → master_url → 启发式），图集/纯图文不误判（`video-extract.test.ts` 9 例）。
+- **注意**：兜底直链为带签名的时效 URL——重试/重启恢复启动前自动重问解析服务刷新（刷新失败沿用旧直链，不阻断重试）；sidecar 任务预检宽容放行（HEAD/GET Range 均被拒时不判死任务，跳过预检直接下载，错误由下载段暴露）。附带修复：http 直链任务单路径创建此前返回 awaiting，确认时会撞 confirmSelection 状态守卫抛 IllegalTransitionError——现返回 started 直关框（与批量路径口径一致）。
+- **⚠ 安全口径**：`sidecar.videoApiUrl` 为用户显式配置的自托管地址，需支持本机/局域网部署，故放行 http 且不做内网校验（与 `engines.mirror` 的纯 https 口径不同，属有意的信任边界取舍：配置该地址即信任该服务）；连接测试只回传 ok/detail 摘要，不回显响应头与响应体。
+- **⚠ 合规边界**：不建议自研 a_bogus/X-Bogus 签名——算法高频变更，头部开源项目已因合规停止维护签名算法（本实现只消费自托管服务公开 API，未内置任何签名逻辑）。
 
 ### 12. 🟡 直链解析聚合器（P2SP-lite 进阶）
 - **现状**：用户主动粘贴多个镜像 URL 已可合并为单任务并行下载（content-length 校验 + addUri 多 URI）。

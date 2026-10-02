@@ -82,6 +82,8 @@ const api: OmniGetBridge = {
     ipcRenderer.invoke('app:exportFile', defaultName, content),
   importFile: (ext?: string): Promise<{ name: string; content: string } | null> =>
     ipcRenderer.invoke('app:importFile', ext),
+  // R7 续（backlog #11）：短视频解析服务连接测试
+  sidecarProbe: (baseUrl: string) => ipcRenderer.invoke(IPC_CHANNELS.sidecarProbe, baseUrl),
   onTaskEvents: (listener: (events: TaskEvent[]) => void) => {
     const wrapped = (_e: unknown, events: TaskEvent[]): void => listener(events)
     ipcRenderer.on(IPC_CHANNELS.eventTasks, wrapped)

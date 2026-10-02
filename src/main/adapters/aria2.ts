@@ -12,7 +12,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { generateMagnet, normalizeInfohash, parseTorrentFile } from '../torrent/parse'
 import { cacheTorrentFile, findCachedTorrent, readCachedTorrent } from '../torrent/cache'
-import { readTaskSpeedLimit, readTaskUrls } from '../task/params'
+import { readTaskOriginUrl, readTaskOutName, readTaskSpeedLimit, readTaskUrls } from '../task/params'
 import { buildTaskOptions } from '../aria2/options'
 import { createLogger } from '../logger'
 import { diagnose } from '../diagnosis'
@@ -24,6 +24,22 @@ const log = createLogger('aria2-adapter')
 
 const METADATA_TIMEOUT_MS = 90_000 // 磁力元数据超时（§11 风险 #5）
 const HTTP_PROBE_TIMEOUT_MS = 10_000
+
+/** R7 续审查加固：短视频直链（douyin/kuaishou CDN）常校验 UA/referer——
+ * sidecar 兜底任务的探测与下载统一用浏览器 UA + 原分享页 referer */
+const BROWSER_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
+
+/** 探测响应 → 预期完整体积：GET Range 兜底（206）经 content-range 取总长，
+ * 其余回落 content-length（与镜像 content-length 一致性校验同一口径） */
+function probeTotalLen(res: Response): number {
+  const cr = res.headers.get('content-range') // 形如 bytes 0-0/12345
+  if (cr) {
+    const m = /\/(\d+)\s*$/.exec(cr)
+    if (m) return Number(m[1])
+  }
+  return Number(res.headers.get('content-length') ?? 0)
+}
 
 /** P3 修复：磁力元数据临时目录统一清理（%TEMP%/omniget-metadata/<taskId> 此前从不删除） */
 function cleanupMetadataDir(metaDir: string): void {
@@ -222,6 +238,20 @@ export class Aria2Adapter implements EngineAdapter {
     }
   }
 
+  /** R7 续审查加固：单 URL 探测（HEAD 优先；调用方在 HEAD 被拒时以 GET Range 重试） */
+  private async probeHttpUrl(
+    url: string,
+    method: 'HEAD' | 'GET',
+    headers?: Record<string, string>
+  ): Promise<Response> {
+    return fetch(url, {
+      method,
+      redirect: 'follow',
+      headers,
+      signal: AbortSignal.timeout(HTTP_PROBE_TIMEOUT_MS)
+    })
+  }
+
   /** HTTP 直链 HEAD 探测（M1-7）：大小/文件名嗅探；带超时防挂起。
    * R7 P1 多源：task.params.urls 携带多个同文件镜像时逐个探测，
    * 仅保留与主 URL content-length 完全一致的镜像（防错拼不同文件） */
@@ -229,6 +259,15 @@ export class Aria2Adapter implements EngineAdapter {
     // M3 修复：拒绝内网/回环目标——主进程代发探测并回显响应头不得成为内网探测通道
     const { isInternalUrl } = await import('../net-guard')
     const candidateUrls = readTaskUrls(task)
+    // R7 续审查加固：sidecar 兜底任务的直链常校验 UA/referer——探测与下载同源伪装
+    const originUrl = readTaskOriginUrl(task)
+    const probeHeaders: Record<string, string> | undefined = originUrl
+      ? { 'user-agent': BROWSER_UA, referer: originUrl }
+      : undefined
+    // R7 续修复（backlog #11）：sidecar 任务预检宽容放行——直链由解析服务刚签发，
+    // 预检失败多为环境差异（TLS 指纹/网络路径），不判死任务，错误交给下载段暴露
+    //（重试前 manager 会自动重问解析服务刷新时效直链）
+    const lenient = !!originUrl
     const probed: { url: string; len: number; res: Response }[] = []
     let primary: { url: string; len: number; res: Response } | null = null
     for (const url of candidateUrls) {
@@ -242,26 +281,44 @@ export class Aria2Adapter implements EngineAdapter {
         continue
       }
       try {
-        const res = await fetch(url, {
-          method: 'HEAD',
-          redirect: 'follow',
-          signal: AbortSignal.timeout(HTTP_PROBE_TIMEOUT_MS)
-        })
-        if (!res.ok) {
+        // R7 续审查加固：HEAD 被拒（部分 CDN/网关仅允许 GET，403/405 等）时以
+        // GET Range: bytes=0-0 兜底探测（206 经 content-range 取总长），两法皆败才判失败
+        let res = await this.probeHttpUrl(url, 'HEAD', probeHeaders).catch(() => null)
+        if (!res || !res.ok) {
+          const viaGet = await this.probeHttpUrl(url, 'GET', probeHeaders)
+            .then((r) => (r.ok ? r : null))
+            .catch(() => null)
+          if (viaGet) {
+            await res?.body?.cancel().catch(() => {}) // 消费被拒响应体，防 socket 挂起
+            res = viaGet
+          }
+        }
+        if (!res || !res.ok) {
+          const status = res?.status ?? 0
+          await res?.body?.cancel().catch(() => {})
           if (url === task.source) {
-            const timedOut = [408, 425].includes(res.status) || res.status >= 500
+            if (lenient) {
+              log.warn(
+                `sidecar 直链预检失败（HTTP ${status || '网络异常'}），跳过预检直接下载: ${url}`
+              )
+              break
+            }
+            const timedOut = status === 0 || [408, 425].includes(status) || status >= 500
             throw makeError(timedOut ? 'HTTP_TIMEOUT' : 'PARSE_FAILED', {
               message:
-                res.status === 429
+                status === 429
                   ? '直链探测失败（HTTP 429）：请求过于频繁被服务端限流，请稍后重试。'
-                  : `直链探测失败（HTTP ${res.status}）。请检查链接是否有效后重试。`
+                  : status === 0
+                    ? '直链探测失败：网络不可达或超时，请检查链接后重试。'
+                    : `直链探测失败（HTTP ${status}）。请检查链接是否有效后重试。`
             })
           }
-          log.warn(`多源镜像探测失败（HTTP ${res.status}），已剔除: ${url}`)
+          log.warn(`多源镜像探测失败（HTTP ${status}），已剔除: ${url}`)
           continue
         }
         // 重定向后的最终地址同样不得落在内网（防公网 302 跳内网）
         if (res.url && res.url !== url && (await isInternalUrl(res.url))) {
+          await res.body?.cancel().catch(() => {})
           if (url === task.source) {
             throw makeError('PARSE_FAILED', {
               message: '该链接重定向至内网/回环地址，已中止探测。'
@@ -270,7 +327,8 @@ export class Aria2Adapter implements EngineAdapter {
           log.warn(`多源镜像重定向至内网，已剔除: ${url}`)
           continue
         }
-        const len = Number(res.headers.get('content-length') ?? 0)
+        const len = probeTotalLen(res)
+        await res.body?.cancel().catch(() => {}) // GET 兜底的 206 体必须消费，防 socket 挂起
         const entry = { url, len, res }
         if (!primary) primary = entry
         else if (primary.len > 0 && len === primary.len) probed.push(entry)
@@ -283,6 +341,17 @@ export class Aria2Adapter implements EngineAdapter {
       }
     }
     if (!primary) {
+      if (lenient) {
+        const outName = readTaskOutName(task)
+        const name = outName || 'video.mp4'
+        log.warn(`sidecar 直链预检未通过，跳过预检直接尝试下载: ${task.source}`)
+        return {
+          name,
+          totalBytes: 0,
+          files: [{ path: name, size: 0 }],
+          mirrors: [task.source]
+        }
+      }
       throw makeError('PARSE_FAILED', {
         message: '全部镜像探测失败，请检查链接是否有效后重试。'
       })
@@ -293,7 +362,7 @@ export class Aria2Adapter implements EngineAdapter {
     if (mirrors.length > 1) {
       log.info(`多源下载：${mirrors.length} 个镜像通过 content-length 校验`)
     }
-    const len = Number(res.headers.get('content-length') ?? 0)
+    const len = probeTotalLen(res)
     const cd = res.headers.get('content-disposition') ?? ''
     const m = /filename\*?=(?:UTF-8'')?"?([^";]+)/i.exec(cd)
     // P3 修复：畸形百分号编码（如 /b%c/x.mp4）会抛 URIError 裸异常，回退原始路径
@@ -306,10 +375,13 @@ export class Aria2Adapter implements EngineAdapter {
       }
     })()
     const name = sanitizeFilename(m?.[1] || urlName || 'download')
+    // R7 续（backlog #11）：sidecar 兜底任务携带解析服务标题产物名——CDN 直链
+    // 路径无文件名（哈希段），默认命名不可读；与 aria2 start 的 out 选项同源
+    const finalName = readTaskOutName(task) || name
     return {
-      name,
+      name: finalName,
       totalBytes: len,
-      files: [{ path: name, size: len }],
+      files: [{ path: finalName, size: len }],
       // 审查修复：恒返回（至少含主 URL）——manager 据此回写 params.urls，
       // 保证未通过校验的原始镜像不会残留在 params 里被 start() 直接使用
       mirrors
@@ -422,6 +494,15 @@ export class Aria2Adapter implements EngineAdapter {
 
       // R7 P1 多源：task.params.urls 携带同文件镜像列表 → addUri 多 URI 并行分段
       const urls = readTaskUrls(task)
+      // R7 续（backlog #11）：sidecar 兜底任务按解析服务标题落盘（直链无文件名）
+      const outName = readTaskOutName(task)
+      if (outName) opts.out = outName
+      // R7 续审查加固：sidecar 兜底直链常校验 UA/referer（与 parseHttp 探测同源）
+      const originUrl = readTaskOriginUrl(task)
+      if (originUrl) {
+        opts['user-agent'] = BROWSER_UA
+        opts.referer = originUrl
+      }
       return (await this.rpc().call('addUri', urls, opts)) as string
     } catch (err) {
       // P1 加固：allow-overwrite 默认关闭后，同名文件直接报 aria2 原生英文错误——

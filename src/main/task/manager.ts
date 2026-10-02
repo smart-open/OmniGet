@@ -18,9 +18,9 @@ import { makeError } from '@shared/errors'
 import { broadcastEngineHealth, broadcastTasks, broadcastNotices } from '../ipc'
 import { createLogger } from '../logger'
 import { normalizeInfohash } from '../torrent/parse'
-import { sniff } from '../sniffer'
+import { sniff, type SniffResult } from '../sniffer'
 import { expandInputSource, extractHttpUrls, isVideoHostUrl } from '../shortlink'
-import { parseParamsJson, readTaskSpeedLimit } from '../task/params'
+import { parseParamsJson, readTaskOriginUrl, readTaskSpeedLimit } from '../task/params'
 import type { Aria2Adapter } from '../adapters/aria2'
 import type { MusicAdapter } from '../music/adapter'
 import type { YtDlpAdapter } from '../adapters/ytdlp'
@@ -30,6 +30,13 @@ import { toolbox } from '../toolbox'
 import { samplePeakSpeed, recordCompletion, reverseCompletion } from '../stats'
 import { recordPlatformOk, recordPlatformDegraded, recordPlatformFailure } from '../health'
 import { getSettingParsed } from '../db'
+import { sanitizeFilename } from '@shared/sanitize'
+import {
+  getVideoSidecarBase,
+  resolveViaSidecar,
+  type SidecarVideo
+} from '../sidecar/video-api'
+import { platformLabel, SIDECAR_PLATFORMS } from '../sidecar/video-extract'
 import { assertTransition, IllegalTransitionError } from './state-machine'
 import { uuidv7 } from './id'
 import { TaskEventMerger } from './events'
@@ -430,10 +437,21 @@ export class TaskManager {
       // M3：按引擎分派解析（video → yt-dlp；其余 → aria2）。
       // A3：传入中止探针——磁力 metadata 轮询最长 90s，期间任务可能被删除
       const isAborted = (): boolean => isTrashed(task.id)
-      const parsed =
-        task.engine === 'ytdlp'
-          ? await this.ytdlp!.parse(task)
-          : await this.aria2.parse(task, isAborted)
+      let parsed: ParseOutput
+      try {
+        parsed =
+          task.engine === 'ytdlp'
+            ? await this.ytdlp!.parse(task)
+            : await this.aria2.parse(task, isAborted)
+      } catch (parseErr) {
+        // R7 续（backlog #11）：yt-dlp 解析失败（快手/小红书无 extractor、抖音风控等）
+        // → 自托管解析服务兜底；命中后任务改道 http 直链管线（aria2 直启）
+        const fallback = await this.trySidecarFallback(task, s, isAborted)
+        if (!fallback) throw parseErr
+        parsed = fallback
+        // 对话框与 skipAwaiting 按 http 直链口径（无格式选择、创建即入队）
+        s = { type: 'http', source: task.source, platform: 'http' }
+      }
       // A3：解析返回后复核——已删除的任务不得复活写库/转移状态
       if (isTrashed(task.id)) {
         if (parsed.pendingGid) {
@@ -498,7 +516,12 @@ export class TaskManager {
           })
         )
       }
-      return { kind: 'awaiting', taskId: task.id, parsed, sniff: s }
+      // R7 续：http 直链任务已在本函数内直启（skipAwaiting），返回 started 让对话框
+      // 直接关框——此前单路径仍返回 awaiting，用户点确认会撞上 confirmSelection 的
+      // awaiting 状态守卫抛 IllegalTransitionError（批量路径早已跳过，单路径漏改）
+      return skipAwaiting
+        ? { kind: 'started', taskId: task.id }
+        : { kind: 'awaiting', taskId: task.id, parsed, sniff: s }
     } catch (err) {
       // A3：解析期间任务被删除（含中止探针抛出）→ 不转移状态、不标失败
       if (isTrashed(task.id)) return { kind: 'failed', error: '任务已删除' }
@@ -513,6 +536,101 @@ export class TaskManager {
       this.pushEvent({ taskId: task.id, status: 'failed', error: message })
       return { kind: 'failed', error: message }
     }
+  }
+
+  /**
+   * R7 续修复（backlog #11）：sidecar 兜底任务的时效直链——启动/重试前重问解析服务
+   * 刷新（签名 URL 过期是下载失败的主因）。仅对 params.originUrl 存在的任务生效
+   * （即 sidecar 改道任务）；刷新失败不阻断启动——旧直链可能仍有效。
+   */
+  private async refreshSidecarLink(task: TaskExt): Promise<TaskExt> {
+    const originUrl = readTaskOriginUrl(task)
+    if (!originUrl || !getVideoSidecarBase()) return task
+    try {
+      const video = await resolveViaSidecar(originUrl)
+      const prev = parseParamsJson(task.params)
+      const params = JSON.stringify({ ...prev, urls: [video.url] })
+      task.source = video.url
+      task.params = params
+      updateTaskFields(task.id, { source: video.url, params })
+      log.info(`sidecar 直链已刷新 ${task.id}`)
+    } catch (err) {
+      log.warn(`sidecar 直链刷新失败（沿用旧直链重试）${task.id}`, err)
+    }
+    return task
+  }
+
+  /**
+   * R7 续（backlog #11）：yt-dlp 解析失败 → 自托管短视频解析服务兜底。
+   * 未配置服务 / 平台不在覆盖面 / 兜底解析失败 → 返回 null 走原失败路径；
+   * 命中 → 任务改道 http 直链管线：type/engine 持久化改写，source 换直链，
+   * params.outName 携带标题产物名（parseHttp 命名与 aria2 out 共用）。
+   * 直链有效性仍由 aria2.parseHttp 的 HEAD 探测 + 内网校验把关。
+   */
+  private async trySidecarFallback(
+    task: TaskExt,
+    s: SniffResult,
+    isAborted: () => boolean
+  ): Promise<ParseOutput | null> {
+    if (task.engine !== 'ytdlp' || s.type !== 'video' || !s.platform) return null
+    if (!SIDECAR_PLATFORMS.includes(s.platform)) return null
+    if (!getVideoSidecarBase()) return null
+    const platform = s.platform
+    log.info(`yt-dlp 解析失败，尝试解析服务兜底（${platform}）: ${task.id}`)
+    let video: SidecarVideo
+    try {
+      video = await resolveViaSidecar(task.source)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      log.warn(`解析服务兜底失败 ${task.id}: ${message}`)
+      recordPlatformFailure(
+        platform,
+        'risk',
+        `解析服务兜底失败：${message}`,
+        'sidecar',
+        '检查设置 → 短视频解析服务'
+      )
+      return null
+    }
+    // 解析在途期间任务可能被删除
+    if (isAborted()) return null
+    // 原分享页 URL（aria2 探测/下载的 UA/referer 伪装用）；产物扩展名取直链路径，缺省 mp4
+    // （审查修复：解析服务标题无扩展名，out 直接用会落盘无后缀文件）
+    const originUrl = task.source
+    const pathExt = (() => {
+      try {
+        return (/\.(\w{2,5})$/.exec(new URL(video.url).pathname)?.[1] ?? 'mp4').toLowerCase()
+      } catch {
+        return 'mp4'
+      }
+    })()
+    const outName = video.title ? `${sanitizeFilename(video.title)}.${pathExt}` : ''
+    const prev = parseParamsJson(task.params)
+    task.type = 'http'
+    task.engine = 'aria2'
+    task.source = video.url
+    task.params = JSON.stringify({
+      ...prev,
+      urls: [video.url],
+      originUrl,
+      ...(outName ? { outName } : {})
+    })
+    updateTaskFields(task.id, {
+      type: 'http',
+      engine: 'aria2',
+      source: video.url,
+      params: task.params
+    })
+    // 健康面板：解析服务命中即记平台 ok（下载段由 aria2 层负责）
+    recordPlatformOk(platform, 'sidecar')
+    broadcastNotices([
+      {
+        level: 'info',
+        message: `yt-dlp 未能解析该链接，已通过自托管解析服务获取直链（${platformLabel(platform)}）`,
+        taskId: task.id
+      }
+    ])
+    return await this.aria2.parse(task, isAborted)
   }
 
   /**
@@ -850,7 +968,9 @@ export class TaskManager {
         this.runWhenQueued(t.id, async (cur) => {
           let gid: string
           if (cur.engine === 'aria2') {
-            gid = await this.aria2.start(cur, this.selectionFor(cur))
+            // R7 续修复（backlog #11）：sidecar 兜底任务恢复前刷新时效直链
+            const withFreshLink = await this.refreshSidecarLink(cur)
+            gid = await this.aria2.start(withFreshLink, this.selectionFor(cur))
           } else if (cur.engine === 'ytdlp' && this.ytdlp) {
             // M3-1：resume = 同参数重 spawn（合集带 --playlist-items 回放）
             gid = await this.ytdlp.start(
@@ -901,7 +1021,9 @@ export class TaskManager {
             this.isPlaylistTask(cur) ? this.selectionFor(cur) : undefined
           )
         } else {
-          gid = await this.aria2.start(cur, this.selectionFor(cur))
+          // R7 续修复（backlog #11）：sidecar 兜底任务重试前刷新时效直链
+          const fresh = await this.refreshSidecarLink(cur)
+          gid = await this.aria2.start(fresh, this.selectionFor(cur))
         }
         updateTaskFields(cur.id, { engineGid: gid, error: null })
         // P3 加固：await 后重读复核，防旧快照覆盖轮询已写入的状态

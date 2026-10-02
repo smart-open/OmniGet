@@ -298,6 +298,12 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
   const [tab, setTab] = useState<Tab>('appearance') // 默认打开外观
   const [template, setTemplate] = useState('')
   const [cookieFile, setCookieFile] = useState('')
+  // R7 续（backlog #11）：短视频解析服务 sidecar 兜底
+  const [sidecarUrl, setSidecarUrl] = useState('')
+  const [sidecarProbing, setSidecarProbing] = useState(false)
+  const [sidecarProbeMsg, setSidecarProbeMsg] = useState<{ ok: boolean; detail: string } | null>(
+    null
+  )
   const [saveDir, setSaveDir] = useState('')
   // R2/R7：并发上限与自动归档
   const [maxConcurrent, setMaxConcurrent] = useState('0')
@@ -354,6 +360,7 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
     void (async () => {
       setTemplate(String((await window.omniget.settingsGet('naming.template')) ?? '{{title}}'))
       setCookieFile(String((await window.omniget.settingsGet('ytdlp.cookieFile')) ?? ''))
+      setSidecarUrl(String((await window.omniget.settingsGet('sidecar.videoApiUrl')) ?? ''))
       setSaveDir(String((await window.omniget.settingsGet('download.saveDir')) ?? ''))
       setMaxConcurrent(String((await window.omniget.settingsGet('download.maxConcurrent')) ?? 0))
       setAutoArchive((await window.omniget.settingsGet('download.autoArchive')) === true)
@@ -567,6 +574,62 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
               >
                 保存
               </Button>
+            </Section>
+
+            {/* R7 续（backlog #11）：短视频解析服务 sidecar 兜底 */}
+            <Section title="短视频解析服务（可选）">
+              <TextRow
+                label="服务地址"
+                value={sidecarUrl}
+                onChange={(v) => {
+                  setSidecarUrl(v)
+                  setSidecarProbeMsg(null)
+                }}
+                mono
+                hint="Evil0ctal/Douyin_TikTok_Download_API v5 自托管实例（Docker / 本地进程），示例 http://127.0.0.1:8000"
+              />
+              <p className="mt-1 text-[10px] leading-relaxed text-text-3">
+                yt-dlp 解析失败时（快手/小红书等无内置提取器的平台）自动调用该服务获取直链并转为
+                HTTP 下载；留空 = 禁用兜底。需提供 POST /api/hybrid/video_data 端点
+              </p>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    window.omniget
+                      .settingsSet('sidecar.videoApiUrl', sidecarUrl.trim())
+                      .then(() => flash('解析服务设置已保存'))
+                      .catch((err) => toastError('保存解析服务设置', err))
+                  }}
+                >
+                  保存
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={sidecarProbing || !sidecarUrl.trim()}
+                  onClick={() => {
+                    setSidecarProbing(true)
+                    setSidecarProbeMsg(null)
+                    window.omniget
+                      .sidecarProbe(sidecarUrl.trim())
+                      .then((r) => setSidecarProbeMsg(r))
+                      .catch((err) => toastError('测试解析服务连接', err))
+                      .finally(() => setSidecarProbing(false))
+                  }}
+                >
+                  {sidecarProbing ? '测试中…' : '测试连接'}
+                </Button>
+              </div>
+              {sidecarProbeMsg && (
+                <p
+                  className={`mt-1 text-[10px] ${
+                    sidecarProbeMsg.ok ? 'text-green-500' : 'text-red-400'
+                  }`}
+                >
+                  测试{sidecarProbeMsg.ok ? '通过' : '失败'}：{sidecarProbeMsg.detail}
+                </p>
+              )}
             </Section>
 
             {/* R2/R7：队列与归档 */}

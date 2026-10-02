@@ -56,6 +56,9 @@ function entry(id: string, engine: string): Entry {
     }
     entries.set(id, e)
   }
+  // R7 续审查修复：引擎归属跟随最近一次成功/失败来源（sidecar 兜底命中后，
+  // 平台行的引擎列从 yt-dlp 翻为 sidecar，用户可确认兜底通道生效）
+  if (e.engine !== engine) e.engine = engine
   return e
 }
 

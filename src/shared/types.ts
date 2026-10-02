@@ -456,6 +456,8 @@ export interface OmniGetBridge {
   exportFile(defaultName: string, content: string): Promise<string | null>
   /** R4 续（backlog #4）：预设导入——打开对话框 + 主进程读盘；取消返回 null */
   importFile(ext?: string): Promise<{ name: string; content: string } | null>
+  /** R7 续（backlog #11）：短视频解析服务连接测试（主进程代发探测，渲染层无 Node 能力） */
+  sidecarProbe(baseUrl: string): Promise<{ ok: boolean; detail: string }>
   // events
   onTaskEvents(listener: (events: TaskEvent[]) => void): () => void
   onEngineHealth(listener: (health: EngineHealth[]) => void): () => void
@@ -502,6 +504,8 @@ export const IPC_CHANNELS = {
   enginesFetch: 'engines:fetch',
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
+  /** R7 续（backlog #11）：短视频解析服务连接测试 */
+  sidecarProbe: 'sidecar:probe',
   eventTasks: 'event:tasks',
   eventEngines: 'event:engines',
   /** M→R：UI 动作（托盘/剪贴板/协议唤起 → 打开新建任务并预填） */

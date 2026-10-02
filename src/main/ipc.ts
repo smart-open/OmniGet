@@ -362,6 +362,12 @@ export function registerIpcHandlers(): void {
     return platformHealthSnapshot()
   })
 
+  // ── R7 续（backlog #11）：短视频解析服务连接测试 ─────────────────────
+  ipcMain.handle(IPC_CHANNELS.sidecarProbe, async (_e, baseUrl: string) => {
+    const { probeVideoSidecar } = await import('./sidecar/video-api')
+    return probeVideoSidecar(String(baseUrl ?? ''))
+  })
+
   // ── R1+R5：本地桥接信息（端口/token，设置页展示）─────────────────────
   ipcMain.handle(IPC_CHANNELS.bridgeInfo, async () => {
     const { getBridgeInfo } = await import('./bridge')
@@ -513,7 +519,9 @@ export function registerIpcHandlers(): void {
     // engines.mirrorHosts 主进程独占（渲染层无 UI，仅配置文件/主进程可写）——
     // 信任锚不得与被保护对象同置于渲染层可写面，否则 SHA256 校验失去独立锚点
     'engines.autoFetch',
-    'ytdlp.cookieFile'
+    'ytdlp.cookieFile',
+    // R7 续（backlog #11）：自托管短视频解析服务地址（http 允许——常部署在局域网/本机）
+    'sidecar.videoApiUrl'
   ])
   ipcMain.handle(IPC_CHANNELS.settingsSet, (_e, key: string, value: unknown) => {
     const k = String(key ?? '')
@@ -524,6 +532,14 @@ export function registerIpcHandlers(): void {
       const v = typeof value === 'string' ? value.trim() : ''
       if (v && !/^https:\/\//i.test(v)) {
         throw new Error('引擎分发源必须是 https:// 地址')
+      }
+    }
+    if (k === 'sidecar.videoApiUrl') {
+      // R7 续（backlog #11）：仅接受 http(s) 地址；http 放行——自托管解析服务
+      // 常部署在本机/局域网（http://127.0.0.1:8000）
+      const v = typeof value === 'string' ? value.trim() : ''
+      if (v && !/^https?:\/\//i.test(v)) {
+        throw new Error('解析服务地址必须以 http:// 或 https:// 开头')
       }
     }
     if (k === 'download.saveDir' && typeof value === 'string' && value.trim()) {
