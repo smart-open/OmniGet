@@ -46,6 +46,17 @@
 - IDM：动态分段 + 浏览器集成 = 行业基准；FDM：队列/计划/类型归档；JDownloader：**链接抓取（LinkGrabber）+ 批量自动化 + 验证码处理**
 - 共同结论：**「浏览器扩展 + 批量链接抓取 + 队列调度」是下载器的三条标配护城河**。
 
+### 10. 二轮深挖（2026-10-02，新增 10 款）
+
+> 完整条目与待办已并入 `docs/backlog.md` §六（#16–#24），此处仅记结论。
+
+- **yt-dlp 前端代**：MeTube（自托管 Web UI，2026-08 仍在更新）、VidBee（活跃，捆绑 Node 解决 yt-dlp JS 运行时）、Parabolic、Seal（Android，yt-dlp+ffmpeg+aria2 三件套内嵌）
+- **⚠ 全生态硬变更**：yt-dlp 自 2025-11 起下载 YouTube 需外部 JS 运行时（Deno/Node + yt-dlp-ejs，官方 issue #15012）——OmniGet 引擎 2026.08.19 已在此变更之后，**YouTube 兼容性需立即排查**（backlog #16 🔴）
+- **流媒体引擎带**：N_m3u8DL-RE（DASH/HLS/MSS + AES 解密 + 直播，MediaGo 内核）——aria2 无法覆盖的分段加密流场景（backlog #17/#20）
+- **内容管理带**：Tube Archivist / Pinchflat（订阅自动下载库）、spotDL sync（歌单双向同步）——订阅自动化是下一战场（backlog #18/#22）
+- **国内短视频深水区**：f2（2.4K★，直播录制/弹幕/主页批量，内置 ABogus 签名对抗风控）、TikTokDownload（8.4K★，f2 接棒）——签名自研路线的合规与维护风险再次被印证不可取（backlog #11 决策正确）
+- **B 站专项**：BBDown（弹幕/章节/多轨）——yt-dlp 盲区，暂缓观察（backlog #23）
+
 ---
 
 ## 二、能力矩阵对照（OmniGet vs 主流）

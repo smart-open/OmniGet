@@ -109,3 +109,58 @@
 
 ### 15. ⏸ 迅雷 SDK（维持不做）
 - **依据**：`xunlei-open/xunlei-dlsdk` 为商业授权（需 APP ID/API Key + 依赖迅雷云端调度），开源产品不可嵌入；仅未来商业化合作时评估。
+
+---
+
+## 六、竞品深挖（2026-10-02，第二轮 GitHub 调研）
+
+> 调研范围：第一轮 9 款之外的活跃开源项目——MeTube、VidBee（2026-09 仍在活跃开发）、Parabolic、Seal（Android）、spotDL、f2 / TikTokDownload、N_m3u8DL-RE、BBDown、Tube Archivist / Pinchflat。
+> 本轮两大发现：① **yt-dlp 外部 JS 运行时硬性要求**（直接影响现有 YouTube 兼容性，列 P1 排查）；② **HLS/DASH 流媒体引擎与订阅自动化**是两条完整的能力带缺口（此前矩阵未覆盖）。
+
+### 16. 🔴 yt-dlp JS 运行时兼容性排查（EJS / Deno / Node）
+- **依据**：yt-dlp 自 2025-11 起下载 YouTube 必须外部 JS 运行时（Deno/Node.js + yt-dlp-ejs，官方公告 issue #15012）；OmniGet 引擎为 2026.08.19（晚于该变更），**YouTube 任务可能已静默失败**；MeTube/VidBee/spotDL 均已给出对策（VidBee 捆绑 Node 作为运行时、spotDL 提供 `--download-deno` 自助）。
+- **待办**：
+  - [ ] 真机验证 YouTube 提取是否可用；健康页增加「JS 运行时」探测项并公示缺失
+  - [ ] 引擎清单增加 deno 可选组件（复用 R6 按需下载 + SHA256/TOFU 机制），yt-dlp spawn 时注入运行时路径
+  - [ ] 调查零包体方案：Electron 主进程 `ELECTRON_RUN_AS_NODE=1` 包装器充当 node 运行时（VidBee 方案增包体 ~50MB，优先验证免增方案）
+- **⚠ 影响面**：仅 YouTube 等依赖 nsig 挑战的站点；国内站点提取不受影响，故未在历史回归中暴露。
+
+### 17. 🟠 HLS/DASH 流媒体引擎（N_m3u8DL-RE sidecar）
+- **依据**：nilaoda/N_m3u8DL-RE——DASH/HLS/MSS 点播+直播、AES-128/SAMPLE-AES 解密、多轨选择与 ffmpeg 混流；MediaGo 即以其为内核。aria2 对分段 HLS + 加密场景无能为力，这是完整能力带缺口。
+- **待办**：
+  - [ ] 嗅探器分型 `.m3u8` / `.mpd` 链接（新任务类型 `hls`，走专用引擎）
+  - [ ] 引擎清单增加 N_m3u8DL-RE（按需下载，单文件 ~20MB）
+  - [ ] 与 ffmpeg 混流管线复用（字幕/多音轨勾选可后置）
+
+### 18. 🟠 订阅中心（频道 / UP主 / 歌单自动追更）
+- **依据**：Pinchflat / Tube Archivist（自托管订阅自动下载库，容器化）、spotDL `sync`（歌单与本地目录双向同步、删歌联动）——「订阅自动化」是下载器向「内容管理」演进的高价值方向，OmniGet 已有定时调度器与批量抓取基建，边际成本低。
+- **待办**：
+  - [ ] 订阅源管理 UI（频道/合集/歌单 URL + 抓取间隔）
+  - [ ] 复用定时调度器：定时 flat-parse 订阅源 → 差集计算 → 自动入队
+  - [ ] yt-dlp `--download-archive`（#22）作为已下载去重底座
+
+### 19. 🟡 yt-dlp 外部下载器 aria2c（可选加速）
+- **依据**：Seal 内嵌 yt-dlp + ffmpeg + aria2 三件套并以 aria2c 为默认下载器；CLI 社区成熟范式 `--downloader aria2c --downloader-args "-x 16 -k 1M"`。OmniGet 自带 aria2 零包体成本。
+- **待办**：
+  - [ ] 设置开关（默认关；`--downloader-args` 注入并发数，UA/referer 同步透传）
+  - [ ] 验证 yt-dlp 对 aria2c 进度输出的解析（官方已支持 aria2c 进度协议）
+
+### 20. 🟡 直播录制（HLS 直播流落盘）
+- **依据**：f2 支持抖音/TikTok 直播流批量采集与弹幕转发；N_m3u8DL-RE 支持直播录制；Bililive-recorder 专精 B 站。国内直播录制是真实需求且无桌面端开源整合方案。
+- **依赖**：#17（N_m3u8DL-RE 引擎就位后，live 模式 + 定时停止/分段）。
+
+### 21. 🟡 SponsorBlock 集成（YouTube 广告段标记/剔除）
+- **依据**：yt-dlp 原生 `--sponsorblock-mark` / `--sponsorblock-remove`（社区众包广告段数据库），零外部依赖。
+- **待办**：[ ] 新建对话框视频选项加「跳过赞助/广告段」开关（仅 YouTube 任务显示），映射 L1/L2 参数注入。
+
+### 22. 🟡 已下载去重（--download-archive）
+- **依据**：spotDL sync / Pinchflat 均以 archive 文件为去重底座；OmniGet 重复粘贴同一合集 URL 会重复下载。
+- **待办**：[ ] 按站点+ID 维护 `download.archive`（settings 或独立文件）；[ ] 新建任务解析后命中 archive → 提示「已下载过」并可跳转旧任务；[ ] 为 #18 订阅差集计算铺路。
+
+### 23. ⏸ 弹幕下载与压制（B站 xml→ass，BBDown 范式）
+- **暂缓原因**：BBDown 专属能力，yt-dlp 不产弹幕；需独立 B 站 API 适配 + xml→ass 转换工具（可先入工具箱）。等需求反馈。
+
+### 24. ⏸ 主页级批量抓取（f2 / TikTokDownload 范式）
+- **依据**：f2（2.4K★）支持用户主页/合集/点赞/收藏列表批量解析下载；TikTokDownload（8.4K★，已由 f2 接棒）。OmniGet 合集树已覆盖 playlist 场景，「主页全量 + 筛选下载」为增量。
+- **⚠ 合规印证**：f2 内置 msToken/ABogus 等签名算法并遭平台风控对抗——再次印证 backlog #11「不自研签名」决策正确；主页批量仅基于公开 flat-parse 接口。
+- **暂缓原因**：与 #18 订阅中心重叠度高（订阅=主页批量的自动化形态），先做 #18。
