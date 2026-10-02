@@ -141,6 +141,10 @@ export interface MusicCandidate {
   artist: string
   artistMatch: boolean
   originality: number
+  /** R6：时长（毫秒，平台有值才带）——搜索列表展示用 */
+  durationMs?: number
+  /** R6：专辑名（平台有值才带） */
+  album?: string
 }
 
 export interface MusicSearchResult {
@@ -292,6 +296,8 @@ export interface TaskCounts {
   running: number
   queued: number
   completed: number
+  /** R6：失败任务数（「下载失败」侧栏角标） */
+  failed: number
   trashed: number
 }
 

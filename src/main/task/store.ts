@@ -188,17 +188,24 @@ export function listTasks(filter: {
 }
 
 /** 侧栏角标计数（单条 SQL 全表口径，跨视图一致；10k 行内亚毫秒） */
-export function taskCounts(): { running: number; queued: number; completed: number; trashed: number } {
+export function taskCounts(): {
+  running: number
+  queued: number
+  completed: number
+  failed: number
+  trashed: number
+} {
   const row = getDb()
     .prepare(
       `SELECT
         COALESCE(SUM(CASE WHEN deleted_at IS NULL AND status = 'running' THEN 1 ELSE 0 END), 0) AS running,
         COALESCE(SUM(CASE WHEN deleted_at IS NULL AND status = 'queued' THEN 1 ELSE 0 END), 0) AS queued,
         COALESCE(SUM(CASE WHEN deleted_at IS NULL AND status = 'completed' THEN 1 ELSE 0 END), 0) AS completed,
+        COALESCE(SUM(CASE WHEN deleted_at IS NULL AND status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
         COALESCE(SUM(CASE WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS trashed
       FROM tasks`
     )
-    .get() as { running: number; queued: number; completed: number; trashed: number }
+    .get() as { running: number; queued: number; completed: number; failed: number; trashed: number }
   return row
 }
 

@@ -130,7 +130,9 @@ export class MusicEngine {
           name,
           artist: rowArtist,
           artistMatch: artist ? artistMatches(rowArtist, artist) : true,
-          originality: scoreOriginality(name, song)
+          originality: scoreOriginality(name, song),
+          durationMs: row.durationMs,
+          album: row.album
         })
       }
     }

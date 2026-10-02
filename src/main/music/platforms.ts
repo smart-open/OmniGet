@@ -58,6 +58,10 @@ export interface PlatformSong {
   name: string
   artist: string
   copyrightId?: string
+  /** R6：时长毫秒（搜索列表展示；平台有值才带） */
+  durationMs?: number
+  /** R6：专辑名（搜索列表展示；平台有值才带） */
+  album?: string
 }
 
 export interface PlatformResult {
@@ -153,13 +157,23 @@ export class PlatformEngine {
         NETEASE_HEADERS,
         { signal: this.cb.signal, timeoutMs: 10_000 }
       )
-      return (data.result?.songs ?? []).map((s) => ({
-        id: String(s.id),
-        name: String(s.name ?? ''),
-        artist: ((s.artists as Array<{ name?: string }> | undefined) ?? [])
-          .map((a) => a.name ?? '')
-          .join(', ')
-      }))
+      return (data.result?.songs ?? []).map((s) => {
+        // R6 修复：cloudsearch/pc 新版响应歌手字段为 `ar`（旧 `artists` 已不下发，
+        // 实测 2026-10-02）——原映射恒得空 artist，列表无歌手且下载侧原唱校验
+        // 只能靠 song/detail 逐条补；两字段都读保持向后兼容
+        const artists =
+          (s.ar as Array<{ name?: string }> | undefined) ??
+          (s.artists as Array<{ name?: string }> | undefined) ??
+          []
+        return {
+          id: String(s.id),
+          name: String(s.name ?? ''),
+          artist: artists.map((a) => a.name ?? '').join(', '),
+          // dt=时长毫秒；al.name=专辑（新版响应字段名）
+          durationMs: typeof s.dt === 'number' ? s.dt : undefined,
+          album: String((s.al as { name?: string } | undefined)?.name ?? '') || undefined
+        }
+      })
     } catch {
       return []
     }
@@ -348,7 +362,7 @@ export class PlatformEngine {
   }
 
   async tryNeteaseRobust(singer: string, songName: string, mp3Path: string, lrcPath: string, quality: Quality): Promise<boolean> {
-    const candidates = await this.searchNetease(`${singer} ${songName}`, 10)
+    const candidates = await this.searchNetease(`${singer} ${songName}`.trim(), 10)
     if (!candidates.length) return false
     const enriched = []
     for (const c of candidates.slice(0, 10)) {
@@ -356,17 +370,22 @@ export class PlatformEngine {
       const artist = d.artist || c.artist
       enriched.push({ ...c, artist, match: artistMatches(artist, singer) })
     }
-    const matched = enriched.filter((c) => c.match)
+    // R6 修复：用户只输歌名不输歌手（singer 为空）时，artistMatches 恒 false →
+    // 网易云永远跳过 → 全平台失败（实测日志「所有平台均无法下载:  童年」）。
+    // 空歌手按「原版度」择优，与搜索列表排序口径一致；仍要求经 detail 补齐歌手
+    const matched = singer ? enriched.filter((c) => c.match) : enriched
     if (!matched.length) {
       this.cb.log?.(`网易云搜索结果未匹配到原唱「${singer}」，可能为翻唱或搜索接口降级，跳过`)
       return false
     }
     matched.sort((a, b) => scoreOriginality(b.name, songName) - scoreOriginality(a.name, songName))
+    // 空歌手无原唱锚点，候选全部尝试代价过高（每候选 4 镜像×3 音质）——只取最像原版的前 5
+    const attempts = singer ? matched : matched.slice(0, 5)
     const allIds = enriched.map((c) => c.id)
-    for (const c of matched) {
+    for (const c of attempts) {
       if (await this.downloadNeteaseAudio(c.id, mp3Path, quality)) {
         await this.neteaseLyricBest(c.id, allIds, lrcPath)
-        this.cb.log?.(`网易云命中原唱: ${c.name} / ${c.artist}`)
+        this.cb.log?.(`网易云命中: ${c.name} / ${c.artist}`)
         return true
       }
     }
@@ -440,7 +459,10 @@ export class PlatformEngine {
       return list.map((s) => ({
         id: String(s.mid ?? ''),
         name: String(s.title ?? ''),
-        artist: ((s.singer as Array<{ name?: string }> | undefined) ?? []).map((a) => a.name ?? '').join(', ')
+        artist: ((s.singer as Array<{ name?: string }> | undefined) ?? []).map((a) => a.name ?? '').join(', '),
+        // R6：搜索列表展示字段（interval=秒，album.name=专辑）
+        durationMs: Number(s.interval) > 0 ? Number(s.interval) * 1000 : undefined,
+        album: String((s.album as { name?: string } | undefined)?.name ?? '') || undefined
       }))
     } catch {
       return []
@@ -518,7 +540,10 @@ export class PlatformEngine {
       return (r.data?.lists ?? []).map((s) => ({
         id: String(s.FileHash ?? s.hash ?? ''),
         name: String(s.SongName ?? s.songname ?? ''),
-        artist: String(s.SingerName ?? s.singername ?? '')
+        artist: String(s.SingerName ?? s.singername ?? ''),
+        // R6：搜索列表展示字段（Duration=秒，AlbumName=专辑）
+        durationMs: Number(s.Duration) > 0 ? Number(s.Duration) * 1000 : undefined,
+        album: String(s.AlbumName ?? '') || undefined
       }))
     } catch {
       return []
@@ -602,6 +627,10 @@ export class PlatformEngine {
     const contentId = song.id
     const copyrightId = song.copyrightId ?? ''
     const q = QUALITY_MAP.migu![quality]
+    // R6 修复：listen-url 接口现返回非 JSON 二进制体（服务端异常，实测 2026-10-02，
+    // JSON.parse 必炸）——原实现里 getJson 抛错直达 catch，listenSong.do 兜底直链
+    // 永远走不到。改为接口失败/空 url 都落到兜底直链（实测返回 4MB audio/mpeg 可用）
+    let audio = ''
     try {
       const url =
         'https://c.musicapp.migu.cn/strategy/listen-url/h5/v2.4?' +
@@ -620,29 +649,37 @@ export class PlatformEngine {
         { 'Content-Type': 'application/json;charset=UTF-8', birth: 'h5page', signature: '1' },
         { signal: this.cb.signal, timeoutMs: 10_000 }
       )
-      let audio = data.data?.url ?? ''
-      if (!audio) {
-        audio = `https://app.pd.nf.migu.cn/MIGUM3.0/v1.0/content/sub/listenSong.do?channel=mx&copyrightId=${copyrightId}&contentId=${contentId}&toneFlag=${q}&resourceType=E&userId=15548614588710179085069&netType=00`
-      }
-      if (trustedAudioUrl(audio) && (await downloadFile(audio, mp3Path, { signal: this.cb.signal }))) {
-        let lyric = ''
-        try {
-          const url2 = `https://app.c.nf.migu.cn/MIGUM3.0/strategy/pc/listen/v1.0?scene=&netType=01&resourceType=2&copyrightId=${copyrightId}&contentId=${contentId}&toneFlag=PQ`
-          await this.gate(url2)
-          const r2 = await getJson<{ data?: { lrcUrl?: string } }>(url2, undefined, { signal: this.cb.signal, timeoutMs: 10_000 })
-          if (r2.data?.lrcUrl) {
-            lyric = await getText(r2.data.lrcUrl, UA, { signal: this.cb.signal, timeoutMs: 10_000 })
-          }
-        } catch {
-          // 歌词接口失败不影响音频（下方落占位歌词）
-          lyric = ''
-        }
-        await writeLrc(lrcPath, lyric || EMPTY_LRC)
-        return true
-      }
+      audio = data.data?.url ?? ''
     } catch (err) {
-      if (!this.cb.signal?.aborted) this.cb.log?.(`咪咕直链失败 contentId=${contentId}：${err instanceof Error ? err.message : String(err)}`)
+      if (this.cb.signal?.aborted) return false
+      this.cb.log?.(`咪咕 listen-url 接口失败（改走兜底直链）contentId=${contentId}：${err instanceof Error ? err.message : String(err)}`)
     }
+    if (!audio) {
+      audio = `https://app.pd.nf.migu.cn/MIGUM3.0/v1.0/content/sub/listenSong.do?channel=mx&copyrightId=${copyrightId}&contentId=${contentId}&toneFlag=${q}&resourceType=E&userId=15548614588710179085069&netType=00`
+    }
+    if (
+      trustedAudioUrl(audio) &&
+      (await downloadFile(audio, mp3Path, {
+        signal: this.cb.signal,
+        headers: { 'User-Agent': 'Mozilla/5.0', Referer: 'https://m.music.migu.cn/v3' }
+      }))
+    ) {
+      let lyric = ''
+      try {
+        const url2 = `https://app.c.nf.migu.cn/MIGUM3.0/strategy/pc/listen/v1.0?scene=&netType=01&resourceType=2&copyrightId=${copyrightId}&contentId=${contentId}&toneFlag=PQ`
+        await this.gate(url2)
+        const r2 = await getJson<{ data?: { lrcUrl?: string } }>(url2, undefined, { signal: this.cb.signal, timeoutMs: 10_000 })
+        if (r2.data?.lrcUrl) {
+          lyric = await getText(r2.data.lrcUrl, UA, { signal: this.cb.signal, timeoutMs: 10_000 })
+        }
+      } catch {
+        // 歌词接口失败不影响音频（下方落占位歌词）
+        lyric = ''
+      }
+      await writeLrc(lrcPath, lyric || EMPTY_LRC)
+      return true
+    }
+    if (!this.cb.signal?.aborted) this.cb.log?.(`咪咕直链失败 contentId=${contentId}（listen-url 与 listenSong.do 兜底均不可用）`)
     return false
   }
 
@@ -777,9 +814,10 @@ export async function tryAllPlatforms(
   onEvent?: EngineCallbacks['onEvent'],
   signal?: AbortSignal
 ): Promise<PlatformResult> {
-  const keyword = `${singer} ${songName}`
+  const keyword = `${singer} ${songName}`.trim()
   await ensureDir(saveDir)
-  const base = sanitizeName(`${singer} - ${songName}`)
+  // R6：空歌手（用户只输歌名）时文件名不再以 "- " 开头
+  const base = sanitizeName(singer ? `${singer} - ${songName}` : songName)
   const mp3Path = join(saveDir, `${base}.mp3`)
   const lrcPath = join(saveDir, `${base}.lrc`)
 

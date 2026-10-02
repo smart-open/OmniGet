@@ -47,7 +47,7 @@ export const useTasks = create<TasksState>()((set, get) => ({
   stageById: {},
   selectedTaskId: null,
   pinned: [],
-  counts: { running: 0, queued: 0, completed: 0, trashed: 0 },
+  counts: { running: 0, queued: 0, completed: 0, failed: 0, trashed: 0 },
   loadError: null,
   loadedFilter: 'all',
   loading: true,

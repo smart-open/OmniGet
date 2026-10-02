@@ -36,6 +36,8 @@ const FILTERS: Record<string, (t: Task) => boolean> = {
   downloading: (t) =>
     ['queued', 'running', 'paused', 'parsing', 'awaiting', 'verifying'].includes(t.status),
   completed: (t) => ['completed', 'seeding'].includes(t.status),
+  // R6：失败任务视图（ipc task:list filter='failed'）
+  failed: (t) => t.status === 'failed',
   bt: (t) => t.type === 'bt' || t.type === 'magnet',
   video: (t) => t.type === 'video',
   music: (t) => t.type === 'music',
@@ -48,6 +50,7 @@ const FILTER_TITLES: Record<string, string> = {
   all: '全部任务',
   downloading: '正在下载',
   completed: '已完成',
+  failed: '下载失败',
   bt: '种子与磁力',
   video: '视频',
   music: '音乐',
@@ -58,7 +61,8 @@ const FILTER_TITLES: Record<string, string> = {
 const EMPTY_COPY: Record<string, { title: string; hint: string }> = {
   all: { title: '还没有任务', hint: '从剪贴板粘贴链接，或拖入 .torrent 开始' },
   downloading: { title: '当前没有进行中的任务', hint: '新建任务后将在这里排队与下载' },
-  completed: { title: '还没有完成的任务', hint: '完成的任务会折叠收敛到这里' }
+  completed: { title: '还没有完成的任务', hint: '完成的任务会折叠收敛到这里' },
+  failed: { title: '没有失败的任务', hint: '下载失败的任务会出现在这里，可一键重试' }
 }
 
 export function TaskList({
@@ -492,6 +496,13 @@ const TaskRow = memo(function TaskRow({
     else if (action === 'resume') toast('任务已继续下载', 'success')
   }
 
+  /** R6：失败任务一键重试（failed → queued；重载后行离开当前视图） */
+  async function retry(): Promise<void> {
+    await window.omniget.retryTask(task.id)
+    await useTasks.getState().load(isTrash ? 'trash' : 'all')
+    toast(`已重新入队「${task.name || task.source}」`, 'success')
+  }
+
   const canPause = task.status === 'running' || task.status === 'queued'
   const canResume = task.status === 'paused'
 
@@ -596,6 +607,12 @@ const TaskRow = memo(function TaskRow({
               {canResume && (
                 <RowAction label="继续" onClick={() => runOp('继续任务', () => control('resume'))}>
                   <Play size={13} weight="fill" />
+                </RowAction>
+              )}
+              {/* R6：失败任务行内一键重试（failed → queued，音乐任务自动重新泵出） */}
+              {task.status === 'failed' && (
+                <RowAction label="重试" onClick={() => runOp('重试任务', retry)}>
+                  <ArrowsClockwise size={13} />
                 </RowAction>
               )}
               {['queued', 'running', 'paused', 'completed', 'failed'].includes(task.status) && (

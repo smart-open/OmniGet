@@ -19,6 +19,7 @@ import {
   Square,
   Trash,
   Tray,
+  WarningCircle,
   Wrench,
   X
 } from '@phosphor-icons/react'
@@ -52,7 +53,7 @@ interface NavItem {
   id: string
   label: string
   icon: typeof Tray
-  badge?: 'running' | 'completed' | 'trash'
+  badge?: 'running' | 'completed' | 'failed' | 'trash'
 }
 
 const NAV_GROUPS: { title?: string; items: NavItem[] }[] = [
@@ -60,7 +61,9 @@ const NAV_GROUPS: { title?: string; items: NavItem[] }[] = [
     items: [
       { id: 'all', label: '全部', icon: Tray },
       { id: 'downloading', label: '下载中', icon: DownloadSimple, badge: 'running' },
-      { id: 'completed', label: '已完成', icon: CheckCircle, badge: 'completed' }
+      { id: 'completed', label: '已完成', icon: CheckCircle, badge: 'completed' },
+      // R6：失败任务专属视图（红色角标提示用户有任务需要重试）
+      { id: 'failed', label: '下载失败', icon: WarningCircle, badge: 'failed' }
     ]
   },
   {
@@ -115,7 +118,7 @@ export default function App() {
   useEffect(() => wireTaskEvents(), [])
   // P3 修复：stats/settings/toolbox/health 不是任务过滤器——此前把这些字符串原样
   // 发给主进程 listTasks，既浪费 IPC 又会把 loadedFilter 污染成非任务视图值
-  const TASK_FILTERS = ['all', 'downloading', 'completed', 'bt', 'video', 'music', 'trash']
+  const TASK_FILTERS = ['all', 'downloading', 'completed', 'failed', 'bt', 'video', 'music', 'trash']
   useEffect(() => {
     if (TASK_FILTERS.includes(active)) void reload(active)
   }, [active, reload])
@@ -364,9 +367,11 @@ export default function App() {
                     ? runningPlusQueued
                     : item.badge === 'completed'
                       ? counts.completed
-                      : item.badge === 'trash'
-                        ? counts.trashed
-                        : null
+                      : item.badge === 'failed'
+                        ? counts.failed
+                        : item.badge === 'trash'
+                          ? counts.trashed
+                          : null
                 return (
                   <button
                     key={item.id}
@@ -384,7 +389,12 @@ export default function App() {
                     />
                     <span className="flex-1 truncate text-left leading-none">{t(`nav.${item.id}`)}</span>
                     {badge !== null && badge > 0 && (
-                      <span className="num flex h-4 min-w-4 items-center justify-center rounded-full bg-accent px-1 text-[9px] font-medium leading-none text-white">
+                      <span
+                        className={`num flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[9px] font-medium leading-none text-white ${
+                          // R6：失败角标用警示红，与其他计数角标区分
+                          item.badge === 'failed' ? 'bg-danger' : 'bg-accent'
+                        }`}
+                      >
                         {badge}
                       </span>
                     )}

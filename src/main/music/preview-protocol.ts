@@ -235,14 +235,19 @@ export function registerPreviewHandler(): void {
       }
       const mirror = await getMusicEngine().previewUrl(platform, sid, quality)
       if (!mirror) return new Response('preview unavailable', { status: 404 })
-      const upstream = await openStream(mirror)
+      // R6：透传 Range——渲染层 <audio> 拖动进度条时 Chromium 会发分段请求，
+      // 不透传则只能顺序播放无法 seek
+      const rangeHeader = request.headers.get('range')
+      const upstream = await openStream(mirror, rangeHeader ? { Range: rangeHeader } : undefined)
       if (!upstream.ok || !upstream.body) {
         return new Response('upstream error', { status: 502 })
       }
       const headers = new Headers({ 'Content-Type': upstream.contentType })
       if (upstream.contentLength) headers.set('Content-Length', upstream.contentLength)
+      if (upstream.contentRange) headers.set('Content-Range', upstream.contentRange)
+      if (upstream.acceptRanges) headers.set('Accept-Ranges', 'bytes')
       // undici body (web ReadableStream) → 全局 Response（protocol.handle 要求全局类系）
-      return new Response(upstream.body as ReadableStream, { status: 200, headers })
+      return new Response(upstream.body as ReadableStream, { status: upstream.status, headers })
     } catch (err) {
       // 镜像不稳时静默断流（客户端 onerror 兜底）
       log.warn(`preview stream failed: ${String(err)}`)

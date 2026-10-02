@@ -262,6 +262,9 @@ export function registerIpcHandlers(): void {
         return listTasks({ status: ['queued', 'running', 'paused', 'verifying', 'parsing'] })
       case 'completed':
         return listTasks({ status: ['completed', 'seeding'] })
+      // R6：「下载失败」侧栏视图（失败任务列表 + 角标）
+      case 'failed':
+        return listTasks({ status: ['failed'] })
       case 'trash':
         return listTasks({ onlyDeleted: true })
       default:

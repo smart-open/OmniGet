@@ -9,8 +9,8 @@ import {
   DownloadSimple,
   ListChecks,
   MagnifyingGlass,
-  PlayCircle,
-  PauseCircle,
+  Play,
+  Pause,
   Warning
 } from '@phosphor-icons/react'
 import type { MusicCandidate, MusicSearchResult } from '@shared/types'
@@ -23,12 +23,28 @@ const QUALITY_LABELS: Record<string, string> = {
   lossless: '无损 FLAC'
 }
 
+type Quality = 'standard' | 'high' | 'lossless'
+
+/** 秒 → m:ss（试听进度/歌曲时长展示） */
+function formatTime(sec: number): string {
+  if (!Number.isFinite(sec) || sec < 0) return '0:00'
+  const m = Math.floor(sec / 60)
+  const s = Math.floor(sec % 60)
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
 export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
   const [q, setQ] = useState('')
   const [searching, setSearching] = useState(false)
   const [result, setResult] = useState<MusicSearchResult | null>(null)
   const [searchError, setSearchError] = useState('')
-  const [quality, setQuality] = useState<'standard' | 'high' | 'lossless'>('high')
+  const [quality, setQuality] = useState<Quality>('high')
+  /** R6：逐行音质选择（默认跟随全局音质；select 展示全部三档） */
+  const [rowQuality, setRowQuality] = useState<Record<string, Quality>>({})
+  /** R6：试听进度条状态（timeupdate 驱动；拖动即改 audio.currentTime） */
+  const [audioTime, setAudioTime] = useState(0)
+  const [audioDur, setAudioDur] = useState(0)
+  const [audioPaused, setAudioPaused] = useState(false)
   const [posting, setPosting] = useState<Set<string>>(new Set())
   const [batchOpen, setBatchOpen] = useState(false)
   const [batchText, setBatchText] = useState('')
@@ -89,7 +105,8 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
       await window.omniget.musicDownload({
         artist,
         song: c.name,
-        quality,
+        // R6：优先用该行下拉选择的音质（默认跟随全局音质）
+        quality: rowQuality[key] ?? quality,
         saveDir: await window.omniget.defaultSaveDir().catch(() => undefined)
       })
       // P1 修复：成功提示必须在 await 成功之后——此前在 try/catch 之后无条件执行，
@@ -132,7 +149,19 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
     }
     const audio = new Audio(previewUrl)
     audioRef.current = audio
-    audio.onended = () => setPlayingId(null)
+    // R6：试听进度条数据源——timeupdate/durationchange 驱动长条进度 UI
+    setAudioTime(0)
+    setAudioDur(0)
+    setAudioPaused(false)
+    audio.ontimeupdate = () => setAudioTime(audio.currentTime)
+    audio.ondurationchange = () => setAudioDur(Number.isFinite(audio.duration) ? audio.duration : 0)
+    audio.onloadedmetadata = () => setAudioDur(Number.isFinite(audio.duration) ? audio.duration : 0)
+    audio.onplay = () => setAudioPaused(false)
+    audio.onpause = () => setAudioPaused(true)
+    audio.onended = () => {
+      setPlayingId(null)
+      setAudioTime(0)
+    }
     audio.onerror = () => {
       setPlayingId(null)
       toast('试听加载失败（镜像可能已失效）', 'warning')
@@ -143,6 +172,14 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
       toast('试听播放失败', 'warning')
     })
     setPlayingId(key)
+  }
+
+  /** R6：拖动/点击进度条调整播放位置（原生 range：拖拽语义浏览器自带） */
+  function seekPreview(value: number): void {
+    const audio = audioRef.current
+    if (!audio || !Number.isFinite(audio.duration) || audio.duration <= 0) return
+    audio.currentTime = Math.min(value, audio.duration - 0.2)
+    setAudioTime(audio.currentTime)
   }
 
   /** F1：用 ID 精确下载（§4.4 兜底通道） */
@@ -352,68 +389,119 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
           result?.candidates.map((c, i) => {
             const key = `${c.platform}:${c.id}`
             const risk = !c.artistMatch || c.originality < 80
+            const playing = playingId === key
+            const effQuality = rowQuality[key] ?? quality
             return (
-              <div
-                key={key}
-                className="row-line group flex items-center gap-3 px-1 py-2.5"
-                style={{ animationDelay: `${Math.min(i, 10) * 40}ms` }}
-              >
-                {/* 原唱校验状态 */}
-                {c.artistMatch ? (
-                  <CheckCircle size={15} weight="fill" className="shrink-0 text-success" />
-                ) : (
-                  <Warning size={15} weight="fill" className="shrink-0 text-warning" />
-                )}
-
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="truncate text-sm">{c.name}</span>
-                    {risk && (
-                      <span className="shrink-0 rounded border border-warning/50 px-1 py-px text-[9px] text-warning">
-                        翻唱风险
-                      </span>
-                    )}
-                  </div>
-                  <div className="mt-0.5 flex items-center gap-2 text-[11px] text-text-3">
-                    <span className="rounded border border-border px-1 py-px uppercase">
-                      {c.platformLabel}
-                    </span>
-                    <span className="truncate">{c.artist}</span>
-                    {c.originality < 100 && (
-                      <span className="num">原版度 {c.originality}</span>
-                    )}
-                  </div>
-                </div>
-
-                <div className="flex shrink-0 items-center gap-1">
-                  {/* F1 试听（仅网易云候选） */}
-                  {c.platform === 'netease' && (
-                    <button
-                      title={playingId === key ? '停止试听' : '试听'}
-                      className={`press flex h-6 w-6 items-center justify-center rounded transition-colors ${
-                        playingId === key
-                          ? 'text-accent'
-                          : 'text-text-3 hover:bg-surface-2 hover:text-text-1'
-                      }`}
-                      onClick={() => togglePreview(c)}
-                    >
-                      {playingId === key ? (
-                        <PauseCircle size={15} weight="fill" />
-                      ) : (
-                        <PlayCircle size={15} />
-                      )}
-                    </button>
+              <div key={key} className="row-line" style={{ animationDelay: `${Math.min(i, 10) * 40}ms` }}>
+                <div className="group flex items-center gap-3 px-1 py-2.5">
+                  {/* 原唱校验状态 */}
+                  {c.artistMatch ? (
+                    <CheckCircle size={15} weight="fill" className="shrink-0 text-success" />
+                  ) : (
+                    <Warning size={15} weight="fill" className="shrink-0 text-warning" />
                   )}
-                  <Button
-                    size="sm"
-                    variant={c.artistMatch ? 'primary' : 'outline'}
-                    icon={<DownloadSimple size={13} />}
-                    disabled={posting.has(key)}
-                    onClick={() => void download(c)}
-                  >
-                    {posting.has(key) ? '入队中' : '下载'}
-                  </Button>
+
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="truncate text-sm">{c.name}</span>
+                      {risk && (
+                        <span className="shrink-0 rounded border border-warning/50 px-1 py-px text-[9px] text-warning">
+                          翻唱风险
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-0.5 flex items-center gap-2 text-[11px] text-text-3">
+                      <span className="rounded border border-border px-1 py-px uppercase">
+                        {c.platformLabel}
+                      </span>
+                      <span className="truncate">{c.artist || '未知歌手'}</span>
+                      {/* R6：歌曲时长（平台有值才展示） */}
+                      {c.durationMs != null && c.durationMs > 0 && (
+                        <span className="num shrink-0">{formatTime(c.durationMs / 1000)}</span>
+                      )}
+                      {c.album && <span className="truncate text-text-3">《{c.album}》</span>}
+                      {c.originality < 100 && (
+                        <span className="num">原版度 {c.originality}</span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    {/* R6：逐行音质下拉（默认展示全部三档音质，跟随全局默认值） */}
+                    <select
+                      value={effQuality}
+                      onChange={(e) =>
+                        setRowQuality((prev) => ({ ...prev, [key]: e.target.value as Quality }))
+                      }
+                      title="选择该歌曲的下载音质"
+                      className="h-6 cursor-pointer rounded-ctl border border-border bg-surface-2 px-1 text-[10px] text-text-2 outline-none focus:border-accent"
+                    >
+                      {(Object.keys(QUALITY_LABELS) as Quality[]).map((k) => (
+                        <option key={k} value={k}>
+                          {QUALITY_LABELS[k]}
+                        </option>
+                      ))}
+                    </select>
+                    {/* F1 试听（仅网易云候选）；播放中行下方展开长条进度播放器 */}
+                    {c.platform === 'netease' && (
+                      <button
+                        title={playing ? '暂停试听' : '试听'}
+                        className={`press flex h-6 w-6 items-center justify-center rounded transition-colors ${
+                          playing
+                            ? 'text-accent'
+                            : 'text-text-3 hover:bg-surface-2 hover:text-text-1'
+                        }`}
+                        onClick={() => togglePreview(c)}
+                      >
+                        {playing ? <Pause size={14} weight="fill" /> : <Play size={14} weight="fill" />}
+                      </button>
+                    )}
+                    <Button
+                      size="sm"
+                      variant={c.artistMatch ? 'primary' : 'outline'}
+                      icon={<DownloadSimple size={13} />}
+                      disabled={posting.has(key)}
+                      onClick={() => void download(c)}
+                    >
+                      {posting.has(key) ? '入队中' : '下载'}
+                    </Button>
+                  </div>
                 </div>
+
+                {/* R6：长条试听播放器（播放/暂停 + 可拖动进度条 + 时间显示） */}
+                {playing && (
+                  <div className="mx-1 mb-2 flex items-center gap-2.5 rounded-ctl border border-accent/30 bg-accent/5 px-3 py-2">
+                    <button
+                      title={audioPaused ? '播放' : '暂停'}
+                      className="press flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-accent text-white transition-transform hover:scale-105"
+                      onClick={() => {
+                        const audio = audioRef.current
+                        if (!audio) return
+                        if (audio.paused) void audio.play()
+                        else audio.pause()
+                      }}
+                    >
+                      {audioPaused ? <Play size={12} weight="fill" /> : <Pause size={12} weight="fill" />}
+                    </button>
+                    <span className="num w-9 shrink-0 text-right text-[10px] text-text-3">
+                      {formatTime(audioTime)}
+                    </span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={audioDur > 0 ? audioDur : 100}
+                      step={0.1}
+                      value={Math.min(audioTime, audioDur > 0 ? audioDur : 100)}
+                      onChange={(e) => seekPreview(Number(e.target.value))}
+                      disabled={audioDur <= 0}
+                      title={audioDur > 0 ? '拖动调整播放位置' : '缓冲中…'}
+                      className="h-1.5 min-w-0 flex-1 cursor-pointer accent-[var(--accent)] text-accent"
+                    />
+                    <span className="num w-9 shrink-0 text-[10px] text-text-3">
+                      {formatTime(audioDur)}
+                    </span>
+                  </div>
+                )}
               </div>
             )
           })}

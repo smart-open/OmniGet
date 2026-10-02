@@ -403,16 +403,26 @@ export async function fetchToFile(
   }
 }
 
-/** 打开响应流（试听代理用）：连接超时 10s、body 不限时；由 protocol 层转发 body */
+/** 打开响应流（试听代理用）：连接超时 10s、body 不限时；由 protocol 层转发 body。
+ *  R6：extraHeaders 支持转发 Range——<audio> 拖动进度需要上游 206 分段响应 */
 export async function openStream(
-  url: string
-): Promise<{ status: number; ok: boolean; contentType: string; contentLength: string | null; body: unknown }> {
+  url: string,
+  extraHeaders?: Record<string, string>
+): Promise<{
+  status: number
+  ok: boolean
+  contentType: string
+  contentLength: string | null
+  contentRange: string | null
+  acceptRanges: boolean
+  body: unknown
+}> {
   url = rewriteUrl(url)
   let res: Awaited<ReturnType<typeof undiciFetch>>
   try {
     res = await undiciFetch(url, {
       method: 'GET',
-      headers: { 'User-Agent': 'Mozilla/5.0' },
+      headers: { 'User-Agent': 'Mozilla/5.0', ...extraHeaders },
       dispatcher: streamingDispatcherFor(url)
     })
   } catch (err) {
@@ -424,6 +434,8 @@ export async function openStream(
     ok: res.ok,
     contentType: res.headers.get('content-type') ?? 'audio/mpeg',
     contentLength: res.headers.get('content-length'),
+    contentRange: res.headers.get('content-range'),
+    acceptRanges: res.headers.get('accept-ranges') === 'bytes',
     body: res.body
   }
 }
