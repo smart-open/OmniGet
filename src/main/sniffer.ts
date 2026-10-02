@@ -69,6 +69,12 @@ export function sniff(input: string): SniffResult | null {
           }
         }
       }
+      // R7 续（backlog #17 第一阶段）：HLS/DASH 清单分型 → video 任务走 yt-dlp
+      //（generic extractor 原生支持 m3u8/MPD 分段流与 AES-128；aria2 只会下到
+      // 清单文件本身）。此前此类链接落 http 类型必然产出损坏的 .m3u8 文件
+      if (/\.(m3u8|m3u|mpd)([?#]|$)/i.test(u.pathname)) {
+        return { type: 'video', source: clean, platform: 'hls' }
+      }
       return { type: 'http', source: clean, platform: 'http' }
     } catch {
       return null

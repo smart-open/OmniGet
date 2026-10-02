@@ -117,45 +117,56 @@
 > 调研范围：第一轮 9 款之外的活跃开源项目——MeTube、VidBee（2026-09 仍在活跃开发）、Parabolic、Seal（Android）、spotDL、f2 / TikTokDownload、N_m3u8DL-RE、BBDown、Tube Archivist / Pinchflat。
 > 本轮两大发现：① **yt-dlp 外部 JS 运行时硬性要求**（直接影响现有 YouTube 兼容性，列 P1 排查）；② **HLS/DASH 流媒体引擎与订阅自动化**是两条完整的能力带缺口（此前矩阵未覆盖）。
 
-### 16. 🔴 yt-dlp JS 运行时兼容性排查（EJS / Deno / Node）
+### 16. 🟠 yt-dlp JS 运行时兼容性排查（EJS / Deno / Node）——探测/注入已落地
 - **依据**：yt-dlp 自 2025-11 起下载 YouTube 必须外部 JS 运行时（Deno/Node.js + yt-dlp-ejs，官方公告 issue #15012）；OmniGet 引擎为 2026.08.19（晚于该变更），**YouTube 任务可能已静默失败**；MeTube/VidBee/spotDL 均已给出对策（VidBee 捆绑 Node 作为运行时、spotDL 提供 `--download-deno` 自助）。
+- **已完成（2026-10-02）**：
+  - [x] ✅ 探测模块 `orchestrator/jsruntime.ts`：enginesDir（deno/node 与 yt-dlp 同目录，官方同目录查找面）→ 系统 PATH 兜底，30s TTL 缓存
+  - [x] ✅ yt-dlp spawn/exec 全部注入 enginesDir 前置 PATH（同目录 + PATH 双查找面）
+  - [x] ✅ 健康页 yt-dlp 引擎 detail 公示运行时状态（`<版本> · JS 运行时：deno（引擎目录）/缺失`）
+  - [x] ✅ 引擎清单增加 deno（按需下载位，kind=tool 不入 TOFU；待 #3 release 资产提供 `deno.exe` + SHA256）
 - **待办**：
-  - [ ] 真机验证 YouTube 提取是否可用；健康页增加「JS 运行时」探测项并公示缺失
-  - [ ] 引擎清单增加 deno 可选组件（复用 R6 按需下载 + SHA256/TOFU 机制），yt-dlp spawn 时注入运行时路径
+  - [ ] 真机验证：本机直连 YouTube 超时无法实测 EJS 报错形态，需代理环境复测（健康页公示已可让用户侧自行发现）
   - [ ] 调查零包体方案：Electron 主进程 `ELECTRON_RUN_AS_NODE=1` 包装器充当 node 运行时（VidBee 方案增包体 ~50MB，优先验证免增方案）
 - **⚠ 影响面**：仅 YouTube 等依赖 nsig 挑战的站点；国内站点提取不受影响，故未在历史回归中暴露。
 
-### 17. 🟠 HLS/DASH 流媒体引擎（N_m3u8DL-RE sidecar）
+### 17. 🟠 HLS/DASH 流媒体引擎（N_m3u8DL-RE）——两阶段全部落地
 - **依据**：nilaoda/N_m3u8DL-RE——DASH/HLS/MSS 点播+直播、AES-128/SAMPLE-AES 解密、多轨选择与 ffmpeg 混流；MediaGo 即以其为内核。aria2 对分段 HLS + 加密场景无能为力，这是完整能力带缺口。
-- **待办**：
-  - [ ] 嗅探器分型 `.m3u8` / `.mpd` 链接（新任务类型 `hls`，走专用引擎）
-  - [ ] 引擎清单增加 N_m3u8DL-RE（按需下载，单文件 ~20MB）
-  - [ ] 与 ffmpeg 混流管线复用（字幕/多音轨勾选可后置）
+- **第一阶段（2026-10-02）**：嗅探器分型 `.m3u8`/`.m3u`/`.mpd` 清单链接（仅按 pathname 判定防误报）→ `platform:'hls'` 走 yt-dlp 引擎（generic extractor 原生支持分段流与 AES-128），此前此类链接落 http 类型必然产出损坏的 .m3u8 文件。
+- **第二阶段（2026-10-02）——专用引擎接入，全部经 v0.6.0-beta 真机核实**：
+  - [x] ✅ 新适配器 `adapters/nm3u8.ts`：spawn N_m3u8DL-RE（`-M format=mp4` 混流，ffmpeg 经 enginesDir PATH 注入自动发现；`--thread-count` 对接任务并发）；分片进度逐行解析（`N/M xx%`，实测格式）；exit 0 后 stat 产物回填真实字节数；pause=SIGTERM（tmp 分片保留，重跑自动跳过已下分片）；engineGid=taskId
+  - [x] ✅ 清单解析纯函数 `nm3u8-parse.ts`（6 例单测）：master 变体列表（引号感知属性解析）→ 对话框格式选择；变体经 `url=<URI正则>:for=best` + `-sa for=best` 精确锁定；media/MPD 单条目自动最佳
+  - [x] ✅ manager 全量接线：engine 路由（RE 在位→nm3u8，缺失回落 yt-dlp）、确认/暂停/恢复/移除/重试/重启恢复/产物落库/并发闸门/健康面板「nm3u8」引擎行；TOFU 指纹闸门复用（ensureVerified）
+  - [x] ✅ 引擎清单增加 `N_m3u8DL-RE`（**发布侧直接放置解包后单文件，免 zip 解压支持**；单文件 ~13MB）；真机 E2E：真实 m3u8 → demo.mp4（68MB）通过
+- **待办（增强，条件触发）**：
+  - [ ] 直播录制：RE `--live-real-time-merge --live-record-limit` 选项已核实存在，待 UI（录制时长选择）+ 嗅探 live 清单分型
+  - [ ] 字幕轨道选择（`-ss` 已核实）与命名模板对接；audioOnly 选项对 hls 任务当前忽略（对话框隐藏）
 
-### 18. 🟠 订阅中心（频道 / UP主 / 歌单自动追更）
+### 18. ✅（2026-10-02）订阅中心（频道 / UP主 / 歌单自动追更）——MVP 落地
 - **依据**：Pinchflat / Tube Archivist（自托管订阅自动下载库，容器化）、spotDL `sync`（歌单与本地目录双向同步、删歌联动）——「订阅自动化」是下载器向「内容管理」演进的高价值方向，OmniGet 已有定时调度器与批量抓取基建，边际成本低。
-- **待办**：
-  - [ ] 订阅源管理 UI（频道/合集/歌单 URL + 抓取间隔）
-  - [ ] 复用定时调度器：定时 flat-parse 订阅源 → 差集计算 → 自动入队
-  - [ ] yt-dlp `--download-archive`（#22）作为已下载去重底座
+- **已完成**：
+  - [x] ✅ DB 迁移 v2（subscriptions 表）+ 模块 `subscribe.ts`：CRUD、`yt-dlp -J --flat-playlist` 抓条目（过滤嵌套播放器）、档案差集、createTask+confirmSelection 直通自动入队
+  - [x] ✅ 设置页「订阅追更」卡片：添加（名称/URL/间隔 1h~1d）/立即检查/删除，展示累计入队与上次检查/错误；IPC 四通道 + bridge
+  - [x] ✅ 定时器：10min tick，到期源串行检查；单源单次上限 20 条；入队即登记档案防重复；新增经通知条公示
+- **边界**：保存目录取全局下载目录；默认参数（无预设/模板）；检查依赖 yt-dlp 引擎。
 
-### 19. 🟡 yt-dlp 外部下载器 aria2c（可选加速）
+### 19. ✅（2026-10-02）yt-dlp 外部下载器 aria2c（可选加速）
 - **依据**：Seal 内嵌 yt-dlp + ffmpeg + aria2 三件套并以 aria2c 为默认下载器；CLI 社区成熟范式 `--downloader aria2c --downloader-args "-x 16 -k 1M"`。OmniGet 自带 aria2 零包体成本。
-- **待办**：
-  - [ ] 设置开关（默认关；`--downloader-args` 注入并发数，UA/referer 同步透传）
-  - [ ] 验证 yt-dlp 对 aria2c 进度输出的解析（官方已支持 aria2c 进度协议）
+- **已完成**：设置 `download.ytdlpAria2c`（默认关）+ 队列与归档分区开关；开启且 aria2c 在位时注入 `--downloader aria2c --downloader-args "aria2c:-x 8 -k 1M"`（官方文档选项口径）；enginesDir 已在子进程 PATH，按名解析即达。
 
-### 20. 🟡 直播录制（HLS 直播流落盘）
-- **依据**：f2 支持抖音/TikTok 直播流批量采集与弹幕转发；N_m3u8DL-RE 支持直播录制；Bililive-recorder 专精 B 站。国内直播录制是真实需求且无桌面端开源整合方案。
-- **依赖**：#17（N_m3u8DL-RE 引擎就位后，live 模式 + 定时停止/分段）。
+### 20. ✅（2026-10-02）直播录制（HLS 直播流落盘）——RE 路线 MVP
+- **依据**：f2 支持抖音/TikTok 直播流批量采集与弹幕转发；N_m3u8DL-RE 支持直播录制；Bililive-recorder 专精 B 站。国内直播录制需求真实且无桌面端开源整合方案。
+- **已完成**：nm3u8 适配器解析期判定直播流（media 清单无 `#EXT-X-ENDLIST`）→ `ParseOutput.live` → 对话框显示录制时长选择（30min/1h/2h/不限）→ `--live-real-time-merge --live-record-limit HH:mm:ss`（选项经 v0.6.0-beta --help 核实）；手动暂停停止。
+- **边界**：实时 pipe 混流（`--live-pipe-mux`）与定时分段未启用；yt-dlp 回落路线不支持直播录制。
 
-### 21. 🟡 SponsorBlock 集成（YouTube 广告段标记/剔除）
+### 21. ✅（2026-10-02）SponsorBlock 集成（YouTube 广告段标记/剔除）
+- **依据**：yt-dlp 原生 `--sponsorblock-mark` / `--sponsorblock-remove`（社区众包广告段数据库），零外部依赖。
+- **已完成**：对话框视频选项「SponsorBlock：标记赞助/广告段为章节」→ `ConfirmSelectionInput.video.sponsorBlock` → `--sponsorblock-mark all` 参数注入（随任务参数持久化，resume 重放）。
 - **依据**：yt-dlp 原生 `--sponsorblock-mark` / `--sponsorblock-remove`（社区众包广告段数据库），零外部依赖。
 - **待办**：[ ] 新建对话框视频选项加「跳过赞助/广告段」开关（仅 YouTube 任务显示），映射 L1/L2 参数注入。
 
-### 22. 🟡 已下载去重（--download-archive）
+### 22. ✅（2026-10-02）已下载去重（--download-archive）
 - **依据**：spotDL sync / Pinchflat 均以 archive 文件为去重底座；OmniGet 重复粘贴同一合集 URL 会重复下载。
-- **待办**：[ ] 按站点+ID 维护 `download.archive`（settings 或独立文件）；[ ] 新建任务解析后命中 archive → 提示「已下载过」并可跳转旧任务；[ ] 为 #18 订阅差集计算铺路。
+- **已完成**：双档案设计（`task/archive.ts`）——自有 `download.archive`（`sha1:<hex>` 键，URL 明文不落盘）：创建期命中拒绝（文案给关闭路径）、完成/订阅入队即登记；yt-dlp 原生 `ytdlp.archive`（`--download-archive`，合集条目级去重）。设置 `download.dedupe` 默认开，关闭后两档案均不启用。合集/订阅源 URL 不入自有档案（防订阅源被封死），条目级由 yt-dlp 档案负责。
 
 ### 23. ⏸ 弹幕下载与压制（B站 xml→ass，BBDown 范式）
 - **暂缓原因**：BBDown 专属能力，yt-dlp 不产弹幕；需独立 B 站 API 适配 + xml→ass 转换工具（可先入工具箱）。等需求反馈。

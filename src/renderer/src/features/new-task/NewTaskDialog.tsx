@@ -80,6 +80,9 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
   const [embedSubs, setEmbedSubs] = useState(false)
   const [embedThumbnail, setEmbedThumbnail] = useState(false)
   const [delogo, setDelogo] = useState(false)
+  // R7 续（backlog #21/#20）：SponsorBlock 标记 + 直播录制时长（分钟，0=不限）
+  const [sponsorBlock, setSponsorBlock] = useState(false)
+  const [liveLimit, setLiveLimit] = useState('0')
   // R3：批量链接抓取
   const [batchMode, setBatchMode] = useState(false)
   const [batchBusy, setBatchBusy] = useState(false)
@@ -579,7 +582,12 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
               embedThumbnail,
               delogo: delogo && (sniffType === 'video' ? false : true),
               // R4 续（backlog #4）：任务级命名模板（空值回落全局 naming.template）
-              template: nameTemplate.trim() || undefined
+              template: nameTemplate.trim() || undefined,
+              // R7 续（backlog #21）：SponsorBlock 章节标记（YouTube）
+              sponsorBlock: sponsorBlock || undefined,
+              // R7 续（backlog #20）：直播录制时长（分钟；仅 RE 引擎的直播流）
+              liveRecordMinutes:
+                parsed?.live && liveLimit !== '0' ? Number(liveLimit) : undefined
             }
           : undefined
       })
@@ -1048,6 +1056,33 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
                       仅提取音频 (MP3)
                     </label>
                   </div>
+
+                  {/* R7 续（backlog #21）：SponsorBlock 广告段标记（yt-dlp 原生，YouTube） */}
+                  <label className="mt-2 flex cursor-pointer items-center gap-1.5 text-[11px] text-text-2">
+                    <input
+                      type="checkbox"
+                      checked={sponsorBlock}
+                      onChange={(e) => setSponsorBlock(e.target.checked)}
+                    />
+                    SponsorBlock：标记赞助/广告段为章节（YouTube）
+                  </label>
+
+                  {/* R7 续（backlog #20）：直播流录制时长（N_m3u8DL-RE） */}
+                  {parsed?.live && (
+                    <div className="mt-2 flex items-center gap-2 text-[11px]">
+                      <span className="text-warning">检测到直播流，录制时长：</span>
+                      <select
+                        value={liveLimit}
+                        onChange={(e) => setLiveLimit(e.target.value)}
+                        className="h-7 rounded-ctl border border-border bg-surface-2 px-2 text-[11px] outline-none focus:border-accent"
+                      >
+                        <option value="30">30 分钟</option>
+                        <option value="60">1 小时</option>
+                        <option value="120">2 小时</option>
+                        <option value="0">不限（手动暂停停止）</option>
+                      </select>
+                    </div>
+                  )}
 
                   {/* 格式列表（radio 单选；默认 bv*+ba/b） */}
                   {!audioOnly && (

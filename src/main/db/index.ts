@@ -67,6 +67,26 @@ const MIGRATIONS: Migration[] = [
         );
       `)
     }
+  },
+  {
+    version: 2,
+    name: 'subscriptions',
+    up: (db) => {
+      // R7 续（backlog #18）：订阅追更源
+      db.exec(`
+        CREATE TABLE subscriptions (
+          id              TEXT PRIMARY KEY,
+          name            TEXT NOT NULL,
+          url             TEXT NOT NULL,
+          interval_min    INTEGER NOT NULL DEFAULT 60,
+          added_total     INTEGER NOT NULL DEFAULT 0,
+          last_checked_at INTEGER,
+          last_error      TEXT,
+          created_at      INTEGER NOT NULL
+        );
+        CREATE INDEX idx_subscriptions_due ON subscriptions(last_checked_at);
+      `)
+    }
   }
 ]
 

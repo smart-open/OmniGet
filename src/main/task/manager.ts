@@ -24,12 +24,15 @@ import { parseParamsJson, readTaskOriginUrl, readTaskSpeedLimit } from '../task/
 import type { Aria2Adapter } from '../adapters/aria2'
 import type { MusicAdapter } from '../music/adapter'
 import type { YtDlpAdapter } from '../adapters/ytdlp'
+import { Nm3u8Adapter } from '../adapters/nm3u8'
+import { isBinaryPresent } from '../orchestrator/binaries'
 import type { ParseOutput } from '../adapters/types'
 import { notifyTaskEvent } from '../integrations/tray'
 import { toolbox } from '../toolbox'
 import { samplePeakSpeed, recordCompletion, reverseCompletion } from '../stats'
 import { recordPlatformOk, recordPlatformDegraded, recordPlatformFailure } from '../health'
 import { getSettingParsed } from '../db'
+import { addArchiveKey, isArchived } from './archive'
 import { sanitizeFilename } from '@shared/sanitize'
 import {
   getVideoSidecarBase,
@@ -72,6 +75,7 @@ export class TaskManager {
   private aria2: Aria2Adapter
   private music: MusicAdapter | null = null
   private ytdlp: YtDlpAdapter | null = null
+  private nm3u8: Nm3u8Adapter | null = null
   private merger: TaskEventMerger
   private pollTimer: NodeJS.Timeout | null = null
   private currentEvents = new Map<string, TaskEvent>()
@@ -97,6 +101,12 @@ export class TaskManager {
   /** M3：注入 yt-dlp 引擎；事件经 sink 汇入 250ms 合并流 */
   setYtdlpEngine(adapter: YtDlpAdapter): void {
     this.ytdlp = adapter
+    adapter.setSink((e) => this.merger.push(e))
+  }
+
+  /** R7 续（backlog #17）：注入 N_m3u8DL-RE 引擎（HLS/DASH；二进制在位时启用） */
+  setNm3u8Engine(adapter: Nm3u8Adapter): void {
+    this.nm3u8 = adapter
     adapter.setSink((e) => this.merger.push(e))
   }
 
@@ -158,11 +168,22 @@ export class TaskManager {
       if (justCompleted) {
         // H5：此刻 totalBytes 已是引擎最终值，记账才准确
         this.recordCompletionBytes(e.totalBytes ?? task.totalBytes ?? 0)
+        // R7 续（backlog #22）：完成即登记去重档案（单视频；合集/订阅源 URL 不入档案，
+        // 条目级由 yt-dlp --download-archive 负责）
+        // 审查修复：sidecar 改道任务的 task.source 已被换成时效直链——必须登记
+        // 原分享链接（params.originUrl），否则同链接重复下载
+        if (task.type === 'video' && !this.isPlaylistTask(task)) {
+          addArchiveKey(task.source)
+        } else if (task.type === 'http') {
+          const origin = readTaskOriginUrl(task)
+          if (origin) addArchiveKey(origin)
+        }
       }
       // P1 加固：yt-dlp 单视频完成时产物落 task_files（此前 video/music 无 task_files，
       // 回收站「删除（含文件）」对这两类任务一个文件都不删）
-      if (e.status === 'completed' && task.engine === 'ytdlp') {
-        this.persistYtdlpProduct(task, e)
+      // R7 续（backlog #17）：nm3u8（N_m3u8DL-RE）同型复用产物落库
+      if (e.status === 'completed' && (task.engine === 'ytdlp' || task.engine === 'nm3u8')) {
+        this.persistCliProduct(task, e)
       }
       this.currentEvents.set(e.taskId, e)
       // P2 加固：终态事件后聚合速度表不再需要该条目，删除防 Map 无界增长
@@ -177,18 +198,23 @@ export class TaskManager {
     if (this.startQueue.length > 0) this.pumpStarts()
   }
 
-  /** yt-dlp 单视频产物落 task_files（合集任务解析期已有文件树，跳过） */
-  private persistYtdlpProduct(task: TaskExt, e: TaskEvent): void {
+  /** yt-dlp/nm3u8 单视频产物落 task_files（合集任务解析期已有文件树，跳过） */
+  private persistCliProduct(task: TaskExt, e: TaskEvent): void {
     if (getTaskFiles(task.id).length > 0) return
     void (async () => {
       const { readdir, stat } = await import('fs/promises')
       const { join, relative, isAbsolute } = await import('path')
-      // R4-P2：优先用适配器精确追踪的产物（M9 --print after_move:filepath，含
-      // info-json/封面/字幕等附属文件）——此前按「目录内最新视频」猜测，多任务
-      // 共用保存目录并发完成时会错拿他任务产物，回收站「含文件删除」误删
-      const tracked = (this.ytdlp?.getOutputFiles(task.id) ?? []).filter((p) => isAbsolute(p))
+      // R4-P2：优先用适配器精确追踪的产物（M9 --print after_move:filepath / RE 混流
+      // 产物路径）——此前按「目录内最新视频」猜测，多任务共用保存目录并发完成时会
+      // 错拿他任务产物，回收站「含文件删除」误删
+      const tracked = (
+        task.engine === 'nm3u8'
+          ? this.nm3u8?.getOutputFiles(task.id)
+          : this.ytdlp?.getOutputFiles(task.id)
+      ) ?? []
+      const absTracked = tracked.filter((p) => isAbsolute(p))
       const products: { path: string; size: number }[] = []
-      for (const abs of tracked) {
+      for (const abs of absTracked) {
         const rel = relative(task.saveDir, abs).replace(/\\/g, '/')
         if (!rel || rel.startsWith('../') || rel === '..') continue // 越界防御
         const sz = await stat(abs).then((s) => s.size).catch(() => 0)
@@ -232,7 +258,7 @@ export class TaskManager {
    * 必须计入，否则轮询窗口内 pumpStarts 会突破 maxConcurrent。 */
   private runningDownloads(): number {
     const dbRunning = listTasks({ status: ['running', 'verifying'] }).filter(
-      (t) => t.engine === 'aria2' || t.engine === 'ytdlp'
+      (t) => t.engine === 'aria2' || t.engine === 'ytdlp' || t.engine === 'nm3u8'
     ).length
     return dbRunning + this.launching.size
   }
@@ -365,6 +391,20 @@ export class TaskManager {
       return { kind: 'started', taskId }
     }
 
+    // R7 续（backlog #22）：已下载去重预检——在任务落库前拒绝（重复粘贴不产生垃圾
+    // failed 行）。合集/订阅源 URL 不入档案，条目级由 yt-dlp --download-archive 负责；
+    // 设置 download.dedupe 可关。短链展开后的 s.source 为判定对象
+    if (
+      s.type === 'video' &&
+      getSettingParsed<boolean>('download.dedupe') !== false &&
+      isArchived(s.source)
+    ) {
+      return {
+        kind: 'failed',
+        error: '该内容已下载过（已下载去重）。如需重新下载，请在设置 → 队列与归档 中关闭去重。'
+      }
+    }
+
     // 入参校验（防止空目录/越界线程落库后在引擎侧报晦涩错误）
     let saveDir = input.saveDir?.trim() ?? ''
     if (!saveDir) {
@@ -410,7 +450,11 @@ export class TaskManager {
       name: '',
       engine:
         s.type === 'video'
-          ? 'ytdlp'
+          ? // R7 续（backlog #17）：HLS/DASH 清单链接且 N_m3u8DL-RE 在位 → 专用引擎；
+            // 否则回落 yt-dlp（generic extractor 原生支持 HLS，第一阶段口径）
+            s.platform === 'hls' && isBinaryPresent('nm3u8re')
+            ? 'nm3u8'
+            : 'ytdlp'
           : s.type === 'tool'
             ? 'tool'
             : 'aria2',
@@ -442,7 +486,9 @@ export class TaskManager {
         parsed =
           task.engine === 'ytdlp'
             ? await this.ytdlp!.parse(task)
-            : await this.aria2.parse(task, isAborted)
+            : task.engine === 'nm3u8'
+              ? await this.nm3u8!.parse(task)
+              : await this.aria2.parse(task, isAborted)
       } catch (parseErr) {
         // R7 续（backlog #11）：yt-dlp 解析失败（快手/小红书无 extractor、抖音风控等）
         // → 自托管解析服务兜底；命中后任务改道 http 直链管线（aria2 直启）
@@ -461,6 +507,9 @@ export class TaskManager {
         }
         return { kind: 'failed', error: '任务已删除' }
       }
+      // R7 续（backlog #22）：已下载去重——单视频命中档案即拒绝（合集/订阅源 URL 不入
+      // 档案，条目级由 yt-dlp --download-archive 负责；设置 download.dedupe 可关）
+      // 审查修复：预检已上移至任务落库前（避免重复粘贴产生垃圾 failed 行）
       // M3-6：短视频任务标记（L1/L2/L3 判定）；R7 P1：回传平台（分站 cookie/健康归因）
       if (task.engine === 'ytdlp' && s.platform && ['douyin', 'kuaishou', 'xiaohongshu', 'xigua', 'weibo'].includes(s.platform)) {
         this.ytdlp?.markShortVideo(task.id, s.platform)
@@ -715,6 +764,11 @@ export class TaskManager {
         this.isPlaylistTask(task) ? this.selectionFor(task) : undefined
       )
       updateTaskFields(task.id, { engineGid: gid, threads: input.threads })
+    } else if (task.engine === 'nm3u8') {
+      // R7 续（backlog #17）：HLS 任务 → N_m3u8DL-RE spawn（formatId = 变体 URI）
+      if (input.video) this.nm3u8?.setVideoOptions(task.id, { formatId: input.video.formatId })
+      const gid = await this.nm3u8!.start(task)
+      updateTaskFields(task.id, { engineGid: gid, threads: input.threads })
     } else if (task.pendingGid) {
       // 磁力暂停态：changeOption(select-file/dir/seed-ratio) + unpause（§4.2 Step3）
       await this.aria2.confirmSelection(
@@ -754,6 +808,9 @@ export class TaskManager {
           if (task.engine === 'ytdlp') {
             // M3-1：yt-dlp pause = SIGTERM（.part 保留）
             this.ytdlp?.pause(task)
+          } else if (task.engine === 'nm3u8') {
+            // R7 续（backlog #17）：N_m3u8DL-RE pause = SIGTERM（tmp 分片保留）
+            this.nm3u8?.pause(task)
           } else if (task.engine === 'music') {
             // 音乐：真取消（AbortSignal 即刻中断，引擎产物已清理），槽位由后续 done(cancelled) 事件释放
             if (task.engineGid) void this.music?.cancel(task.engineGid)
@@ -785,6 +842,9 @@ export class TaskManager {
           if (task.engine === 'ytdlp') {
             // resume：同参数重 spawn（恢复凭据是任务参数本身，§4.1）
             if (!this.ytdlp?.resume(task)) throw new Error('无法恢复：任务参数已丢失，请重试')
+          } else if (task.engine === 'nm3u8') {
+            // R7 续（backlog #17）：RE 同参数重 spawn（凭 tmp 分片续传）
+            if (!this.nm3u8?.resume(task)) throw new Error('无法恢复：任务参数已丢失，请重试')
           } else if (task.engine === 'music') {
             // 音乐：暂停时引擎任务已终止，恢复 = 取消可能残留的旧引擎任务后重新入队
             if (task.engineGid) void this.music?.cancel(task.engineGid)
@@ -831,6 +891,8 @@ export class TaskManager {
         // tool 杀 ffmpeg 进程（取消后任务记录按 withFiles 语义处理）
         if (task.engine === 'ytdlp') {
           this.ytdlp?.remove(task)
+        } else if (task.engine === 'nm3u8') {
+          this.nm3u8?.remove(task)
         } else if (task.engine === 'music') {
           // 服务端协作式取消（标记 cancelling，引擎完成后服务端删产物）
           if (task.engineGid) void this.music?.cancel(task.engineGid)
@@ -911,7 +973,7 @@ export class TaskManager {
       // 引擎 gid 已销毁，漏掉会让任务永久显示「做种中」且无重试入口
       updateTaskFields(taskId, { status: 'queued', engineGid: null })
       this.pushEvent({ taskId, status: 'queued' })
-      if (task.engine === 'aria2' || task.engine === 'ytdlp') {
+      if (task.engine === 'aria2' || task.engine === 'ytdlp' || task.engine === 'nm3u8') {
         void this.recoverEngineTasks()
       } else if (task.engine === 'music') {
         this.pumpMusic()
@@ -977,6 +1039,9 @@ export class TaskManager {
               cur,
               this.isPlaylistTask(cur) ? this.selectionFor(cur) : undefined
             )
+          } else if (cur.engine === 'nm3u8' && this.nm3u8) {
+            // R7 续（backlog #17）：RE 重 spawn（凭 tmp 分片续传）
+            gid = await this.nm3u8.start(cur)
           } else {
             return
           }
@@ -998,7 +1063,7 @@ export class TaskManager {
     const task = getTask(taskId) as TaskExt | null
     if (!task || task.status !== 'failed') return
     this.transition(task, 'queued')
-    if (task.engine !== 'aria2' && task.engine !== 'ytdlp') {
+    if (task.engine !== 'aria2' && task.engine !== 'ytdlp' && task.engine !== 'nm3u8') {
       this.pushEvent({ taskId, status: 'queued' })
       // 音乐/工具失败重试：立即重泵对应队列（否则任务卡 queued 直到引擎重启）
       if (task.engine === 'music') {
@@ -1020,6 +1085,9 @@ export class TaskManager {
             cur,
             this.isPlaylistTask(cur) ? this.selectionFor(cur) : undefined
           )
+        } else if (cur.engine === 'nm3u8' && this.nm3u8) {
+          // R7 续（backlog #17）：RE 重 spawn
+          gid = await this.nm3u8.start(cur)
         } else {
           // R7 续修复（backlog #11）：sidecar 兜底任务重试前刷新时效直链
           const fresh = await this.refreshSidecarLink(cur)
@@ -1230,6 +1298,7 @@ export class TaskManager {
   private healths: EngineHealth[] = [
     { name: 'aria2', online: false },
     { name: 'ytdlp', online: false, detail: 'M3 接入' },
+    { name: 'nm3u8', online: false, detail: 'N_m3u8DL-RE（HLS/DASH，按需 CLI）' },
     { name: 'music', online: true, detail: '内嵌引擎' }
   ]
 

@@ -586,10 +586,10 @@ export default function App() {
             {t('status.running')} {counts.running} · {t('status.queued')} {counts.queued}
           </span>
           <span className="ml-auto flex items-center gap-3">
-            {(['aria2', 'ytdlp', 'music'] as const).map((name) => (
+            {(['aria2', 'ytdlp', 'nm3u8', 'music'] as const).map((name) => (
               <span key={name} className="inline-flex items-center gap-1 text-text-3">
                 {name}
-                {/* aria2 常驻引擎红/绿；ytdlp·music 按需拉起：离线=待机灰（非常驻，不算故障） */}
+                {/* aria2 常驻引擎红/绿；ytdlp·nm3u8·music 按需拉起：离线=待机灰（非常驻，不算故障） */}
                 <span
                   className={`inline-block h-1.5 w-1.5 rounded-full ${
                     online(name)

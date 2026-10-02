@@ -11,8 +11,10 @@ import { LocalMusicAdapter } from './music/adapter'
 import { registerPreviewHandler, registerPreviewScheme } from './music/preview-protocol'
 import { getMusicEngine } from './music/engine'
 import { YtDlpAdapter } from './adapters/ytdlp'
+import { Nm3u8Adapter } from './adapters/nm3u8'
 import { getYtDlpSupervisor } from './orchestrator/ytdlp'
 import { TaskManager } from './task/manager'
+import { startSubscriptionTimer } from './subscribe'
 import { getDb, closeDb } from './db'
 import { registerIpcHandlers, setTaskManager, setMusicAdapter } from './ipc'
 import { createLogger } from './logger'
@@ -192,8 +194,15 @@ async function bootstrap(): Promise<void> {
   const manager = new TaskManager(adapter)
   const ytdlpAdapter = new YtDlpAdapter()
   manager.setYtdlpEngine(ytdlpAdapter)
+  // R7 续（backlog #17）：N_m3u8DL-RE 引擎（二进制缺失时任务回落 yt-dlp，注入无害）
+  manager.setNm3u8Engine(new Nm3u8Adapter())
 
   setTaskManager(manager)
+  // R7 续（backlog #18）：订阅追更定时器（10min tick，到期源串行检查）
+  startSubscriptionTimer({
+    createTask: (input) => manager.createTask(input),
+    confirmSelection: (input) => manager.confirmSelection(input)
+  })
   await manager.recoverOnStartup()
   manager.startPolling()
 

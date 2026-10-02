@@ -84,6 +84,11 @@ const api: OmniGetBridge = {
     ipcRenderer.invoke('app:importFile', ext),
   // R7 续（backlog #11）：短视频解析服务连接测试
   sidecarProbe: (baseUrl: string) => ipcRenderer.invoke(IPC_CHANNELS.sidecarProbe, baseUrl),
+  // R7 续（backlog #18）：订阅追更
+  subscribeList: () => ipcRenderer.invoke(IPC_CHANNELS.subscribeList),
+  subscribeAdd: (input) => ipcRenderer.invoke(IPC_CHANNELS.subscribeAdd, input),
+  subscribeRemove: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.subscribeRemove, id),
+  subscribeCheckNow: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.subscribeCheckNow, id),
   onTaskEvents: (listener: (events: TaskEvent[]) => void) => {
     const wrapped = (_e: unknown, events: TaskEvent[]): void => listener(events)
     ipcRenderer.on(IPC_CHANNELS.eventTasks, wrapped)

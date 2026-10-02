@@ -110,12 +110,17 @@ function mirrorBase(): string {
   return DEFAULT_MIRROR
 }
 
-/** 参与按需下载的引擎（ffprobe 为可选工具，同样支持补齐） */
+/** 参与按需下载的引擎（ffprobe 为可选工具，同样支持补齐）。
+ * deno（backlog #16）：yt-dlp 外部 JS 运行时（YouTube EJS 要求），与 yt-dlp
+ * 同目录放置即被识别（jsruntime.ts 另做 PATH 注入双保险）；kind=tool 不入 TOFU */
 const ENGINE_FILES: Array<{ name: string; kind: 'sidecar' | 'tool'; sidecar?: SidecarBinary }> = [
   { name: 'aria2c', kind: 'sidecar', sidecar: 'aria2c' },
   { name: 'ffmpeg', kind: 'sidecar', sidecar: 'ffmpeg' },
   { name: 'ffprobe', kind: 'tool' },
-  { name: 'yt-dlp', kind: 'sidecar', sidecar: 'ytdlp' }
+  { name: 'yt-dlp', kind: 'sidecar', sidecar: 'ytdlp' },
+  { name: 'deno', kind: 'tool' },
+  // backlog #17：HLS/DASH 引擎（发布侧直接放置解包后的单文件，免 zip 解压支持）
+  { name: 'N_m3u8DL-RE', kind: 'sidecar', sidecar: 'nm3u8re' }
 ]
 
 const fileOf = (name: string): string =>

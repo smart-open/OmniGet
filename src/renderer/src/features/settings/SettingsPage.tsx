@@ -2,7 +2,13 @@
 // 模板 / 下载 / Tracker / 更新 / 说明
 import { useEffect, useRef, useState } from 'react'
 import { ArrowClockwise, CheckCircle, FolderOpen, Trash } from '@phosphor-icons/react'
-import type { AppUpdateCheck, AdapterScriptInfo, ScheduleRule, TrackerEntry } from '@shared/types'
+import type {
+  AppUpdateCheck,
+  AdapterScriptInfo,
+  ScheduleRule,
+  Subscription,
+  TrackerEntry
+} from '@shared/types'
 import { Button } from '../../components/ui'
 import { confirmAction, toast, toastError } from '../../lib/feedback'
 import { LOCALES, useI18n } from '../../i18n'
@@ -308,6 +314,15 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
   // R2/R7：并发上限与自动归档
   const [maxConcurrent, setMaxConcurrent] = useState('0')
   const [autoArchive, setAutoArchive] = useState(false)
+  // R7 续（backlog #19/#22）：下载行为开关
+  const [dedupe, setDedupe] = useState(true)
+  const [ytdlpAria2c, setYtdlpAria2c] = useState(false)
+  // R7 续（backlog #18）：订阅追更
+  const [subs, setSubs] = useState<Subscription[]>([])
+  const [subName, setSubName] = useState('')
+  const [subUrl, setSubUrl] = useState('')
+  const [subInterval, setSubInterval] = useState('1440')
+  const [subBusyId, setSubBusyId] = useState<string | null>(null)
   const [upnp, setUpnp] = useState(true)
   const [btEncrypt, setBtEncrypt] = useState(true)
   const [rules, setRules] = useState<ScheduleRule[]>([])
@@ -364,6 +379,9 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
       setSaveDir(String((await window.omniget.settingsGet('download.saveDir')) ?? ''))
       setMaxConcurrent(String((await window.omniget.settingsGet('download.maxConcurrent')) ?? 0))
       setAutoArchive((await window.omniget.settingsGet('download.autoArchive')) === true)
+      setDedupe((await window.omniget.settingsGet('download.dedupe')) !== false)
+      setYtdlpAria2c((await window.omniget.settingsGet('download.ytdlpAria2c')) === true)
+      setSubs(await window.omniget.subscribeList())
       setUpnp((await window.omniget.settingsGet('bt.upnp')) !== false)
       setBtEncrypt((await window.omniget.settingsGet('bt.forceEncryption')) !== false)
       setRules((await window.omniget.getScheduleRules()) ?? [])
@@ -656,6 +674,30 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
               <p className="mt-1 text-[10px] leading-relaxed text-text-3">
                 开启后新建视频任务落至「保存目录/视频」，直链媒体按扩展名归类；BT/磁力保持原目录结构
               </p>
+              {/* R7 续（backlog #22）：已下载去重 */}
+              <label className="mt-3 flex cursor-pointer items-center gap-2 text-xs text-text-2">
+                <input
+                  type="checkbox"
+                  checked={dedupe}
+                  onChange={(e) => setDedupe(e.target.checked)}
+                />
+                已下载去重（相同内容不再重复下载）
+              </label>
+              <p className="mt-1 text-[10px] leading-relaxed text-text-3">
+                单视频命中下载档案即拒绝创建；合集内条目由 yt-dlp 档案自动跳过。订阅追更依赖此项
+              </p>
+              {/* R7 续（backlog #19）：yt-dlp 外部下载器 aria2c */}
+              <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs text-text-2">
+                <input
+                  type="checkbox"
+                  checked={ytdlpAria2c}
+                  onChange={(e) => setYtdlpAria2c(e.target.checked)}
+                />
+                yt-dlp 使用 aria2c 外部下载器加速（实验）
+              </label>
+              <p className="mt-1 text-[10px] leading-relaxed text-text-3">
+                直链格式 8 连接分段下载；分段/HLS 流不受影响。引擎未就绪时自动回落 yt-dlp 内置下载器
+              </p>
               {/* P2 修复：本分区此前没有保存入口（唯一保存按钮在上方"目录与凭据"分区） */}
               <Button
                 size="sm"
@@ -663,7 +705,9 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                 onClick={() => {
                   Promise.all([
                     window.omniget.settingsSet('download.maxConcurrent', Number(maxConcurrent) || 0),
-                    window.omniget.settingsSet('download.autoArchive', autoArchive)
+                    window.omniget.settingsSet('download.autoArchive', autoArchive),
+                    window.omniget.settingsSet('download.dedupe', dedupe),
+                    window.omniget.settingsSet('download.ytdlpAria2c', ytdlpAria2c)
                   ])
                     .then(() => flash('队列与归档设置已保存'))
                     .catch((err) => toastError('保存队列设置', err))
@@ -671,6 +715,107 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
               >
                 保存
               </Button>
+            </Section>
+
+            {/* R7 续（backlog #18）：订阅追更 */}
+            <Section title="订阅追更">
+              {subs.length === 0 && (
+                <p className="mb-2 text-[10px] text-text-3">
+                  尚无订阅。添加频道 / UP主 / 歌单链接后，将按间隔自动抓取新内容并入队下载
+                </p>
+              )}
+              {subs.map((s) => (
+                <div key={s.id} className="mb-2 rounded-panel border border-border p-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-xs text-text-1">{s.name}</p>
+                      <p className="num truncate text-[10px] text-text-3">{s.url}</p>
+                      <p className="mt-0.5 text-[10px] text-text-3">
+                        每 {s.intervalMin} 分钟检查 · 累计 {s.addedTotal} 条
+                        {s.lastCheckedAt
+                          ? ` · 上次 ${new Date(s.lastCheckedAt).toLocaleString()}`
+                          : ' · 未检查'}
+                        {s.lastError && <span className="text-red-400"> · {s.lastError}</span>}
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 gap-1.5">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={subBusyId === s.id}
+                        onClick={() => {
+                          setSubBusyId(s.id)
+                          window.omniget
+                            .subscribeCheckNow(s.id)
+                            .then((r) => flash(r.added > 0 ? `已新增 ${r.added} 个任务` : '暂无新内容'))
+                            .catch((err) => toastError('检查订阅', err))
+                            .finally(() => setSubBusyId(null))
+                        }}
+                      >
+                        立即检查
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => {
+                          window.omniget
+                            .subscribeRemove(s.id)
+                            .then(() => {
+                              setSubs(subs.filter((x) => x.id !== s.id))
+                              flash('订阅已删除')
+                            })
+                            .catch((err) => toastError('删除订阅', err))
+                        }}
+                      >
+                        删除
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <input
+                  value={subName}
+                  onChange={(e) => setSubName(e.target.value)}
+                  placeholder="名称"
+                  className="h-8 w-32 rounded-ctl border border-border bg-surface-2 px-2 text-xs outline-none focus:border-accent"
+                />
+                <input
+                  value={subUrl}
+                  onChange={(e) => setSubUrl(e.target.value)}
+                  placeholder="频道 / 合集 / 歌单链接"
+                  className="num h-8 min-w-0 flex-1 rounded-ctl border border-border bg-surface-2 px-2 text-xs outline-none focus:border-accent"
+                />
+                <select
+                  value={subInterval}
+                  onChange={(e) => setSubInterval(e.target.value)}
+                  className="h-8 rounded-ctl border border-border bg-surface-2 px-2 text-xs outline-none focus:border-accent"
+                >
+                  <option value="60">每小时</option>
+                  <option value="360">每 6 小时</option>
+                  <option value="720">每 12 小时</option>
+                  <option value="1440">每天</option>
+                </select>
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    window.omniget
+                      .subscribeAdd({ name: subName.trim(), url: subUrl.trim(), intervalMin: Number(subInterval) })
+                      .then((s) => {
+                        setSubs([...subs, s])
+                        setSubName('')
+                        setSubUrl('')
+                        flash('订阅已添加')
+                      })
+                      .catch((err) => toastError('添加订阅', err))
+                  }}
+                >
+                  添加
+                </Button>
+              </div>
+              <p className="mt-1 text-[10px] leading-relaxed text-text-3">
+                新内容自动按默认参数入队（保存目录 = 全局下载目录），单次最多 20 条；去重档案防止重复下载
+              </p>
             </Section>
 
             <Section title="定时限速计划">

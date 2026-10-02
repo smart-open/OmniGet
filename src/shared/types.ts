@@ -18,7 +18,7 @@ export interface Task {
   type: TaskType
   source: string
   name: string
-  engine: 'aria2' | 'ytdlp' | 'music' | 'tool'
+  engine: 'aria2' | 'ytdlp' | 'nm3u8' | 'music' | 'tool'
   status: TaskStatus
   saveDir: string
   totalBytes: number
@@ -44,7 +44,7 @@ export interface TaskFile {
 
 // ── 引擎健康（§6.1 event:engines）────────────────────────────────────
 
-export type EngineName = 'aria2' | 'ytdlp' | 'music' | 'tool'
+export type EngineName = 'aria2' | 'ytdlp' | 'nm3u8' | 'music' | 'tool'
 
 export interface EngineHealth {
   name: EngineName
@@ -113,6 +113,10 @@ export interface ConfirmSelectionInput {
     delogo?: boolean
     /** R4 续（backlog #4）：任务级命名模板（预设携带），留空回落全局 naming.template */
     template?: string
+    /** R7 续（backlog #21）：SponsorBlock 广告段标记为章节（YouTube） */
+    sponsorBlock?: boolean
+    /** R7 续（backlog #20）：直播录制时长（分钟；仅 RE 引擎的直播流任务） */
+    liveRecordMinutes?: number
   }
 }
 
@@ -273,6 +277,8 @@ export interface ParseOutputPayload {
   playlist?: boolean
   /** 磁力暂停态 gid：确认勾选时 changeOption+unpause */
   pendingGid?: string
+  /** R7 续（backlog #20）：HLS 直播流（media 清单无 #EXT-X-ENDLIST），对话框显示录制时长 */
+  live?: boolean
 }
 
 export interface CreateTaskResultAwaiting {
@@ -294,6 +300,26 @@ export interface CreateTaskResultStarted {
 }
 
 export type CreateTaskResult = CreateTaskResultAwaiting | CreateTaskResultStarted | CreateTaskResultFailed
+
+/** R7 续（backlog #18）：订阅追更源（频道/UP主/歌单 URL 定时抓新） */
+export interface Subscription {
+  id: string
+  name: string
+  url: string
+  /** 抓取间隔（分钟） */
+  intervalMin: number
+  /** 累计自动入队条数 */
+  addedTotal: number
+  lastCheckedAt: number | null
+  lastError: string | null
+  createdAt: number
+}
+
+export interface SubscriptionAddInput {
+  name: string
+  url: string
+  intervalMin: number
+}
 
 /** 侧栏角标计数（SQL 全表口径，跨视图一致） */
 export interface TaskCounts {
@@ -458,6 +484,11 @@ export interface OmniGetBridge {
   importFile(ext?: string): Promise<{ name: string; content: string } | null>
   /** R7 续（backlog #11）：短视频解析服务连接测试（主进程代发探测，渲染层无 Node 能力） */
   sidecarProbe(baseUrl: string): Promise<{ ok: boolean; detail: string }>
+  // R7 续（backlog #18）：订阅追更
+  subscribeList(): Promise<Subscription[]>
+  subscribeAdd(input: SubscriptionAddInput): Promise<Subscription>
+  subscribeRemove(id: string): Promise<void>
+  subscribeCheckNow(id: string): Promise<{ added: number }>
   // events
   onTaskEvents(listener: (events: TaskEvent[]) => void): () => void
   onEngineHealth(listener: (health: EngineHealth[]) => void): () => void
@@ -506,6 +537,11 @@ export const IPC_CHANNELS = {
   settingsSet: 'settings:set',
   /** R7 续（backlog #11）：短视频解析服务连接测试 */
   sidecarProbe: 'sidecar:probe',
+  /** R7 续（backlog #18）：订阅追更 */
+  subscribeList: 'subscribe:list',
+  subscribeAdd: 'subscribe:add',
+  subscribeRemove: 'subscribe:remove',
+  subscribeCheckNow: 'subscribe:checkNow',
   eventTasks: 'event:tasks',
   eventEngines: 'event:engines',
   /** M→R：UI 动作（托盘/剪贴板/协议唤起 → 打开新建任务并预填） */

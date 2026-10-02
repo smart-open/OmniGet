@@ -9,6 +9,8 @@ import { dirname, join } from 'path'
 import { existsSync } from 'fs'
 import { sanitizeFilename } from '@shared/sanitize'
 import { getSettingParsed } from '../db'
+import { binaryPath } from '../orchestrator/binaries'
+import { ytdlpArchiveFile } from '../task/archive'
 import { readTaskPlatform } from '../task/params'
 import { createLogger } from '../logger'
 import { getYtDlpSupervisor } from '../orchestrator/ytdlp'
@@ -29,6 +31,8 @@ export interface VideoSelection {
   delogo?: boolean
   /** R4 续（backlog #4）：任务级命名模板（预设携带），非空时优先于全局 naming.template */
   template?: string
+  /** R7 续（backlog #21）：SponsorBlock 广告段标记为章节（YouTube） */
+  sponsorBlock?: boolean
 }
 
 interface RawFormat {
@@ -90,7 +94,10 @@ export class YtDlpAdapter {
 
   async health(): Promise<EngineHealthInfo> {
     const v = await this.supervisor.version()
-    return v ? { online: true, detail: v } : { online: false, detail: 'yt-dlp 不可用' }
+    if (!v) return { online: false, detail: 'yt-dlp 不可用' }
+    // R7 续（backlog #16）：JS 运行时公示——缺失时 YouTube 等站点提取不可用
+    const { jsRuntimeLabel } = await import('../orchestrator/jsruntime')
+    return { online: true, detail: `${v} · JS 运行时：${jsRuntimeLabel()}` }
   }
 
   // ── parse（M3-3/M3-4/M3-11）────────────────────────────────────────
@@ -196,6 +203,20 @@ export class YtDlpAdapter {
       if (opts.embedThumbnail && this.ffmpegOk) args.push('--embed-thumbnail')
     }
     args.push('--newline', '--no-mtime')
+    // R7 续（backlog #19）：aria2c 外部下载器（可选加速，设置开关；enginesDir 已在
+    // 子进程 PATH，aria2c 直接按名解析）。aria2 选项经官方文档口径（-x 并发/-k 分片）
+    if (getSettingParsed<boolean>('download.ytdlpAria2c') === true && existsSync(binaryPath('aria2c'))) {
+      args.push('--downloader', 'aria2c', '--downloader-args', 'aria2c:-x 8 -k 1M')
+      log.info('external downloader: aria2c')
+    }
+    // R7 续（backlog #22）：yt-dlp 原生 --download-archive（合集条目级去重 + extractor ID 记录）
+    if (getSettingParsed<boolean>('download.dedupe') !== false) {
+      args.push('--download-archive', ytdlpArchiveFile())
+    }
+    // R7 续（backlog #21）：SponsorBlock 广告段标记为章节（YouTube 原生支持）
+    if (opts.sponsorBlock) {
+      args.push('--sponsorblock-mark', 'all')
+    }
     // M9：回传最终产物路径（--print 默认 --simulate，需 --no-simulate 才会真下载）
     args.push('--no-simulate', '--print', 'after_move:filepath')
     args.push(

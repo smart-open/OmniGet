@@ -40,7 +40,9 @@ const LABELS: Record<string, string> = {
   kuaishou: '快手',
   xiaohongshu: '小红书',
   weibo: '微博',
-  xigua: '西瓜视频'
+  xigua: '西瓜视频',
+  // R7 续（backlog #17）：HLS/DASH 清单链接（yt-dlp generic 分段流下载）
+  hls: 'HLS/DASH 流'
 }
 
 function entry(id: string, engine: string): Entry {

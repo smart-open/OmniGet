@@ -73,7 +73,7 @@ export function HealthPage() {
         {/* 引擎在线状态（aria2 常驻红/绿；ytdlp·music 按需拉起为待机灰） */}
         <h3 className="mb-2 text-xs font-medium text-text-1">{t('health.engines')}</h3>
         <div className="mb-5 flex flex-wrap gap-2">
-          {(['aria2', 'ytdlp', 'music', 'tool'] as const).map((name) => {
+          {(['aria2', 'ytdlp', 'nm3u8', 'music', 'tool'] as const).map((name) => {
             const e = engines.find((x) => x.name === name)
             const online = e?.online ?? false
             return (

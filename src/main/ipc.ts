@@ -12,6 +12,7 @@ import {
   type ConfirmSelectionInput,
   type MusicDownloadInput,
   type MusicSearchInput,
+  type SubscriptionAddInput,
   type ToolCreateInput
 } from '@shared/types'
 import { getSetting, getSettingParsed, setSetting } from './db'
@@ -20,6 +21,13 @@ import { createLogger } from './logger'
 import type { TaskManager } from './task/manager'
 import type { MusicAdapter } from './music/adapter'
 import { parseTorrentFile } from './torrent/parse'
+import {
+  addSubscription,
+  checkSubscriptionNow,
+  listSubscriptions,
+  removeSubscription,
+  type SubscriptionHost
+} from './subscribe'
 
 const log = createLogger('ipc')
 
@@ -368,6 +376,26 @@ export function registerIpcHandlers(): void {
     return probeVideoSidecar(String(baseUrl ?? ''))
   })
 
+  // ── R7 续（backlog #18）：订阅追更 ──────────────────────────────────
+  const subHost = (): SubscriptionHost => ({
+    createTask: (input) => {
+      if (!taskManager) throw new Error('任务系统尚未就绪，请稍候')
+      return taskManager.createTask(input)
+    },
+    confirmSelection: (input) => {
+      if (!taskManager) throw new Error('任务系统尚未就绪，请稍候')
+      return taskManager.confirmSelection(input)
+    }
+  })
+  ipcMain.handle(IPC_CHANNELS.subscribeList, () => listSubscriptions())
+  ipcMain.handle(IPC_CHANNELS.subscribeAdd, (_e, input: SubscriptionAddInput) =>
+    addSubscription(input)
+  )
+  ipcMain.handle(IPC_CHANNELS.subscribeRemove, (_e, id: string) => removeSubscription(String(id)))
+  ipcMain.handle(IPC_CHANNELS.subscribeCheckNow, (_e, id: string) =>
+    checkSubscriptionNow(String(id), subHost())
+  )
+
   // ── R1+R5：本地桥接信息（端口/token，设置页展示）─────────────────────
   ipcMain.handle(IPC_CHANNELS.bridgeInfo, async () => {
     const { getBridgeInfo } = await import('./bridge')
@@ -520,6 +548,9 @@ export function registerIpcHandlers(): void {
     // 信任锚不得与被保护对象同置于渲染层可写面，否则 SHA256 校验失去独立锚点
     'engines.autoFetch',
     'ytdlp.cookieFile',
+    // R7 续（backlog #19/#22）：下载行为开关
+    'download.dedupe',
+    'download.ytdlpAria2c',
     // R7 续（backlog #11）：自托管短视频解析服务地址（http 允许——常部署在局域网/本机）
     'sidecar.videoApiUrl'
   ])

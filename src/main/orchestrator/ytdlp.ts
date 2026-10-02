@@ -6,6 +6,7 @@
 import { type ChildProcess } from 'child_process'
 import { createLogger } from '../logger'
 import { binaryPath, checkBinary, ensureVerified } from './binaries'
+import { childEnvWithEngines } from './jsruntime'
 import { spawnTreeAware, terminateTree } from './proc'
 
 const log = createLogger('ytdlp')
@@ -62,7 +63,8 @@ export class YtDlpSupervisor {
 
   private exec(args: string[], timeoutMs: number): Promise<string> {
     return new Promise((resolve, reject) => {
-      const proc = spawnTreeAware(this.bin(), args)
+      // backlog #16：enginesDir 前置进 PATH——外部 JS 运行时（deno/node）同目录/PATH 双查找面
+      const proc = spawnTreeAware(this.bin(), args, { env: childEnvWithEngines() })
       let out = ''
       // L-6：stdout 无上限累积会让超大合集 -J JSON（数十 MB）全量驻留内存
       const MAX_OUT = 64 * 1024 * 1024
@@ -102,9 +104,22 @@ export class YtDlpSupervisor {
 
   /** 启动一个下载任务（长驻进程，逐行回调） */
   spawnTask(taskId: string, args: string[], opts: YtDlpRunOptions): YtDlpRunHandle {
-    const proc = spawnTreeAware(this.bin(), args)
+    return this.spawnProcess(this.bin(), taskId, args, opts)
+  }
+
+  /**
+   * 通用长驻任务 spawn（backlog #17：N_m3u8DL-RE 等同型 CLI 复用进程表/树终止/
+   * stderr 尾部归因）。enginesDir 前置 PATH——RE 需在 PATH/同目录找到 ffmpeg 混流。
+   */
+  spawnProcess(
+    bin: string,
+    taskId: string,
+    args: string[],
+    opts: YtDlpRunOptions
+  ): YtDlpRunHandle {
+    const proc = spawnTreeAware(bin, args, { env: childEnvWithEngines() })
     this.procs.set(taskId, proc)
-    log.info(`spawn ${taskId}: yt-dlp ${args.join(' ').slice(0, 120)}…`)
+    log.info(`spawn ${taskId}: ${bin} ${args.join(' ').slice(0, 120)}…`)
 
     let buffer = ''
     proc.stdout?.on('data', (d: Buffer) => {

@@ -12,7 +12,7 @@ import { appRoot, userDataDir } from '../env'
 
 const log = createLogger('binaries')
 
-export type SidecarBinary = 'aria2c' | 'ytdlp' | 'ffmpeg'
+export type SidecarBinary = 'aria2c' | 'ytdlp' | 'ffmpeg' | 'nm3u8re'
 
 interface FingerprintStore {
   [binaryName: string]: string // sha256
@@ -20,7 +20,8 @@ interface FingerprintStore {
 
 function binaryName(name: SidecarBinary): string {
   // 惯例：二进制文件名连字符（yt-dlp.exe），TOFU 指纹键用枚举名（ytdlp）
-  const file = name === 'ytdlp' ? 'yt-dlp' : name
+  const file =
+    name === 'ytdlp' ? 'yt-dlp' : name === 'nm3u8re' ? 'N_m3u8DL-RE' : name
   return process.platform === 'win32' ? `${file}.exe` : file
 }
 
@@ -45,6 +46,13 @@ export function enginesDir(): string {
 
 export function binaryPath(name: SidecarBinary): string {
   return join(enginesDir(), binaryName(name))
+}
+
+/** 轻量在位检查（不走 TOFU/执行位校验）：引擎路由决策用（backlog #17） */
+export function isBinaryPresent(name: SidecarBinary): boolean {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { existsSync } = require('fs') as typeof import('fs')
+  return existsSync(binaryPath(name))
 }
 
 /** 引擎目录内工具二进制的跨平台路径（ffmpeg/ffprobe 等，复用 binaryName 平台逻辑，防止手写漂移） */

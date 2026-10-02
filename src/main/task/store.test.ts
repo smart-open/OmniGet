@@ -52,14 +52,14 @@ after(() => {
   rmSync(tmp, { recursive: true, force: true })
 })
 
-test('迁移可重放：user_version=1 且全表就绪', () => {
+test('迁移可重放：user_version=2 且全表就绪', () => {
   const db = getDb()
   const v = db.pragma('user_version', { simple: true }) as number
-  assert.equal(v, 1)
+  assert.equal(v, 2)
   const tables = (
     db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]
   ).map((r) => r.name)
-  for (const t of ['tasks', 'task_files', 'settings', 'trackers', 'daily_stats']) {
+  for (const t of ['tasks', 'task_files', 'settings', 'trackers', 'daily_stats', 'subscriptions']) {
     assert.ok(tables.includes(t), `missing table ${t}`)
   }
 })
