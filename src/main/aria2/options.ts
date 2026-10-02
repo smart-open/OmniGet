@@ -75,10 +75,13 @@ export function defaultGlobalOptions(): Aria2GlobalOptions {
 /** 生成 aria2c 启动参数（全局选项仅能经启动参数注入的部分）。
  * P3 加固：RPC secret 经文件注入（--rpc-secret-file）——原 --rpc-secret 会出现在
  * 进程命令行，本机其他进程经 wmic/任务管理器可直接读取 */
-export function toSpawnArgs(globalOpts: Aria2GlobalOptions, rpcSecretFile: string, rpcPort: number): string[] {
+export function toSpawnArgs(globalOpts: Aria2GlobalOptions, rpcSecretConf: string, rpcPort: number): string[] {
   return [
     '--enable-rpc',
-    `--rpc-secret-file=${rpcSecretFile}`,
+    // R5 修复：aria2c 没有 --rpc-secret-file 选项（原 third-round 改造臆造，
+    // 实测 aria2c 直接 exit 28）——改用 --conf-path 携带只含 rpc-secret 的
+    // 配置文件，同样保持 secret 不出现在命令行
+    `--conf-path=${rpcSecretConf}`,
     `--rpc-listen-port=${String(rpcPort)}`,
     '--rpc-listen-all=false',
     '--continue=true',

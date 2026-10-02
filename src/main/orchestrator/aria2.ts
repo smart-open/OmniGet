@@ -181,13 +181,15 @@ export class Aria2Supervisor {
   }
 
   private async spawnAndConnect(): Promise<void> {
-    // P3 加固：secret 写文件注入（不出现在命令行；aria2 启动后即读走）
+    // P3 加固：secret 写配置文件注入（--conf-path，不出现在命令行；aria2 启动后即读走）。
+    // R5 修复：此前用的 --rpc-secret-file 是不存在的选项 → aria2c exit 28 无限重启，
+    // BT/HTTP 引擎全挂。conf 文件只含 rpc-secret 一行
     const { writeFile, unlink } = await import('fs/promises')
     const { join } = await import('path')
     const { userDataDir } = await import('../env')
-    const secretFile = join(userDataDir(), 'aria2-rpc-secret')
+    const secretFile = join(userDataDir(), 'aria2-rpc-secret.conf')
     // M1 加固：secret 文件仅属主可读写（Linux/macOS 同机低权用户不可读），用后即删
-    await writeFile(secretFile, this.secret, { encoding: 'utf8', mode: 0o600 })
+    await writeFile(secretFile, `rpc-secret=${this.secret}\n`, { encoding: 'utf8', mode: 0o600 })
     const args = toSpawnArgs(this.globalOptions, secretFile, this.rpcPort)
     const proc = spawnTreeAware(binaryPath('aria2c'), args, {
       stdio: ['ignore', 'ignore', 'pipe']

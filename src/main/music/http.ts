@@ -202,8 +202,16 @@ export async function fetchJson<T = unknown>(
   for (let attempt = 0; attempt <= RETRY_TOTAL; attempt++) {
     try {
       const merged = mergeSignal(signal, timeoutMs)
+      // R5 修复：咪咕等接口返回未解压的压缩体（brotli）→ JSON.parse 得到二进制
+      // 乱码（「锟斤拷…is not valid JSON」）。显式声明只收 gzip/deflate——undici
+      // 对这两种编码确定会自动解压；调用方自带 Accept-Encoding 时不覆盖
+      const reqHeaders = new Headers(init.headers)
+      if (!reqHeaders.has('accept-encoding')) {
+        reqHeaders.set('accept-encoding', 'gzip, deflate')
+      }
       const res = await undiciFetch(url, {
         ...init,
+        headers: reqHeaders,
         signal: merged,
         dispatcher: dispatcherFor(url)
       })

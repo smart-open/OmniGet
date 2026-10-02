@@ -8,7 +8,7 @@
   "license": "MIT",
   "private": true,
   "scripts": {
-    "dev": "electron-vite dev",
+    "dev": "node scripts/dev.cjs",
     "build": "electron-vite build",
     "start": "electron-vite preview",
     "test": "node scripts/run-tests.js",

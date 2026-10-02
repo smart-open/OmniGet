@@ -154,6 +154,14 @@ npm run dev               # GUI 冒烟（看日志：aria2 online / tray created
 
 ## 10. 审查与修复记录
 
+**dev 冒烟修复（2026-10-01 晚，R5，用户反馈"音乐无法下载/日志乱码"）**：typecheck + 65/65 单测。修复——
+1. **P0 aria2c 启动即崩**：第三轮 P3 引入的 `--rpc-secret-file` 是**不存在的选项**（aria2c 无此参数，实测 exit 28 无限重启，BT/HTTP 引擎全挂）→ 改用 `--conf-path` 携带只含 `rpc-secret=` 的配置文件（保持 secret 不进命令行，用后即删）。⚠ 教训：改造 CLI 参数前先 `--help` 验证选项存在
+2. **P2 咪咕接口乱码 JSON**（「锟斤拷…is not valid JSON」）：服务端返回 brotli 压缩体未被解压 → fetchJson 显式声明 `Accept-Encoding: gzip, deflate`（undici 确定自动解压；调用方自带该头不覆盖）
+3. **P3 dev 终端日志乱码**：cmd 默认 GBK 代码页渲染 UTF-8 中文为乱码 → `npm run dev` 改走 `scripts/dev.cjs`（win32 自动 chcp 65001 后透传 electron-vite dev；日志文件本身一直是 UTF-8 无问题）
+4. 其余音乐失败（汽水搜索空响应、cenguigui 镜像 DNS 失败、酷狗 317ak 403）为第三方接口侧不可用，引擎多平台回退已按设计逐个容错，非代码缺陷
+
+
+
 **第四轮全面审查修复（2026-10-01 晚，P1×5 + P2×16 + P3×25 全修）**：typecheck 双端 + 65/65 单测通过。四路子代理（主进程编排/渲染层 UX/音乐·工具箱·热更器/IPC·安全面）深查，排除已知遗留项后：
 
 **P1×5**：
@@ -204,7 +212,7 @@ npm run dev               # GUI 冒烟（看日志：aria2 online / tray created
 9. **P2 parseFile**：USERPROFILE 整目录黑名单改为系统目录+高敏子目录（Downloads 主用例恢复可用）
 10. **P2 音乐暂停竞态**：POST 返回后补偿检查任务状态，已取消则立即 cancel 引擎任务
 11. **P2 工具箱**：node 任务额度移交修正 + nodeTasks 登记支持取消
-12. P3：磁力元数据临时目录清理、RPC secret 改 --rpc-secret-file、WS 重建前摘除旧监听、send 竞态兜底、上传速度接 getGlobalStat、setTaskFileSelection 原子化、saveTaskFiles downloaded 落库、scheduler apply 加 catch、tracker 订阅源过滤逗号/空白、torrent 解析路径过 sanitize、bridge readBody 超限必 settle、preview://local 挡敏感目录、剪贴板/协议唤起去重键改完整文本
+12. P3：磁力元数据临时目录清理、RPC secret 出命令行（~~--rpc-secret-file~~ 该选项不存在，R5 已改 --conf-path）、WS 重建前摘除旧监听、send 竞态兜底、上传速度接 getGlobalStat、setTaskFileSelection 原子化、saveTaskFiles downloaded 落库、scheduler apply 加 catch、tracker 订阅源过滤逗号/空白、torrent 解析路径过 sanitize、bridge readBody 超限必 settle、preview://local 挡敏感目录、剪贴板/协议唤起去重键改完整文本
 
 渲染层：
 1. **P1 批量操作**：回收站恢复/彻底删除/清空统一 runBatch（try/finally + 逐项容错 + 失败 toast）——busy 不再永久卡死
