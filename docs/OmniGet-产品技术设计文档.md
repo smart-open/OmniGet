@@ -74,6 +74,8 @@ OmniGet 是一款**本地优先、无广告、界面现代**的桌面下载工�
 - **aria2c** 覆盖 BT/磁力/HTTP 三类传输，本身就是成熟的多连接下载核；**yt-dlp** 以独立二进制子进程运行，负责平台解析与流式下载；**omni-service** 是本项目自研 Python 服务，直接 import 复用 music-downloader 技能的 `batch_download_v4.py` 五平台逻辑。
 - **ffmpeg（第四个随包二进制，评审补遗）**：yt-dlp 的硬依赖——`bv*+ba` 合并、字幕/封面嵌入（§4.3）与短视频 L3 delogo 后处理（§4.3.1）均经其完成；以 essentials 精简版随 `resources/engines/` 分发。
 
+> **2026-10-02 现状补遗**：① 音乐引擎已由 omni-service（Python sidecar）**迁入主进程内嵌 TS**（`src/main/music/`，§4.4/§6.3 相应章节为历史设计）；② 引擎清单现为 **aria2c / yt-dlp / ffmpeg / N_m3u8DL-RE**（HLS/DASH 专用引擎，§4.3.3）+ **deno**（yt-dlp JS 运行时，按需下载位）；③ 引擎支持**按需下载**（manifest SHA256 + TOFU，updater/engine-fetch.ts），sidecar 不再要求随包全家桶（§3.3 体积预算为历史口径）。
+
 ### 2.2 进程生命周期
 
 | 事件 | 行为 |
@@ -134,7 +136,8 @@ omniget/
 | 音乐服务 | Python 3.11 + FastAPI + uvicorn，PyInstaller --onefile | — | 直接复用 music-downloader 的五平台实现，避免跨语言重写 |
 | BT/HTTP 引擎 | aria2c（`--enable-rpc`） | 1.37 | 参考脚本已验证的能力面：`--select-file`、多连接、DHT/LPD、做种 |
 | 视频引擎 | yt-dlp 独立二进制 | releases 最新 | 1000+ 站点、`-J` JSON 解析、`--concurrent-fragments` 并发 |
-| 流处理/后处理 | ffmpeg（essentials 精简版） | 7.x | yt-dlp 合并/嵌字幕/嵌封面硬依赖；短视频 L3 delogo 后处理 |
+| 流处理/后处理 | ffmpeg（essentials 精简版） | 9.0.2 | yt-dlp 合并/嵌字幕/嵌封面硬依赖；短视频 L3 delogo 后处理 |
+| HLS/DASH 引擎 | N_m3u8DL-RE（单文件二进制，~13MB） | 0.6.0-beta | 分段加密流（AES-128）/多轨/直播录制，aria2 无法覆盖；RE 缺席时回落 yt-dlp generic extractor（§4.3.3） |
 
 ### 3.2 备选方案对比（决策记录）
 
@@ -335,6 +338,16 @@ yt-dlp -f <format_id> --newline
   2. **电商图片批量**（淘宝/1688/京东主图 SKU 详情评论图）：AIX 的差异化主场景，但属"素材采集工具"赛道，与 OmniGet"下载器"定位有偏差；若 Backlog 1 落地可顺势评估。
   3. **平台适配状态面板**：设置页展示 yt-dlp 提取器健康度与已知失效平台，辅助用户理解失败原因（SnapAny 用户评价证明"改版跟进速度"是核心体验）。
 
+#### 4.3.3 HLS/DASH 专用引擎与 yt-dlp 生态补遗（2026-10-02，backlog #16–#22）
+
+1. **N_m3u8DL-RE 引擎路由**：嗅探器按 pathname 分型 `.m3u8/.m3u/.mpd` 清单链接（防误报）→ `platform:'hls'`；RE 在位走 `adapters/nm3u8.ts`（`-M format=mp4` 混流、`N/M xx%` 分片进度、pause=SIGTERM 保留 tmp 分片续下、exit 0 后 stat 回填真实字节数），缺失回落 yt-dlp（generic extractor 原生支持分段流与 AES-128）。master 变体经清单解析纯函数（`nm3u8-parse.ts`，引号感知属性解析）进对话框格式选择，`url=<URI正则>:for=best` 精确锁定。
+2. **直播录制**：media 清单无 `#EXT-X-ENDLIST` 判定直播流 → 对话框录制时长选择 → `--live-real-time-merge --live-record-limit HH:mm:ss`（选项经真机 `--help` 核实）。
+3. **yt-dlp JS 运行时（EJS）**：yt-dlp 2025-11 起下载 YouTube 需外部 JS 运行时（官方 issue #15012）——`orchestrator/jsruntime.ts` 按「enginesDir（deno/node 与 yt-dlp 同目录）→ 系统 PATH」双查找面探测（30s TTL 缓存），spawn/exec 全部前置注入 enginesDir PATH；健康页公示运行时状态；deno 为按需下载位（kind=tool 不入 TOFU）。
+4. **外部下载器**：`download.ytdlpAria2c` 开启且 aria2c 在位时注入 `--downloader aria2c --downloader-args "aria2c:-x 8 -k 1M"`（Seal 范式，零包体成本）。
+5. **SponsorBlock**：`--sponsorblock-mark all` 标记赞助/广告段为章节（随任务参数持久化，resume 重放）。
+6. **下载去重双档案**（`task/archive.ts`）：自有档案（`sha1:<hex>` 键，URL 明文不落盘，创建期命中拒绝）+ yt-dlp 原生 `--download-archive`（合集条目级）；合集/订阅源 URL 不入自有档案（防订阅源被封死）。`download.dedupe` 默认开。
+7. **短视频解析服务兜底**：`sidecar.videoApiUrl`（用户显式配置的自托管 Evil0ctal/Douyin_TikTok_Download_API）——yt-dlp 解析失败且平台在覆盖面时自动改道直链管线（时效 URL 重试前自动刷新；信任边界：配置即信任该地址，放行 http 不做内网校验，同 `engines.mirror` 纯 https 口径的区别为有意取舍）。
+
 ### 4.4 音乐模块（omni-service 复用 music-downloader）
 
 Python 服务将 music-downloader 技能的 `MusicDownloader` 能力暴露为 REST（逻辑**不重写**，直接 import 移植同目录源码）：
@@ -370,6 +383,7 @@ Python 服务将 music-downloader 技能的 `MusicDownloader` 能力暴露为 RE
 - **已完成任务增量补下**：`select-file` 热更仅对 queued/running 任务有效；任务 completed 后 aria2 gid 已销毁，此时"补选文件"= 同 infohash re-add（优先复用任务库缓存的 `.torrent`，磁力走 BEP-9 二次获取元数据）+ 新 `select-file`，aria2 对已存在文件秒校验跳过，体验无感。
 - **失败重试**：网络类失败自动指数退避重试 3 次；音乐平台降级类失败不自动重试，转为 UI 建议操作（如"用歌曲 ID 精确下载"）。所有失败在 Inspector 中**结构化归因**（DNS / TLS / HTTP 状态码 / 平台风控 / 磁盘空间五类）并附一键出口动作（热更引擎 / 改用磁力 / ID 精确下载 / 清理空间），借鉴 Motrix/AB 的任务诊断实践（§4.8）。
 - **回收站**：删除任务默认保留文件并移入回收站分组，二次清除才删文件。
+- **订阅追更**（2026-10-02 补遗，backlog #18）：`subscriptions` 表（DB 迁移 v2，见 §5）+ `src/main/subscribe.ts`——频道/UP主/歌单 URL 定时（1h~1d）检查：`yt-dlp -J --flat-playlist` 抓条目（过滤嵌套播放器）→ 与已入队档案差集 → `createTask+confirmSelection` 直通自动入队；主进程 10min tick 到期串行检查，单源单次上限 20 条，新增经通知条公示。定位借鉴 Pinchflat / Tube Archivist 的「下载器向内容管理演进」方向。
 
 ### 4.6 系统集成
 
@@ -415,6 +429,7 @@ Python 服务将 music-downloader 技能的 `MusicDownloader` 能力暴露为 RE
 ### 4.8 开源同类产品价值复用（GitHub 对标）
 
 > 对标四个代表性开源项目（2026-09 状态核实）：**Motrix**（Electron+aria2，已停更于 v1.8.19）、**Gopeed**（Go+Flutter，活跃）、**lx-music-desktop**（40k+★，活跃）、**AB Download Manager**（Kotlin/Compose，活跃）。
+> **2026-10-02 补遗**：对标范围已扩展至三轮调研（第一批 9 款见《OmniGet-竞品分析与路线图》§一；第二/三轮共 20 项结论与采纳判定统一维护于 `docs/backlog.md` §六 #16–#32），本节保留首批四项的详细对照。
 
 | 项目 | 与 OmniGet 关系 | 采纳复用 | 教训引以为戒 |
 |---|---|---|---|
@@ -481,6 +496,19 @@ CREATE TABLE daily_stats (
   completed_bytes INTEGER DEFAULT 0,        -- 当日完成体积合计
   peak_speed_bps  INTEGER DEFAULT 0         -- 当日峰值速度（主进程滑动窗口采样回填）
 );
+
+-- 订阅追更源（DB 迁移 v2，2026-10-02，backlog #18，见 §4.5）
+CREATE TABLE subscriptions (
+  id              TEXT PRIMARY KEY,         -- uuid v7
+  name            TEXT NOT NULL,
+  url             TEXT NOT NULL,            -- 频道/UP主/歌单 URL
+  interval_min    INTEGER NOT NULL DEFAULT 60,
+  added_total     INTEGER NOT NULL DEFAULT 0,   -- 累计入队条数
+  last_checked_at INTEGER,                      -- 到期判定索引列
+  last_error      TEXT,
+  created_at      INTEGER NOT NULL
+);
+CREATE INDEX idx_subscriptions_due ON subscriptions(last_checked_at);
 ```
 
 ---
@@ -771,6 +799,8 @@ CREATE TABLE daily_stats (
 | **M4 打磨发布** | 双主题、动效细化、回收站、统计页（读 `daily_stats`，§5）、迷你悬浮窗、本地工具箱（§4.7）、自动更新、三平台打包 | 全部交互状态（骨架/空态/错误）评审通过；工具箱四件套（转换/裁剪/响度/分离 L1）各完成一次实测；安装包签名与更新链路可用 |
 
 依赖关系：M2、M3 可并行（分别只依赖 M1 的任务模型与队列）。
+
+> **2026-10-02 注**：M1–M4 已全部完成并收口（里程碑存档见《OmniGet-竞品分析与路线图》§五）；产品化阶段（Backlog R1–R7/T1–T6）与竞品深挖后继路线（含 HLS/DASH 引擎、订阅中心、去重等，#16–#32）统一追踪于 `docs/backlog.md`，本表不再滚动更新。
 
 ---
 

@@ -56,6 +56,7 @@
 - **内容管理带**：Tube Archivist / Pinchflat（订阅自动下载库）、spotDL sync（歌单双向同步）——订阅自动化是下一战场（backlog #18/#22）
 - **国内短视频深水区**：f2（2.4K★，直播录制/弹幕/主页批量，内置 ABogus 签名对抗风控）、TikTokDownload（8.4K★，f2 接棒）——签名自研路线的合规与维护风险再次被印证不可取（backlog #11 决策正确）
 - **B 站专项**：BBDown（弹幕/章节/多轨）——yt-dlp 盲区，暂缓观察（backlog #23）
+- **三轮深挖（2026-10-02，工具与生态带，新增 10 项）**：lux（国内站点 Go 引擎）、streamlink（直播间插件化直录）、OpenList（AList 易主争议后的社区分叉，网盘聚合/WebDAV 出口）、LosslessCut（范式已被 OmniGet 工具箱无损族覆盖）、MKVToolNix、beets / MusicBrainz、subliminal / Bazarr、yt-dlp 插件目录、rclone、slskd。结论：真实增量缺口 = 直播间 URL 直录入口（#25）、网盘/WebDAV 下载源（#26，P1 候选）、yt-dlp `--embed-metadata`（#27）；其余判定见 backlog #28–#32
 
 ---
 
@@ -104,8 +105,10 @@
 | M3 视频（11 任务） | 2026-09-30 | yt-dlp 2026.08.19 + ffmpeg 9.0.2 essentials；`-J` 解析 + 进度模板 + 合集回放 + 字幕/封面/cookie；短视频 L1/L2/L3（delogo 副本）三层降级；热更器 SHA256+TOFU 原子替换 E2E 过 |
 | M4 打磨发布（17 任务，56 任务全完） | 2026-09-30 | 回收站/统计页/快捷键/首启向导/工具箱八件套/诊断归因五类/Tracker 管理器/定时调度；Inspector 抽屉（layoutId morph）；Windows NSIS 真机出包 81.3MB（winCodeSign 特权缺失以 `signAndEditExecutable:false` 绕过）；CI 三平台 build.yml；七视图三态走查通过 |
 | Backlog 实施（R1-R7/T1-T6） | 2026-10-01 | 见本文 §三 状态列：浏览器扩展 MV3 + 本地桥接、并发队列闸门、批量抓取、视频参数预设 MVP、Web UI 最小版、引擎按需下载机制（manifest+SHA256）、按类型归档、工具箱多输入/种子创建/批量串联、健康页、i18n 骨架 |
+| R7 引擎优化 + 音乐修复（0.6.0） | 2026-10-02 | UPnP/NAT-PMP、磁力元数据缓存、多源聚合、短链展开、单任务限速、健康页平台项、分站 Cookie、peer 指纹伪装；网易云 `ar` 字段/空歌手/咪咕兜底修复、下载失败视图、试听长条播放器 |
+| R7 续 + R4 续批次（0.7.0，Backlog #4/#8/#11/#16–#22） | 2026-10-02 | N_m3u8DL-RE 引擎接入（清单解析 6 例 + 真机 68MB E2E）、直播录制 MVP、订阅追更中心（DB v2）、双档案去重、SponsorBlock、短视频解析服务 sidecar 兜底、yt-dlp JS 运行时探测、迷你悬浮窗、预设导入导出/命名模板、BT 文件树虚拟化、sanitize 平台差异化；单测 73 → 93 |
 
 **关键工程数据（存档备查）**：
 - sidecar 全家桶 ~262MB，超 §3.3 预算（~65MB 口径不成立）→ 引擎按需下载机制已就绪（R6），发布侧需在 Releases 提供 `<platform>-<arch>/manifest.json`
-- 单测规模：T0~M4 收口时 33 → 2026-10-01 47 → 2026-10-02 65（音乐专项 + 回归）
+- 单测规模：T0~M4 收口时 33 → 2026-10-01 47 → 2026-10-02 73（音乐专项 + R7 回归）→ 2026-10-02 晚 93（R7 续批次：nm3u8-parse/video-extract/sanitize 等）
 - 音乐架构变更：Python sidecar → 主进程内嵌 TS（设计文档 §4.4/§6.3 相应章节为历史设计）

@@ -1,6 +1,6 @@
 # AGENT.md — OmniGet 项目记忆
 
-> 最后更新：2026-09-29 ｜ 维护约定：每完成一个里程碑/批次后更新「进度」与「关键决策」
+> 最后更新：2026-10-02 ｜ 维护约定：每完成一个里程碑/批次后更新「进度」与「关键决策」
 
 ## 1. 项目是什么
 
@@ -21,7 +21,7 @@
 | 构建 | electron-vite 2 + Vite 5 | main/preload CJS 产物；renderer ESM |
 | UI | React 18 + TS 5.7 严格模式 + Tailwind 3 + zustand 5（**v5 必须用 `create<T>()(fn)` 柯里化**）+ framer-motion 11（M4 用）+ @tanstack/react-virtual + @phosphor-icons/react |
 | 持久化 | better-sqlite3 11（Electron ABI 预编译） | journal_mode=WAL, foreign_keys=ON, user_version 迁移框架 |
-| 引擎 | aria2c 1.37.0 / yt-dlp 2026.08.19 / ffmpeg 9.0.2（sidecar 二进制，`resources/engines/win32-x64/`）；音乐引擎已**内嵌主进程**（`src/main/music/`，原 Python omni-service sidecar 已于 2026-09-30 迁除） |
+| 引擎 | aria2c 1.37.0 / yt-dlp 2026.08.19 / ffmpeg 9.0.2 / N_m3u8DL-RE 0.6.0-beta（sidecar 二进制，`resources/engines/win32-x64/`；N_m3u8DL-RE 与 deno 为按需下载位，见 `updater/engine-fetch.ts` ENGINE_FILES）；音乐引擎已**内嵌主进程**（`src/main/music/`，原 Python omni-service sidecar 已于 2026-09-30 迁除） |
 | 测试 | node:test + tsx（`npm test` 经 `scripts/run-tests.js` Electron-as-Node）；e2e：`scripts/e2e-aria2.ts` / `scripts/e2e_ytdlp.ts` / `scripts/e2e_updater.ts` |
 
 ## 3. 目录结构（实际落位）
@@ -52,6 +52,7 @@ resources/engines/ sidecar 按 <platform> 目录；构建经 extraResources
 - ✅ M2 音乐 8/8（含 M2-2 打包验证）：omni-service onefile 38.7MB 真机产物（health/401/search 全通）+ Defender 无检出；**遗留**：国内其他杀软实测需多环境、sidecar 全家桶 ~262MB 超预算需瘦身
 - ✅ M3 视频 11/11：yt-dlp 监督器/适配器（进度模板/退出码分类/pause=SIGTERM/resume 重spawn）+ ffmpeg sidecar + 格式选择器（分辨率筛选/预览卡片/仅音频）+ 合集 playlist-items 回放 + 字幕/封面/cookie + 短视频 L1/L2/L3（wm_level 回填）+ 热更器（SHA256 TOFU + 回滚）
 - ✅ M4 打磨 13/17 + 🔶3 + ⏭1（可选悬浮窗）：回收站/统计页/快捷键+帮助/设置页（模板·调度·Tracker）/工具箱八件套/向导/诊断/完整性探测；🔶 Inspector layoutId、electron-updater 真机通道、三平台出包
+- ✅ 产品化批次（R1–R7/T1–T6，0.5.x–0.6.0）+ R7 续/R4 续批次（0.7.0，backlog #4/#8/#11/#16–#22）：N_m3u8DL-RE 引擎 + 直播录制、订阅追更中心（DB v2）、双档案去重、SponsorBlock、短视频解析服务 sidecar、JS 运行时探测（jsruntime.ts）、迷你悬浮窗（?view=mini）、预设导入导出/命名模板、BT 树虚拟化、sanitize 平台差异化；typecheck + 93/93 单测（2026-10-02）
 - ⬜ 收口演示（全部人工项）：磁力 `dc9e7581…` GUI、10k 60fps、mac/Linux 清单、五平台各一次成功、B 站 1080P+cookie / YouTube 4K / 抖音快手短链、light 走查、三态走查、NSIS 出包
 
 ## 5. 关键决策与约定（不可随意更改）
@@ -79,7 +80,7 @@ resources/engines/ sidecar 按 <platform> 目录；构建经 extraResources
 ## 7. 验证命令
 
 ```bash
-npm test                  # 47 个单测（状态机/torrent/嗅探/事件合并/搜索语法等；以 npm test 实际输出为准）
+npm test                  # 93 个单测（状态机/torrent/嗅探/事件合并/nm3u8-parse/video-extract/sanitize 等；以 npm test 实际输出为准）
 npm run typecheck         # tsconfig.node + tsconfig.web 双严格检查
 npm run build             # 三端构建
 npx tsx --tsconfig tsconfig.node.json scripts/e2e-aria2.ts   # aria2 真实端到端
@@ -149,13 +150,22 @@ npm run dev               # GUI 冒烟（看日志：aria2 online / tray created
 - 设置页分区 / 工具箱说明：见对应 feature
 
 ## 9. 已知待办 / 坑
-- Sidecar 全家桶 ~262MB（ffmpeg 100+100 未精简、yt-dlp 17、omni-service 39、aria2 5.4）——发布前需瘦身/压缩评估
+- ~~Sidecar 全家桶 ~262MB~~ → 引擎按需下载机制已就绪（R6，manifest+SHA256+TOFU）；发布侧需在 Releases 提供 `<platform>-<arch>/manifest.json` 与引擎资产（backlog #3，🔴 首个 release）
+- 真机回归项见 `docs/backlog.md` §三（主题走查/10k 60fps/mac·Linux 冒烟/五平台逐平台人工回归）
 - Windows 冒烟清理命令（Stop-Process/taskkill）需审批，脚本化时注意
 - 音乐进度为阶段文案（引擎无字节回调）；试听依赖第三方镜像可用性（断流有黄条兜底）
 - 收口演示项：磁力 `dc9e7581…` GUI 全链路、10k 60fps、mac/Linux 清单、五平台各一次成功
-- Windows 冒烟清理命令（Stop-Process/taskkill）需审批，脚本化时注意
 
 ## 10. 审查与修复记录
+
+**R7 续 + R4 续批次（2026-10-02，0.7.0，backlog #4/#8/#11/#16–#22）**：typecheck 双端 + 93/93 单测 + N_m3u8DL-RE 真机 E2E（真实 m3u8 → demo.mp4 68MB）。要点——
+1. **N_m3u8DL-RE 引擎接入**：`adapters/nm3u8.ts`（`-M format=mp4` 混流、`N/M xx%` 分片进度、pause=SIGTERM 保留分片、exit 0 stat 回填）+ 清单解析纯函数 `nm3u8-parse.ts`（6 例，引号感知属性解析 → master 变体格式选择）+ manager 全量接线（engine 路由 RE 在位走 nm3u8/缺失回落 yt-dlp、确认/暂停/恢复/重试/重启恢复/并发闸门/健康面板「nm3u8」行）；清单链接嗅探分型按 pathname（仅 `.m3u8/.m3u/.mpd`，防误报）
+2. **直播录制 MVP**：media 清单无 `#EXT-X-ENDLIST` 判定直播 → 录制时长选择（30min/1h/2h/不限）→ `--live-real-time-merge --live-record-limit`（选项经 v0.6.0-beta --help 核实存在——沿用「先验证选项再注入」方法）
+3. **订阅追更中心**：DB 迁移 v2（subscriptions 表）+ `subscribe.ts`（flat-playlist 抓条目/档案差集/自动入队）+ 设置页卡片 + IPC 四通道 + 10min tick
+4. **双档案去重**（`task/archive.ts`）：自有 sha1 档案（URL 明文不落盘）+ yt-dlp `--download-archive`；`download.dedupe` 默认开
+5. **短视频解析服务 sidecar 兜底**：`sidecar.videoApiUrl`（自托管 Douyin_TikTok_Download_API 混合解析，白名单+测试连接）→ 直链管线改道（时效 URL 重试前自动刷新；健康面板回写 sidecar 引擎行）；响应提取「优先级路径→启发式兜底」两级容错（`video-extract.test.ts` 9 例）
+6. **JS 运行时探测**（`orchestrator/jsruntime.ts`）：enginesDir → PATH 双查找面（30s TTL），yt-dlp spawn/exec 全部前置注入 enginesDir PATH；健康页公示；deno 入引擎清单（kind=tool 不入 TOFU）——应对 yt-dlp 2025-11 起 YouTube 需外部 JS 运行时（issue #15012）
+7. 迷你悬浮窗（`?view=mini` 分支渲染，主窗识别收口 `getMainWindow()`）；预设导入导出（1MB 上限+去重合并）/命名模板入预设；BT 文件树虚拟化（useVirtualizer）；sanitize 平台差异化（POSIX 不改写合法文件名，回归 7 例）
 
 **下载引擎优化落地（2026-10-02，R7，按 docs/下载引擎优化方案-BT磁力-短视频-P2SP.md 优先级实施）**：typecheck 双端 + 73/73 单测（新增 shortlink/torrent-cache 8 例）+ aria2c 1.37.0 真机全参数启动验证（9 个新选项逐项核实存在且可启动）。
 

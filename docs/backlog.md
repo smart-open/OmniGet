@@ -114,8 +114,9 @@
 
 ## 六、竞品深挖（2026-10-02，第二轮 GitHub 调研）
 
-> 调研范围：第一轮 9 款之外的活跃开源项目——MeTube、VidBee（2026-09 仍在活跃开发）、Parabolic、Seal（Android）、spotDL、f2 / TikTokDownload、N_m3u8DL-RE、BBDown、Tube Archivist / Pinchflat。
+> 调研范围：第一轮 9 款之外的活跃开源项目——MeTube、VidBee（2026-09 仍在活跃开发）、Parabolic、Seal（Android）、spotDL、f2 / TikTokDownload、N_m3u8DL-RE、BBDown、Tube Archivist / Pinchflat；**第三轮（2026-10-02）追加工具与生态带**——lux、streamlink、OpenList（AList 分叉）、LosslessCut、MKVToolNix、beets / MusicBrainz、subliminal / Bazarr、yt-dlp 插件生态、rclone、slskd（#25–#32）。
 > 本轮两大发现：① **yt-dlp 外部 JS 运行时硬性要求**（直接影响现有 YouTube 兼容性，列 P1 排查）；② **HLS/DASH 流媒体引擎与订阅自动化**是两条完整的能力带缺口（此前矩阵未覆盖）。
+> 第三轮结论：工具箱「无损族」（LosslessCut 核心范式）已基本落地；真实增量缺口 = **直播间 URL 直录入口**、**网盘/WebDAV 下载源**、**yt-dlp 元数据内嵌**。
 
 ### 16. 🟠 yt-dlp JS 运行时兼容性排查（EJS / Deno / Node）——探测/注入已落地
 - **依据**：yt-dlp 自 2025-11 起下载 YouTube 必须外部 JS 运行时（Deno/Node.js + yt-dlp-ejs，官方公告 issue #15012）；OmniGet 引擎为 2026.08.19（晚于该变更），**YouTube 任务可能已静默失败**；MeTube/VidBee/spotDL 均已给出对策（VidBee 捆绑 Node 作为运行时、spotDL 提供 `--download-deno` 自助）。
@@ -175,3 +176,46 @@
 - **依据**：f2（2.4K★）支持用户主页/合集/点赞/收藏列表批量解析下载；TikTokDownload（8.4K★，已由 f2 接棒）。OmniGet 合集树已覆盖 playlist 场景，「主页全量 + 筛选下载」为增量。
 - **⚠ 合规印证**：f2 内置 msToken/ABogus 等签名算法并遭平台风控对抗——再次印证 backlog #11「不自研签名」决策正确；主页批量仅基于公开 flat-parse 接口。
 - **暂缓原因**：与 #18 订阅中心重叠度高（订阅=主页批量的自动化形态），先做 #18。
+
+### 25. 🟡 直播间 URL 直录入口（streamlink 范式，条件触发）
+- **依据**：streamlink（~11K★，活跃）以**平台插件**把直播间地址（B站/斗鱼/虎牙/抖音/Twitch/YouTube 等）解析为流清单/直链，LiveRecorder 等无人值守录制脚本生态均以其为底座。OmniGet #20 直播录制已走 N_m3u8DL-RE 路线，但入口仅限 `.m3u8/.mpd` 清单链接——用户手里通常是**直播间地址**（形如 `live.bilibili.com/xxx`），当前嗅探无分型，落 http 类型必然失败。
+- **待办**：
+  - [ ] 直播间 URL 分型（各平台直播间页 URL 规则表）→ 经 yt-dlp `-g`/平台公开 API 间接取流清单喂给 RE（零新依赖优先）
+  - [ ] streamlink 二进制兜底评估：Python 生态、单文件分发难，仅当间接取流路线对主流平台失效时再议
+- **触发条件**：#20 已有录制时长 MVP，等直播录制使用反馈后排期。
+
+### 26. 🟠 网盘/WebDAV 下载源（OpenList，AList 分叉）
+- **依据**：AList（~48K★）2025-06 易主争议后社区分叉 **OpenList**（40+ 网盘聚合——百度/阿里/夸克/OneDrive 等，WebDAV 与直链双出口，开源免费，社区已完成闭源 API 清查）。国内用户「网盘文件转直链/本地下载」需求真实，OmniGet 下载源目前完全无网盘能力；**不自研任何网盘协议**，只消费用户自托管 OpenList 的标准出口。
+- **待办**：
+  - [ ] WebDAV 任务类型：Basic/Digest 认证头（凭据安全存储，不入日志），分片下载走 aria2（`--header` 注入 Authorization）
+  - [ ] 设置页「网盘聚合（可选）」卡片：OpenList 端点配置 + 浏览目录 + 提交下载（与 #11 短视频 sidecar 同款交互范式）
+- **⚠ 安全口径**：沿用 #11 信任边界——用户显式配置的自托管地址放行 http、不做内网校验；凭据仅注入请求头，响应摘要不回显。
+- **优先级**：P1 候选（补齐能力矩阵「下载源」维度的最大空白）。
+
+### 27. 🟠 yt-dlp 元数据内嵌（--embed-metadata）
+- **依据**：yt-dlp 原生 `--embed-metadata`（含 `--embed-chapters` 合并进同参数），零外部依赖；`adapters/ytdlp.ts` 已有 `--embed-thumbnail`（M3-5），元数据/章节内嵌未接——下载的影视/合集缺章节与标签信息。
+- **待办**：
+  - [ ] 对话框视频选项「内嵌元数据与章节」开关，映射 `--embed-metadata --embed-chapters`，随任务参数持久化（resume 重放）。
+
+### 28. 🟡 工具箱轨道族补充（MKVToolNix 范式）
+- **依据**：MKVToolNix（V102，2026-09 仍活跃）差异化 = 轨道提取/轨道属性/章节/附件封装。盘点确认 OmniGet 工具箱 **LosslessCut 核心范式已覆盖**（无损剪切×2、拼接、多区域合并、去音轨，均 `-c copy`），剩余增量收敛为两项：
+- **待办**：
+  - [ ] 「轨道提取」：视频内音轨/字幕轨导出为独立文件（`ffmpeg -map 0:a:0/-map 0:s:0 -c copy`，零新依赖）
+  - [ ] 「外挂字幕封装」：视频 + srt/ass → mkv/mp4 封装（`-c copy`，流拷贝秒级）
+- **⏸ 不引入 mkvmerge 独立二进制**（~30MB 增量，ffmpeg 覆盖主场景；仅轨道属性批量编辑需求出现再议）。
+
+### 29. ⏸ beets / MusicBrainz 音乐刮削（暂缓）
+- **依据**：beets（MusicBrainz 自动匹配 + 元数据归整）。OmniGet 音乐五平台引擎自带标题/歌手/封面元数据，MusicBrainz 增益仅在 yt-dlp 音频下载场景；beets 为 Python 生态不内嵌。
+- **触发条件**：若立项「本地音乐库整理」专项再评估；过渡路线 = 工具箱单工具调 MusicBrainz 公开 API 补标签。
+
+### 30. ⏸ 字幕库自动匹配（subliminal / Bazarr 范式，暂缓）
+- **依据**：Bazarr（30+ 字幕提供商哈希匹配，NAS 生态标配，活跃）。下载器场景 yt-dlp 已抓站内字幕（M3-5）；BT 影视外挂字幕匹配有价值，但需独立服务/Python 运行时。
+- **触发条件**：需求反馈后先做「OpenSubtitles API 单工具」入工具箱（文件哈希匹配 + 字幕下载落盘），不引入 Bazarr 全家桶。
+
+### 31. ⏸ yt-dlp 外部插件目录（观察，倾向不做内置入口）
+- **依据**：yt-dlp 原生插件机制（`yt_dlp_plugins` 包 / `--use-plugins`，社区 extractor 长尾，EJS 本身即插件形态）。允许用户向引擎目录自放插件包可解锁长尾站点且免热更主引擎，但等同「用户自带任意代码执行」，与适配脚本声明式热更的合规形态边界冲突（同 §四「开放社区脚本不做」判定）。
+- **处置**：不做内置入口/管理 UI；高级用户自行放置插件目录属引擎目录既有查找面，无需产品支持。
+
+### 32. ⏸ rclone / slskd（不做）
+- **rclone**（70+ 云存储后端）：下载器场景 aria2 直链 + #26 WebDAV 已覆盖主诉求；二进制 ~50MB 违背包体预算（§3.3），不引入。
+- **slskd**（Soulseek P2P 音乐网络）：版权合规风险高，明确不做（同 §四 生成式 AI 的定位排除口径）。

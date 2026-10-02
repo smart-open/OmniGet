@@ -3,6 +3,27 @@
 > OmniGet 产品变更记录。版本号遵循 `0.x.y` 约定：**x（中间版本号）随功能里程碑递增**，y 为里程碑内的小修/加固版本。初始版本 0.1.0。
 > 格式参考 Keep a Changelog；日期为里程碑完成时间。里程碑与验收口径溯源至《OmniGet-产品技术设计文档》§10。
 
+## [0.7.0] - 2026-10-02
+
+### 新增（R7 续 + R4 续批次，Backlog #4/#8/#11/#16–#22）
+- HLS/DASH：**N_m3u8DL-RE 专用引擎**——`.m3u8/.m3u/.mpd` 清单链接嗅探分型（此前落 http 类型必产损坏文件）；适配器（`format=mp4` 混流、分片进度逐行解析、pause=SIGTERM 保留分片断点续下）、master 变体格式选择（清单解析纯函数 6 例单测）、engine 路由（RE 在位走 nm3u8，缺失回落 yt-dlp）；真机 E2E 68MB 通过
+- HLS/DASH：**直播录制 MVP**——media 清单无 `#EXT-X-ENDLIST` 判定直播流，对话框录制时长选择（30min/1h/2h/不限），`--live-real-time-merge --live-record-limit`（选项经 v0.6.0-beta `--help` 核实）
+- 订阅：**订阅追更中心**（频道/UP主/歌单自动入队）——DB 迁移 v2（subscriptions 表）、`yt-dlp -J --flat-playlist` 抓条目、档案差集防重复、10min tick 到期串行检查（单源上限 20 条）、设置页卡片 + IPC 四通道
+- 去重：**下载去重双档案**——自有档案（`sha1:<hex>`，URL 明文不落盘，创建期命中拒绝）+ yt-dlp 原生 `--download-archive`（合集条目级）；`download.dedupe` 默认开
+- 短视频：**自托管解析服务兜底**（快手/小红书补平台）——yt-dlp 解析失败且平台在 sidecar 覆盖面时自动改道自托管 Evil0ctal/Douyin_TikTok_Download_API 混合解析取直链（时效 URL 重启自动刷新、健康面板回写、合规边界：只消费公开 API 不内置签名）
+- 视频：SponsorBlock 集成（`--sponsorblock-mark all` 标记赞助/广告段为章节）；**yt-dlp 外部下载器 aria2c 可选加速**（`--downloader aria2c -x 8 -k 1M`，自带 aria2 零包体成本）
+- 视频：**yt-dlp JS 运行时探测**——2025-11 起 YouTube 下载需外部 JS 运行时（官方 issue #15012）；enginesDir（deno/node 与 yt-dlp 同目录）→ 系统 PATH 双查找面 + 30s TTL 缓存，健康页公示运行时状态；引擎清单增加 deno 按需下载位
+- 体验：**迷你悬浮窗**——托盘开关，236×58 不可缩放小窗（聚合速度 + 迷你曲线 + 运行/排队计数，整窗拖拽），复用主渲染层 `?view=mini` 分支
+- 预设：预设导出/导入（自描述 JSON 信封 + 同名去重合并）、命名模板纳入预设体系
+- 新建任务：BT 文件树虚拟化（`useVirtualizer` 窗口化渲染，默认全展开 + 折叠箭头，嵌套勾选行为不变）
+
+### 变更
+- `sanitizeFilename` 按平台差异化——Windows 维持全量清洗，POSIX 仅中和控制字符与 `/`（`aux.txt`、末尾空格/点、`\` 等合法文件名不再改写）
+- 引擎清单增加 `N_m3u8DL-RE`（发布侧直接放置解包后单文件 ~13MB）与 `deno`（kind=tool 不入 TOFU），均待 #3 release 资产
+
+### 测试
+- 回归单测 73 → 93（nm3u8-parse / video-extract / sanitize 平台差异化等）
+
 ## [0.6.0] - 2026-10-02
 
 ### 新增

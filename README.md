@@ -15,8 +15,10 @@
 
 **视频**
 - yt-dlp 全站提取：合集/播放列表勾选、格式选择器、字幕/封面嵌入、并发分片
-- 短视频三级去水印（源站直取 → 候补通道 → delogo 后处理副本）；分享短链/文案直贴自动展开
-- 视频参数预设（保存/应用）、转音频提取、下载前预览（封面/时长/体积）与多维筛选
+- **HLS/DASH 专用引擎**（N_m3u8DL-RE）：m3u8/mpd 清单链接嗅探分型、加密分段流、变体格式选择，RE 缺席自动回落 yt-dlp；**直播流录制**（录制时长可选）
+- 短视频三级去水印（源站直取 → 候补通道 → delogo 后处理副本）；分享短链/文案直贴自动展开；自托管解析服务兜底（快手/小红书补平台）
+- 订阅追更（频道/UP主/歌单定时自动入队）、下载去重双档案（重复任务创建期拒绝）、SponsorBlock 广告段章节标记、yt-dlp 外部下载器 aria2c 可选加速
+- 视频参数预设（保存/应用/导入导出/命名模板）、转音频提取、下载前预览（封面/时长/体积）与多维筛选
 
 **音乐**（五平台回退链：网易 → QQ → 酷狗 → 咪咕 → 汽水）
 - 原唱校验 + 原版度打分（拒绝翻唱/截断片段）、三档音质（逐行可选）、LRC 歌词落盘
@@ -26,7 +28,7 @@
 - 浏览器扩展（MV3：右键发送 + 可选自动拦截）、Web UI 本地面板（回环 + token）
 - 平台健康面板（提取器/音乐/短视频平台可用性公示）、适配脚本热更（声明式 host 重写，合规形态）
 - 本地工具箱：ffmpeg 19+ 工具（转换/裁剪/拼接/压缩/GIF/字幕/人声分离/校验和/种子创建等）
-- 七主题系统、虚拟滚动任务列表（10k+ 行）、Inspector 抽屉、快捷键全集、回收站、统计页、i18n（zh-CN/en）
+- 迷你悬浮窗、七主题系统、虚拟滚动任务列表（10k+ 行）、Inspector 抽屉、快捷键全集、回收站、统计页、i18n（zh-CN/en）
 
 > 版本历史见 [CHANGELOG.md](./CHANGELOG.md)；未完成项与待办见 [docs/backlog.md](./docs/backlog.md)。
 
@@ -59,7 +61,7 @@ sidecar 引擎按 **`resources/engines/<platform>-<arch>/`** 目录分发，与�
 
 | 平台 | 目录 | 说明 |
 |---|---|---|
-| Windows x64 | `win32-x64` | aria2c.exe / yt-dlp.exe / ffmpeg.exe（音乐引擎已内嵌主进程，无 sidecar 服务） |
+| Windows x64 | `win32-x64` | aria2c.exe / yt-dlp.exe / ffmpeg.exe（音乐引擎已内嵌主进程，无 sidecar 服务；N_m3u8DL-RE / deno 为按需下载位，可缺失回落/补齐） |
 | macOS arm64 | `darwin-arm64` | 无后缀 |
 | macOS x64 | `darwin-x64` | 无后缀 |
 | Linux x64 | `linux-x64` | 无后缀 |
@@ -88,12 +90,12 @@ $env:ELECTRON_MIRROR='https://npmmirror.com/mirrors/electron/'; node node_module
 
 ## 项目状态
 
-T0 工程基建 → M1 BT/磁力/HTTP → M2 音乐 → M3 视频 → M4 打磨发布 已全部收口；产品化阶段（浏览器扩展 / 任务队列 / 批量抓取 / 预设 / Web UI / 引擎按需下载）与下载引擎优化（UPnP 端口映射 / 元数据缓存 / 多源聚合 / 短链展开）已落地。里程碑明细见 [CHANGELOG.md](./CHANGELOG.md)，未完成项见 [docs/backlog.md](./docs/backlog.md)。
+T0 工程基建 → M1 BT/磁力/HTTP → M2 音乐 → M3 视频 → M4 打磨发布 已全部收口；产品化阶段（浏览器扩展 / 任务队列 / 批量抓取 / 预设 / Web UI / 引擎按需下载）、下载引擎优化（UPnP 端口映射 / 元数据缓存 / 多源聚合 / 短链展开）与 0.7.0 批次（HLS/DASH 引擎 / 直播录制 / 订阅追更 / 下载去重 / 短视频解析兜底 / 迷你悬浮窗）已落地。里程碑明细见 [CHANGELOG.md](./CHANGELOG.md)，未完成项见 [docs/backlog.md](./docs/backlog.md)。
 
 ## 验证
 
 ```bash
-npm test                                    # 73 个单测（状态机/torrent/嗅探/事件合并/短链/元数据缓存等；以 npm test 实际输出为准）
+npm test                                    # 93 个单测（状态机/torrent/嗅探/事件合并/nm3u8-parse/video-extract/sanitize 等；以 npm test 实际输出为准）
 npx tsx --tsconfig tsconfig.node.json scripts/e2e-aria2.ts   # aria2 端到端（真实 sidecar）
 ```
 
