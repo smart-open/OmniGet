@@ -45,6 +45,30 @@ import { sniff, launchDedupe as sharedDedupe } from './sniffer'
 
 const log = createLogger('main')
 
+// ── 协议唤起入口（second-instance argv / macOS open-url 共用）──────────
+// macOS 上协议 URL（含冷启动）经 open-url 事件投递，不走 second-instance argv；
+// open-url 可能先于 app ready 触发——先入队，窗口就绪后在 bootstrap 内补派发
+const pendingLaunchUrls: string[] = []
+
+function handleLaunchUrl(url: string): void {
+  if (!/^magnet:\?/i.test(url) && !/^https?:\/\//i.test(url)) return
+  if (!app.isReady()) {
+    pendingLaunchUrls.push(url)
+    return
+  }
+  const win = getMainWindow()
+  if (!win) {
+    pendingLaunchUrls.push(url)
+    return
+  }
+  if (win.isMinimized()) win.restore()
+  win.show()
+  win.focus()
+  if (sniff(url) && sharedDedupe.check(url)) {
+    win.webContents.send('ui:action', { action: 'new-task', payload: url })
+  }
+}
+
 // 特权 scheme 注册必须在 app ready 之前（omniget-preview: 试听流，F1）
 registerPreviewScheme()
 
@@ -53,6 +77,42 @@ const gotLock = app.requestSingleInstanceLock()
 if (!gotLock) {
   app.quit()
 } else {
+  // ── GPU 硬件加速禁用开关（跨平台加固 P3）────────────────────────────
+  // Linux（Wayland + NVIDIA）与部分老 GPU 上 Electron 硬件加速崩溃/白屏是常见报障源，
+  // 提供 ui.disableGpu 设置项（设置 → 外观 → 兼容模式）+ OMNIGET_DISABLE_GPU=1 环境变量；
+  // appendSwitch 必须先于 ready（模块加载同步执行，时序满足）。放在锁判定之后：
+  // 竞争失败的实例不打开 DB/不做迁移写探测（此前置于锁前，输家实例会与主实例
+  // 产生 DB 迁移/写库竞态）。设置读取失败（DB 未就绪等）保持默认开启 GPU。
+  try {
+    const disableGpu =
+      process.env.OMNIGET_DISABLE_GPU === '1' ||
+      getSettingParsed<boolean>('ui.disableGpu') === true
+    if (disableGpu) {
+      app.commandLine.appendSwitch('disable-gpu')
+      log.info('GPU acceleration disabled (ui.disableGpu)')
+    }
+  } catch (err) {
+    log.warn('ui.disableGpu 读取失败，保持默认硬件加速', { error: String(err) })
+  }
+
+  // GPU 进程崩溃兜底（跨平台加固 P3）：用户可见提示 + 给出兼容模式出口（一次性）。
+  // 注册于模块加载期——ready 后 GPU 立即崩溃（白屏高发窗口）也可捕获
+  let gpuCrashNotified = false
+  app.on('child-process-gone', (_e, details) => {
+    if (details.type !== 'GPU' || details.reason !== 'crashed' || gpuCrashNotified) return
+    gpuCrashNotified = true
+    log.error('GPU process crashed', details)
+    void import('./ipc').then(({ broadcastNotices }) =>
+      broadcastNotices([
+        {
+          level: 'warning',
+          message:
+            'GPU 进程异常退出，界面可能出现白屏/闪烁。可在 设置 → 外观 → 兼容模式 勾选「禁用 GPU 硬件加速」后重启应用'
+        }
+      ])
+    )
+  })
+
   const launchDedupe = sharedDedupe // R4-P3：三入口共用去重窗口
   app.on('second-instance', (_e, argv) => {
     // magnet: 协议唤起：从 argv 提取链接并转发到窗口（§4.6；30s 去重防止重复唤起开重复任务）
@@ -67,6 +127,12 @@ if (!gotLock) {
         win.webContents.send('ui:action', { action: 'new-task', payload: source })
       }
     }
+  })
+
+  // macOS：magnet: 协议唤起（second-instance argv 在 mac 上不携带协议 URL）
+  app.on('open-url', (e, url) => {
+    e.preventDefault()
+    handleLaunchUrl(url)
   })
 
   // P1 加固：bootstrap 内任一环节（DB 打开/迁移、端口分配等）抛错都不允许变成
@@ -145,6 +211,9 @@ async function bootstrap(): Promise<void> {
   registerPreviewHandler() // omniget-preview: 试听流协议（F1，主进程内引擎）
   createWindow() // IPC/协议全部就绪后再创建窗口（渲染层 invoke 不再撞上未注册通道）
 
+  // macOS open-url 冷启动：URL 先于 ready 到达，窗口就绪后补派发
+  for (const url of pendingLaunchUrls.splice(0)) handleLaunchUrl(url)
+
   // L5 修复：旧数据迁移失败必须让用户可见（此前只有 console 留痕，用户视角是历史数据消失）
   const { legacyMigrationErrors } = await import('./env')
   if (legacyMigrationErrors.length > 0) {
@@ -171,7 +240,10 @@ async function bootstrap(): Promise<void> {
     {
     onOnline: (port) => {
       log.info(`aria2 online at ${port}`)
-      void manager.recoverEngineTasks()
+      // 审查修复（P1-2）：aria2 中途崩溃重启后旧 gid 全部失效，running/verifying
+      // 任务每秒 tellStatus 报错被吞、永久卡死无出口——上线时先按 aria2 侧任务
+      // 重置回 queued 再泵恢复（首启时无 running 行，幂等）
+      void manager.recoverAria2Restart().then(() => manager.recoverEngineTasks())
       manager.broadcastHealth(true)
       // R4-P2：重启路径 changeGlobalOption 会重置全局限速——重放当前时段档位
       invalidateSchedule()

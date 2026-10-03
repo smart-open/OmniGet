@@ -25,39 +25,95 @@ function binaryName(name: SidecarBinary): string {
   return process.platform === 'win32' ? `${file}.exe` : file
 }
 
-export function enginesDir(): string {
-  // dev: resources/engines/<platform>；prod: extraResources 解包后的 engines/
-  const platform = `${process.platform}-${process.arch}`
-  if (process.env.OMNIGET_ENGINES_DIR) return process.env.OMNIGET_ENGINES_DIR
-  // 1) dev/test：appRoot 下的目录存在则优先（Electron-as-Node 也有 resourcesPath，需排除）
-  const devDir = join(appRoot(), 'resources', 'engines', platform)
+function existsSyncSafe(p: string): boolean {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { existsSync } = require('fs') as typeof import('fs')
+  return existsSync(p)
+}
+
+function writableDir(dir: string): boolean {
+  // 写入探测（仿 env.ts 口径）：Windows 上 access(W_OK) 基本只查只读属性不看 ACL，
+  // Program Files 等全机安装目录会被误判可写，mkdir/rename 阶段才 EPERM
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { existsSync } = require('fs') as typeof import('fs')
-    if (existsSync(devDir)) return devDir
+    const { existsSync, writeFileSync, rmSync } = require('fs') as typeof import('fs')
+    if (!existsSync(dir)) return false
+    const probe = join(dir, '.omniget-write-probe')
+    writeFileSync(probe, '')
+    try {
+      rmSync(probe, { force: true })
+    } catch {
+      // 残留探测文件无害，忽略
+    }
+    return true
   } catch {
-    // ignore
+    return false
   }
+}
+
+let cachedEnginesDirs: string[] | null = null
+
+/**
+ * 引擎目录候选链（查找顺序 = 优先级）：
+ * 1. OMNIGET_ENGINES_DIR 显式注入（测试/高级用户，不缓存——单测多用例各自注入）
+ * 2. dev：appRoot/resources/engines/<platform>-<arch>
+ * 3. 打包态且打包目录可写（Windows per-user NSIS 安装到 %LOCALAPPDATA%）：resourcesPath/engines
+ * 4. 打包态但打包目录只读（macOS /Applications、Linux AppImage squashfs、deb /opt）：
+ *    <userData>/engines 优先（引擎按需补齐/yt-dlp 热更的唯一可写落点），bundled 目录次之
+ *    （预装引擎只读执行兜底）
+ */
+export function enginesDirs(): string[] {
+  if (process.env.OMNIGET_ENGINES_DIR) return [process.env.OMNIGET_ENGINES_DIR]
+  if (cachedEnginesDirs) return cachedEnginesDirs
+  const platform = `${process.platform}-${process.arch}`
+  // 1) dev/test：appRoot 下的目录存在则优先（Electron-as-Node 也有 resourcesPath，需排除）
+  const devDir = join(appRoot(), 'resources', 'engines', platform)
+  if (existsSyncSafe(devDir)) return (cachedEnginesDirs = [devDir])
   // 2) 打包态：process.resourcesPath 由 electron-builder 注入
   const resourcesPath = (process as unknown as { resourcesPath?: string }).resourcesPath
-  if (resourcesPath) return join(resourcesPath, 'engines')
-  return devDir
+  if (resourcesPath) {
+    const bundled = join(resourcesPath, 'engines')
+    if (writableDir(bundled)) return (cachedEnginesDirs = [bundled])
+    return (cachedEnginesDirs = [join(userDataDir(), 'engines'), bundled])
+  }
+  return (cachedEnginesDirs = [devDir])
+}
+
+/** 引擎写入目标目录（候选链首选 = 保证可写）：引擎按需下载 / 热更器的 mkdir+rename 落点 */
+export function enginesDir(): string {
+  return enginesDirs()[0] ?? ''
+}
+
+function resolveEngineFile(file: string): string {
+  // 多目录解析：userData（热更/按需安装的新版本）优先于只读 bundled 目录；
+  // 全部缺失时回退首选目录——缺失报错路径口径与旧行为一致
+  const dirs = enginesDirs()
+  const first = dirs[0] ?? ''
+  for (const dir of dirs) {
+    const p = join(dir, file)
+    if (existsSyncSafe(p)) return p
+  }
+  return join(first, file)
 }
 
 export function binaryPath(name: SidecarBinary): string {
-  return join(enginesDir(), binaryName(name))
+  return resolveEngineFile(binaryName(name))
 }
 
 /** 轻量在位检查（不走 TOFU/执行位校验）：引擎路由决策用（backlog #17） */
 export function isBinaryPresent(name: SidecarBinary): boolean {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { existsSync } = require('fs') as typeof import('fs')
-  return existsSync(binaryPath(name))
+  return existsSyncSafe(binaryPath(name))
 }
 
 /** 引擎目录内工具二进制的跨平台路径（ffmpeg/ffprobe 等，复用 binaryName 平台逻辑，防止手写漂移） */
 export function toolPath(name: string): string {
-  return join(enginesDir(), process.platform === 'win32' ? `${name}.exe` : name)
+  return resolveEngineFile(process.platform === 'win32' ? `${name}.exe` : name)
+}
+
+/** 热更器写入目标：必须落在首选可写目录——resolved 路径可能位于只读打包目录，
+ * 对其 unlink/rename 会 EROFS/EACCES（跨平台审查 P0-2） */
+export function writableBinaryPath(name: SidecarBinary): string {
+  return join(enginesDir(), binaryName(name))
 }
 
 function fingerprintsFile(): string {

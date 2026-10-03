@@ -10,6 +10,7 @@ import { extname, isAbsolute } from 'path'
 import { Readable } from 'stream'
 import { createLogger } from '../logger'
 import { getSettingParsed } from '../db'
+import { SYSTEM_DIRS, credentialDirs, hitsAny, homeDir, persistenceDirs } from '../sensitive-paths'
 import { getMusicEngine } from './engine'
 import { openStream } from './http'
 
@@ -62,29 +63,11 @@ export function registerPreviewScheme(): void {
  * M8 修复：盘符泛化（不再硬编码 c:）、拒绝 UNC/网络路径、userData 白名单豁免
  * （此前 AppData/Roaming 整目录被禁导致应用自身产物反而无法预览） */
 function isSensitivePath(p: string): boolean {
+  // 黑名单统一来自 ../sensitive-paths（跨平台审查：条目小写 + /private 归一 + 自启动目录）
   const norm = p.replace(/\\/g, '/').toLowerCase()
   // UNC / 网络路径（\\server\share）一律拒绝
   if (/^\/\//.test(norm)) return true
-  const profile = (process.env.USERPROFILE ?? process.env.HOME ?? '').replace(/\\/g, '/')
-  const blocked: string[] = [
-    // Windows 系统目录：任意盘符泛化（x:/windows、x:/program files*）
-    '/windows',
-    '/program files',
-    '/program files (x86)',
-    '/programdata',
-    '/usr', '/etc', '/bin', '/sbin', '/boot', '/proc', '/sys', '/dev',
-    profile ? `${profile}/.ssh` : '',
-    profile ? `${profile}/.gnupg` : '',
-    profile ? `${profile}/.aws` : '',
-    profile ? `${profile}/.kube` : '',
-    profile ? `${profile}/Library/Keychains` : ''
-  ].filter(Boolean)
-  if (blocked.some((d) => norm === d || norm.startsWith(`${d}/`))) return true
-  // Windows 盘符前缀剥离后再比对（c:/windows → /windows）
-  const stripped = norm.replace(/^\/[a-z]:/, '')
-  if (stripped !== norm && blocked.some((d) => stripped === d || stripped.startsWith(`${d}/`))) {
-    return true
-  }
+  if (hitsAny(norm, [...SYSTEM_DIRS, ...credentialDirs(), ...persistenceDirs()])) return true
   // 豁免：应用自身数据目录下的媒体产物（工具箱输出等）——须位于敏感目录检查之后
   try {
     const userData = app.getPath('userData').replace(/\\/g, '/').toLowerCase().replace(/\/+$/, '')
@@ -93,11 +76,9 @@ function isSensitivePath(p: string): boolean {
     // app 未就绪（单测环境）——按原口径继续
   }
   // AppData/Roaming 与 AppData/Local/Temp 仍禁（userData 豁免优先）
-  const roamBlock = [
-    profile ? `${profile}/appdata/roaming` : '',
-    profile ? `${profile}/appdata/local/temp` : ''
-  ].filter(Boolean)
-  return roamBlock.some((d) => norm === d || norm.startsWith(`${d}/`))
+  const home = homeDir()
+  const roamBlock = home ? [`${home}/appdata/roaming`, `${home}/appdata/local/temp`] : []
+  return hitsAny(norm, roamBlock)
 }
 
 /** M4：纯文本产物允许的目录白名单（userData / 系统下载 / 用户配置下载目录） */

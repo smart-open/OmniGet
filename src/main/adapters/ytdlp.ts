@@ -9,12 +9,11 @@ import { dirname, join } from 'path'
 import { existsSync } from 'fs'
 import { sanitizeFilename } from '@shared/sanitize'
 import { getSettingParsed } from '../db'
-import { binaryPath } from '../orchestrator/binaries'
+import { binaryPath, ensureVerified } from '../orchestrator/binaries'
 import { ytdlpArchiveFile } from '../task/archive'
 import { readTaskPlatform } from '../task/params'
 import { createLogger } from '../logger'
 import { getYtDlpSupervisor } from '../orchestrator/ytdlp'
-import { ensureVerified } from '../orchestrator/binaries'
 import type { EngineHealthInfo, ParseOutput } from './types'
 
 const log = createLogger('ytdlp-adapter')
@@ -232,8 +231,10 @@ export class YtDlpAdapter {
     )
     args.push('--concurrent-fragments', String(Math.min(64, Math.max(1, task.threads || 16))))
     if (this.ffmpegOk) {
-      const { enginesDir } = await import('../orchestrator/binaries')
-      args.push('--ffmpeg-location', enginesDir())
+      // 跨平台审查 P0-2：enginesDir() 在 mac/Linux 打包态可能回退到 userData/engines（空目录），
+      // 而 ffmpeg 预装在只读 bundle 内——改传解析后的实际二进制路径（yt-dlp 支持传文件路径）
+      const { toolPath } = await import('../orchestrator/binaries')
+      args.push('--ffmpeg-location', toolPath('ffmpeg'))
     }
     // R7 P1 分站 cookie：平台专属文件（cookieFile 同目录 <platform>.txt）优先于全局。
     // 审查修复：platformByTask 是内存态，重启恢复的暂停任务直接 start 时映射为空 →
@@ -423,16 +424,23 @@ export class YtDlpAdapter {
     this.cleanupTaskState(task.id)
   }
 
-  /** 终态（completed/failed）清理：防长期运行 Map 只增不减（paused 保留参数供 resume） */
+  /** 终态（completed/failed）清理：防长期运行 Map 只增不减（paused 保留参数供 resume）。
+   * 审查修复（P2-3）：outputFiles 不在此清理——completed 事件经 250ms 合并窗口后
+   * manager.persistCliProduct 才读取（提前删除 = M9 精确追踪死代码），改由 manager
+   * 同步捕获后调 dropOutputFiles 注销 */
   private cleanupTaskState(taskId: string, keepPauseMark = false): void {
     this.argsByTask.delete(taskId)
     this.videoOpts.delete(taskId)
     this.shortVideo.delete(taskId)
     this.platformByTask.delete(taskId)
     if (!keepPauseMark) this.userPaused.delete(taskId)
-    this.outputFiles.delete(taskId)
     this.running.delete(taskId) // P3：remove 路径进程可能已死、onExit 不会再触发，防 Set 残留
     this.supervisor.dropTask(taskId)
+  }
+
+  /** manager 侧产物捕获完成后的注销（防 outputFiles Map 无界增长） */
+  dropOutputFiles(taskId: string): void {
+    this.outputFiles.delete(taskId)
   }
 
   /** M3-7 L3：对本任务产物视频做 delogo（右上角 15%×8%），产出 _nowm 副本 */

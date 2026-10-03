@@ -1,7 +1,10 @@
 // sidecar 收集脚本（遗留问题清单 #1）：下载官方预编译 aria2c / yt-dlp / ffmpeg
 // 到 resources/engines/<platform>-<arch>/，供本地打包或 CI 三平台 runner 调用。
 //
-// 用法：node scripts/fetch-sidecars.mjs [--force]
+// 用法：node scripts/fetch-sidecars.mjs [--force] [--target <platform-arch>]
+//   --target：交叉收集（CI mac job 需为 x64 dmg 单独出包 darwin-x64 sidecar）
+//   落盘文件名与运行时 binaryName() 口径一致：win32 → *.exe，其余平台裸名
+//   （yt-dlp 一律落为 yt-dlp / yt-dlp.exe，发布资产名仅用于下载定位）
 //   win:    yt-dlp.exe（yt-dlp 官方）+ aria2c（q3aql/aria2-static-build）+ ffmpeg（BtbN/FFmpeg-Builds）
 //   linux:  同源静态构建
 //   darwin-arm64: yt-dlp_macos + aria2（q3aql）+ ffmpeg（BtbN macos-arm64 构建）
@@ -16,9 +19,25 @@ import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 
 const FORCE = process.argv.includes('--force')
+// --target <platform-arch>：交叉收集（覆盖 host 平台判断；平台串按首段拆分，如 darwin-x64）
+const TARGET_ARG = (() => {
+  const i = process.argv.indexOf('--target')
+  const v = i >= 0 ? process.argv[i + 1] : null
+  return v && /^[a-z0-9]+-[a-z0-9_]+$/.test(v) ? v : null
+})()
+const plat = TARGET_ARG ? TARGET_ARG.split('-')[0] : process.platform
+const arch = TARGET_ARG ? TARGET_ARG.split('-').slice(1).join('-') : process.arch
 const ROOT = join(import.meta.dirname, '..')
-const platform = `${process.platform}-${process.arch}`
-const OUT = process.env.OMNIGET_ENGINES_DIR ?? join(ROOT, 'resources', 'engines', platform)
+const platform = TARGET_ARG ?? `${process.platform}-${process.arch}`
+// OUT 口径：env 单独使用 = 精确目录（运行时注入语义不变）；--target 与 env 同时给定时
+// 追加平台子目录——否则交叉收集产物会静默落错目录，need() 还会因已有产物跳过下载，
+// 留下「架构错但门禁绿灯」的脚部枪
+const OUT =
+  process.env.OMNIGET_ENGINES_DIR
+    ? TARGET_ARG
+      ? join(process.env.OMNIGET_ENGINES_DIR, platform)
+      : process.env.OMNIGET_ENGINES_DIR
+    : join(ROOT, 'resources', 'engines', platform)
 
 const GH = 'https://api.github.com'
 
@@ -40,7 +59,7 @@ function download(url, dest) {
 function unzip(zip, toDir) {
   // P3 修复：Windows 10+ 自带 bsdtar（可解 zip），避免 PowerShell Expand-Archive
   // 单引号插值在路径含引号字符时炸掉的问题；类 Unix 用 unzip -o
-  if (process.platform === 'win32') {
+  if (plat === 'win32') {
     const r = spawnSync('tar', ['-xf', zip, '-C', toDir], { timeout: 300_000 })
     if (r.status !== 0) throw new Error(`unzip failed: ${zip}`)
   } else {
@@ -70,7 +89,7 @@ function findFile(dir, re) {
 async function place(src, name) {
   const dest = join(OUT, name)
   await rename(src, dest)
-  if (process.platform !== 'win32') await chmod(dest, 0o755).catch(() => {})
+  if (plat !== 'win32') await chmod(dest, 0o755).catch(() => {})
   console.log(`  ✓ ${name}`)
 }
 
@@ -83,29 +102,43 @@ async function need(name) {
 }
 
 async function fetchYtDlp() {
-  const exe = process.platform === 'win32' ? 'yt-dlp.exe' : process.platform === 'darwin' ? 'yt-dlp_macos' : 'yt-dlp_linux'
+  // 发布资产名（下载定位）与落盘名（运行时 binaryName 口径）分离——
+  // 此前按资产名落盘（yt-dlp_macos/yt-dlp_linux），运行时按 yt-dlp 查找必然缺失（跨平台审查 P0-1）
+  const assetName =
+    plat === 'win32'
+      ? 'yt-dlp.exe'
+      : plat === 'darwin'
+        ? 'yt-dlp_macos'
+        : arch === 'arm64'
+          ? 'yt-dlp_linux_arm64'
+          : arch === 'arm'
+            ? 'yt-dlp_linux_armv7l'
+            : arch === 'ia32'
+              ? 'yt-dlp_linux32'
+              : 'yt-dlp_linux'
+  const exe = plat === 'win32' ? 'yt-dlp.exe' : 'yt-dlp'
   if (!(await need(exe))) return
   const rel = ghLatest('yt-dlp/yt-dlp')
-  const asset = rel.assets?.find((a) => a.name === exe)
-  if (!asset) throw new Error(`yt-dlp release ${rel.tag_name} 缺少资产 ${exe}`)
+  const asset = rel.assets?.find((a) => a.name === assetName)
+  if (!asset) throw new Error(`yt-dlp release ${rel.tag_name} 缺少资产 ${assetName}`)
   console.log(`yt-dlp ${rel.tag_name} …`)
-  const tmp = join(tmpdir(), exe)
+  const tmp = join(tmpdir(), assetName)
   await unlink(tmp).catch(() => {})
   download(asset.browser_download_url, tmp)
   await place(tmp, exe)
 }
 
 async function fetchAria2() {
-  const bin = process.platform === 'win32' ? 'aria2c.exe' : 'aria2c'
+  const bin = plat === 'win32' ? 'aria2c.exe' : 'aria2c'
   if (!(await need(bin))) return
   console.log('aria2 (q3aql/aria2-static-build) …')
   const rel = ghLatest('q3aql/aria2-static-build')
   const pat =
-    process.platform === 'win32'
+    plat === 'win32'
       ? /win.*64bit.*\.zip$/i
-      : process.platform === 'darwin'
+      : plat === 'darwin'
         ? /macos-darwin.*\.tar\.bz2$/i
-        : process.arch === 'arm64'
+        : arch === 'arm64'
           ? /linux-glibc.*arm64.*\.tar\.bz2$/i
           : /linux-glibc.*x86_64.*\.tar\.bz2$/i
   const asset = rel.assets?.find((a) => pat.test(a.name))
@@ -117,7 +150,7 @@ async function fetchAria2() {
   await mkdir(ex, { recursive: true })
   if (asset.name.endsWith('.zip')) unzip(tmp, ex)
   else untar(tmp, ex)
-  const found = findFile(ex, process.platform === 'win32' ? /^aria2c\.exe$/i : /^aria2c$/)
+  const found = findFile(ex, plat === 'win32' ? /^aria2c\.exe$/i : /^aria2c$/)
   if (!found) throw new Error('解包后未找到 aria2c')
   await place(found, bin)
 }
@@ -149,15 +182,15 @@ async function fetchFfmpegDarwinX64() {
 }
 
 async function fetchFfmpeg() {
-  const exe = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'
-  if (process.platform === 'darwin' && process.arch === 'x64') return fetchFfmpegDarwinX64()
+  const exe = plat === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'
+  if (plat === 'darwin' && arch === 'x64') return fetchFfmpegDarwinX64()
   if (!(await need(exe))) return
   console.log('ffmpeg (BtbN/FFmpeg-Builds) …')
   const rel = ghLatest('BtbN/FFmpeg-Builds/releases/latest')
   const suffix =
-    process.platform === 'win32'
+    plat === 'win32'
       ? /win64-gpl-shared.*\.zip$/i
-      : process.platform === 'darwin'
+      : plat === 'darwin'
         ? /macos-arm64-gpl-shared.*\.zip$/i
         : /linux64-gpl-shared.*\.tar\.xz$/i
   const asset = rel.assets?.find((a) => suffix.test(a.name))
@@ -173,10 +206,10 @@ async function fetchFfmpeg() {
     if (r.status !== 0) throw new Error('untar ffmpeg failed')
   }
   for (const tool of ['ffmpeg', 'ffprobe']) {
-    const pat = process.platform === 'win32' ? new RegExp(`^${tool}\\.exe$`, 'i') : new RegExp(`^${tool}$`)
+    const pat = plat === 'win32' ? new RegExp(`^${tool}\\.exe$`, 'i') : new RegExp(`^${tool}$`)
     const found = findFile(ex, pat)
     if (!found) throw new Error(`解包后未找到 ${tool}`)
-    await place(found, process.platform === 'win32' ? `${tool}.exe` : tool)
+    await place(found, plat === 'win32' ? `${tool}.exe` : tool)
   }
 }
 

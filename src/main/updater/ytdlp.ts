@@ -2,9 +2,8 @@
 // GitHub Releases 拉取最新 yt-dlp.exe + SHA2-256SUMS 校验 → TOFU 指纹登记 → 原子替换
 // 失败回滚：替换前备份旧文件，校验失败自动还原。
 
-import { app } from 'electron'
-import { createWriteStream } from 'fs'
-import { checksumFile, recordFingerprint, binaryPath, enginesDir } from '../orchestrator/binaries'
+import { createWriteStream, existsSync } from 'fs'
+import { checksumFile, recordFingerprint, writableBinaryPath, enginesDir } from '../orchestrator/binaries'
 import { rename, unlink, copyFile, mkdir, chmod } from 'fs/promises'
 import { createHash } from 'crypto'
 import { getSettingParsed, setSetting } from '../db'
@@ -35,7 +34,6 @@ async function downloadTo(url: string, dest: string): Promise<void> {
   // P2 加固：网络停滞时永久挂起会让"更新中"卡死——下载整体限时（引擎包 ~15MB 量级，5min 足够慢速网络）
   const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(300_000) })
   if (!res.ok || !res.body) throw new Error(`下载失败（HTTP ${res.status}），请稍后重试更新`)
-  const fs = await import('fs')
   // 引擎目录可能尚未创建（首次热更/全新安装），否则 createWriteStream 异步 open 失败会被吞掉
   await mkdir(enginesDir(), { recursive: true })
   const tmp = `${dest}.tmp`
@@ -65,7 +63,6 @@ async function downloadTo(url: string, dest: string): Promise<void> {
     file.close(() => resolve())
     file.on('error', reject)
   })
-  void fs
   await rename(tmp, dest)
 }
 
@@ -84,7 +81,9 @@ export async function updateYtDlp(): Promise<UpdateResult> {
 let ytdlpUpdateChain: Promise<unknown> = Promise.resolve()
 
 async function runUpdateYtDlp(): Promise<UpdateResult> {
-  const target = binaryPath('ytdlp')
+  // 跨平台审查 P0-2：写入目标必须是首选可写目录——mac/Linux 打包态 binaryPath 解析
+  // 到只读 bundle 内的旧版本时，对其 unlink/rename 会 EROFS/EACCES，热更永远失败
+  const target = writableBinaryPath('ytdlp')
   const backup = `${target}.bak`
   const tmpExe = `${target}.new`
   const tmpSums = `${target}.sums`
@@ -104,11 +103,16 @@ async function runUpdateYtDlp(): Promise<UpdateResult> {
     const sums = release.assets.find((a) => a.name === SUMS_ASSET)
     if (!exe || !sums) throw new Error('最新发布中缺少 yt-dlp 资产，请稍后重试')
 
-    // R4-P3：同版本跳过——此前同一版本也全量替换（无谓流量 + 替换风险）
+    // R4-P3：同版本跳过——此前同一版本也全量替换（无谓流量 + 替换风险）。
+    // 回归审查 #6：tag 相同但写入目标二进制缺失时不得跳过（userData/engines 被清理
+    // 而 bundled 是旧版 → 会误报「已是最新」但实际运行旧二进制；换架构安装同理）
     const appliedTag = getSettingParsed<string>('engines.ytdlpTag')
-    if (appliedTag && appliedTag === release.tag_name) {
+    if (appliedTag && appliedTag === release.tag_name && existsSync(target)) {
       log.info(`yt-dlp already at ${release.tag_name}, skip`)
       return { ok: true, version: release.tag_name }
+    }
+    if (appliedTag === release.tag_name && !existsSync(target)) {
+      log.warn(`yt-dlp tag ${release.tag_name} 已登记但二进制缺失，重新下载补齐`)
     }
 
     // 2. 下载新二进制与校验和
@@ -168,6 +172,5 @@ async function runUpdateYtDlp(): Promise<UpdateResult> {
   } finally {
     // 清理备份（成功/失败后都由指纹机制保障，保留会造成混乱）
     await unlink(`${target}.bak`).catch(() => {})
-    void app
   }
 }

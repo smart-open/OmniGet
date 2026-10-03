@@ -94,8 +94,21 @@ function buildTrayMenu(): Electron.Menu {
   const s = speedProvider()
   const clipboardWatch = getSetting('ui.clipboardWatch') !== 'false'
   const loginItem = app.getLoginItemSettings?.().openAtLogin ?? false
-
-  return Menu.buildFromTemplate([
+  // 跨平台兼容（P2）：Linux AppIndicator 扩展无 click 事件（托盘左键失效），
+  // 菜单是唯一交互面——「显示主界面」提升为首项，速度/任务统计作为禁用行跟随其后
+  const linux = process.platform === 'linux'
+  const showMainItem: Electron.MenuItemConstructorOptions = {
+    label: '显示主界面',
+    click: () => {
+      const win = getMainWindow()
+      if (win) {
+        if (win.isMinimized()) win.restore()
+        win.show()
+        win.focus()
+      }
+    }
+  }
+  const infoItems: Electron.MenuItemConstructorOptions[] = [
     {
       label: `↓ ${fmtSpeed(s.down)}   ↑ ${fmtSpeed(s.up)}`,
       enabled: false
@@ -103,19 +116,13 @@ function buildTrayMenu(): Electron.Menu {
     {
       label: `运行 ${s.running} · 排队 ${s.queued}`,
       enabled: false
-    },
-    { type: 'separator' },
-    {
-      label: '显示主界面',
-      click: () => {
-        const win = getMainWindow()
-        if (win) {
-          if (win.isMinimized()) win.restore()
-          win.show()
-          win.focus()
-        }
-      }
-    },
+    }
+  ]
+
+  return Menu.buildFromTemplate([
+    ...(linux
+      ? [showMainItem, { type: 'separator' as const }, ...infoItems, { type: 'separator' as const }]
+      : [...infoItems, { type: 'separator' as const }, showMainItem]),
     {
       label: '新建任务…',
       click: () => {

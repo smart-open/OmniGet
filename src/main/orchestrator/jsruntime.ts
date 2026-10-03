@@ -12,7 +12,7 @@
 
 import { existsSync } from 'fs'
 import { delimiter, join } from 'path'
-import { enginesDir } from './binaries'
+import { enginesDirs } from './binaries'
 
 export interface JsRuntime {
   name: 'deno' | 'node'
@@ -35,10 +35,12 @@ export function findJsRuntime(): JsRuntime | null {
 }
 
 function detect(): JsRuntime | null {
-  const dir = enginesDir()
-  for (const name of ['deno', 'node'] as const) {
-    const p = join(dir, EXE(name))
-    if (existsSync(p)) return { name, path: p, source: 'engines' }
+  // 跨平台审查 P0-2：mac/Linux 打包态引擎目录可能两级（userData 可写 + 只读 bundle），逐级扫描
+  for (const dir of enginesDirs()) {
+    for (const name of ['deno', 'node'] as const) {
+      const p = join(dir, EXE(name))
+      if (existsSync(p)) return { name, path: p, source: 'engines' }
+    }
   }
   const dirs = (process.env.PATH ?? '').split(delimiter).filter(Boolean)
   for (const name of ['deno', 'node'] as const) {
@@ -50,11 +52,11 @@ function detect(): JsRuntime | null {
   return null
 }
 
-/** yt-dlp 子进程环境：enginesDir 前置进 PATH（同目录约定 + PATH 双查找面） */
+/** yt-dlp 子进程环境：引擎目录候选链前置进 PATH（同目录约定 + PATH 双查找面） */
 export function childEnvWithEngines(): NodeJS.ProcessEnv {
   return {
     ...process.env,
-    PATH: `${enginesDir()}${delimiter}${process.env.PATH ?? ''}`
+    PATH: `${enginesDirs().join(delimiter)}${delimiter}${process.env.PATH ?? ''}`
   }
 }
 

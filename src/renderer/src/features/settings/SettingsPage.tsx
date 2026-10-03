@@ -169,6 +169,21 @@ function AppearanceSection() {
   const [theme, setTheme] = useState<ThemeId>('system')
   const locale = useI18n((s) => s.locale)
   const setLocale = useI18n((s) => s.setLocale)
+  // 兼容模式（跨平台加固）：禁用 GPU 硬件加速
+  const [disableGpu, setDisableGpu] = useState(false)
+  // M11 同款防抖：存量值加载完成前禁用控件——初始 false 基准上的误翻转会把
+  // "未加载"当"未开启"落盘（加载失败按默认关闭继续，控件仍可用）
+  const [gpuLoaded, setGpuLoaded] = useState(false)
+
+  useEffect(() => {
+    void window.omniget
+      .settingsGet('ui.disableGpu')
+      .then((v) => {
+        setDisableGpu(v === true)
+        setGpuLoaded(true)
+      })
+      .catch(() => setGpuLoaded(true))
+  }, [])
 
   useEffect(() => {
     void window.omniget
@@ -242,6 +257,33 @@ function AppearanceSection() {
             </button>
           ))}
         </div>
+      </div>
+
+      {/* 兼容模式（跨平台加固）：Linux Wayland/NVIDIA 等环境 GPU 崩溃白屏的出口 */}
+      <div className="mt-4 border-t border-border pt-4">
+        <p className="mb-2 text-xs text-text-2">兼容模式</p>
+        <label className="flex cursor-pointer items-center gap-2 text-xs text-text-2">
+          <input
+            type="checkbox"
+            disabled={!gpuLoaded}
+            checked={disableGpu}
+            onChange={(e) => {
+              const next = e.target.checked
+              setDisableGpu(next)
+              window.omniget
+                .settingsSet('ui.disableGpu', next)
+                .then(() => toast('兼容模式设置已保存，重启应用生效'))
+                .catch((err) => {
+                  setDisableGpu(!next)
+                  toastError('保存兼容模式设置', err)
+                })
+            }}
+          />
+          禁用 GPU 硬件加速（界面白屏/闪烁/崩溃时勾选）
+        </label>
+        <p className="mt-1 text-[10px] leading-relaxed text-text-3">
+          关闭硬件加速改用软件渲染，解决部分 Linux/Wayland/NVIDIA 驱动与老 GPU 上的渲染崩溃；日常无需开启（性能略降）。修改后重启应用生效
+        </p>
       </div>
     </Section>
   )
@@ -333,6 +375,7 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
   const [netdiskSel, setNetdiskSel] = useState<Set<string>>(new Set())
   const [netdiskSaveDir, setNetdiskSaveDir] = useState('')
   const [netdiskDownloading, setNetdiskDownloading] = useState(false)
+  const [netdiskCredBusy, setNetdiskCredBusy] = useState(false)
   const [saveDir, setSaveDir] = useState('')
   // R2/R7：并发上限与自动归档
   const [maxConcurrent, setMaxConcurrent] = useState('0')
@@ -346,6 +389,7 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
   const [subUrl, setSubUrl] = useState('')
   const [subInterval, setSubInterval] = useState('1440')
   const [subBusyId, setSubBusyId] = useState<string | null>(null)
+  const [subAdding, setSubAdding] = useState(false)
   const [upnp, setUpnp] = useState(true)
   const [btEncrypt, setBtEncrypt] = useState(true)
   const [rules, setRules] = useState<ScheduleRule[]>([])
@@ -426,7 +470,6 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
   /** R6：手动补齐缺失引擎并刷新状态 */
   function fetchEnginesNow(): void {
     setEngineFetching(true)
-    flash('正在补齐缺失引擎…')
     window.omniget
       .fetchEngines()
       .then((r) => {
@@ -434,10 +477,18 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
           .getEngineStatus()
           .then(setEngineList)
           .catch(() => flash('引擎状态刷新失败（显示的可能为旧状态）'))
-        if (r.installed.length > 0) flash(`已安装：${r.installed.join('、')}`)
-        else if (r.failed.length > 0)
-          flash(`更新失败：${r.failed.map((f) => `${f.name}（${f.error}）`).join('；')}`)
-        else flash('全部引擎已就绪，无需补齐')
+        // 审查修复（P2-2）：部分成功部分失败此前只显示 installed 分支（else if），
+        // 失败明细被静默吞掉、绿色横幅误导用户以为全部就绪
+        if (r.failed.length > 0) {
+          const okPart = r.installed.length > 0 ? `已安装：${r.installed.join('、')}；` : ''
+          flash(
+            `${okPart}失败：${r.failed.map((f) => `${f.name}（${f.error}）`).join('；')}`.slice(0, 300)
+          )
+        } else if (r.installed.length > 0) {
+          flash(`已安装：${r.installed.join('、')}`)
+        } else {
+          flash('全部引擎已就绪，无需补齐')
+        }
       })
       .catch((err) => toastError('补齐引擎', err))
       .finally(() => setEngineFetching(false))
@@ -481,18 +532,28 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
     })
 
   // ── backlog #26（2026-10-03）：网盘目录浏览 / 提交下载 ──────────────
+  /** 审查修复（P3-1）：请求序号守卫——快速连点两个目录时先发后至的响应
+   * 此前会覆盖新目录内容，造成「路径显示 A、内容是 B」错配 */
+  const netdiskNavSeq = useRef(0)
   function netdiskNav(path: string): void {
+    const seq = ++netdiskNavSeq.current
     setNetdiskLoading(true)
     setNetdiskError('')
     window.omniget
       .netdiskList(path || '/')
       .then((list) => {
+        if (seq !== netdiskNavSeq.current) return
         setNetdiskEntries(list)
         setNetdiskPath(path || '/')
         setNetdiskSel(new Set())
       })
-      .catch((err) => setNetdiskError(err instanceof Error ? err.message : String(err)))
-      .finally(() => setNetdiskLoading(false))
+      .catch((err) => {
+        if (seq !== netdiskNavSeq.current) return
+        setNetdiskError(err instanceof Error ? err.message : String(err))
+      })
+      .finally(() => {
+        if (seq === netdiskNavSeq.current) setNetdiskLoading(false)
+      })
   }
   function netdiskToggleBrowse(): void {
     if (netdiskBrowse) {
@@ -509,7 +570,19 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
     window.omniget
       .netdiskDownload({ entries: picked, saveDir: netdiskSaveDir, threads: 8 })
       .then((r) => {
-        toast(`已提交 ${r.created} 个网盘下载任务`, 'success')
+        if (r.failed.length > 0) {
+          // 部分成功：明细必须可见（否则用户重试会产生重复任务）
+          const detail = r.failed
+            .slice(0, 3)
+            .map((f) => `${f.name}（${f.error}）`)
+            .join('；')
+          toast(
+            `已提交 ${r.created} 个，${r.failed.length} 个失败：${detail}${r.failed.length > 3 ? '…' : ''}`,
+            'warning'
+          )
+        } else {
+          toast(`已提交 ${r.created} 个网盘下载任务`, 'success')
+        }
         setNetdiskSel(new Set())
       })
       .catch((err) => toastError('提交网盘下载', err))
@@ -711,7 +784,7 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
               {sidecarProbeMsg && (
                 <p
                   className={`mt-1 text-[10px] ${
-                    sidecarProbeMsg.ok ? 'text-green-500' : 'text-red-400'
+                    sidecarProbeMsg.ok ? 'text-success' : 'text-danger'
                   }`}
                 >
                   测试{sidecarProbeMsg.ok ? '通过' : '失败'}：{sidecarProbeMsg.detail}
@@ -727,6 +800,12 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                 onChange={(v) => {
                   setNetdiskUrl(v)
                   setNetdiskProbeMsg(null)
+                  // 审查修复（P3-4）：端点变更后旧浏览状态失效——残留会让用户把
+                  // 旧服务的目录/错误当成新服务的结果
+                  setNetdiskBrowse(false)
+                  setNetdiskEntries([])
+                  setNetdiskError('')
+                  setNetdiskSel(new Set())
                 }}
                 mono
                 hint="自托管 OpenList（AList 分叉）等网盘聚合服务的 WebDAV 出口，示例 http://127.0.0.1:5240/dav；留空 = 禁用"
@@ -766,7 +845,7 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
               {netdiskProbeMsg && (
                 <p
                   className={`mt-1 text-[10px] ${
-                    netdiskProbeMsg.ok ? 'text-green-500' : 'text-red-400'
+                    netdiskProbeMsg.ok ? 'text-success' : 'text-danger'
                   }`}
                 >
                   测试{netdiskProbeMsg.ok ? '通过' : '失败'}：{netdiskProbeMsg.detail}
@@ -790,19 +869,29 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                 />
                 <Button
                   size="sm"
-                  disabled={!netdiskUser.trim()}
+                  disabled={!netdiskUser.trim() || netdiskCredBusy}
                   onClick={() => {
+                    setNetdiskCredBusy(true)
                     window.omniget
                       .netdiskSaveCreds({ username: netdiskUser.trim(), password: netdiskPass })
                       .then((r) => {
-                        setNetdiskPass('')
+                        if (r.ok) {
+                          // 仅成功清空密码框（失败正是最需要重试的场景）；
+                          // 端点/凭据变更后旧浏览状态失效，一并重置
+                          setNetdiskPass('')
+                          flash('WebDAV 凭据已保存（加密存储）')
+                          setNetdiskBrowse(false)
+                          setNetdiskEntries([])
+                          setNetdiskError('')
+                          setNetdiskSel(new Set())
+                        }
                         setNetdiskProbeMsg(r)
-                        if (r.ok) flash('WebDAV 凭据已保存（加密存储）')
                       })
                       .catch((err) => toastError('保存 WebDAV 凭据', err))
+                      .finally(() => setNetdiskCredBusy(false))
                   }}
                 >
-                  保存凭据
+                  {netdiskCredBusy ? '保存中…' : '保存凭据'}
                 </Button>
               </div>
               <p className="mt-1 text-[10px] text-text-3">
@@ -823,7 +912,7 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                 {netdiskBrowse && (
                   <>
                     {netdiskError && (
-                      <p className="mt-2 text-[10px] text-red-400">{netdiskError}</p>
+                      <p className="mt-2 text-[10px] text-danger">{netdiskError}</p>
                     )}
                     <div className="mt-2 max-h-56 overflow-y-auto rounded-panel border border-border">
                       {netdiskPath !== '/' && (
@@ -995,7 +1084,7 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                         {s.lastCheckedAt
                           ? ` · 上次 ${new Date(s.lastCheckedAt).toLocaleString()}`
                           : ' · 未检查'}
-                        {s.lastError && <span className="text-red-400"> · {s.lastError}</span>}
+                        {s.lastError && <span className="text-danger"> · {s.lastError}</span>}
                       </p>
                     </div>
                     <div className="flex shrink-0 gap-1.5">
@@ -1067,7 +1156,10 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                 </select>
                 <Button
                   size="sm"
+                  disabled={subAdding || !subName.trim() || !subUrl.trim()}
                   onClick={() => {
+                    // 审查修复（P3-5）：防重入——双击此前会重复登记订阅
+                    setSubAdding(true)
                     window.omniget
                       .subscribeAdd({ name: subName.trim(), url: subUrl.trim(), intervalMin: Number(subInterval) })
                       .then((s) => {
@@ -1077,9 +1169,10 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                         flash('订阅已添加')
                       })
                       .catch((err) => toastError('添加订阅', err))
+                      .finally(() => setSubAdding(false))
                   }}
                 >
-                  添加
+                  {subAdding ? '添加中…' : '添加'}
                 </Button>
               </div>
               <p className="mt-1 text-[10px] leading-relaxed text-text-3">
@@ -1617,7 +1710,6 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
               disabled={engineUpdating}
               onClick={() => {
                 setEngineUpdating(true)
-                flash('正在检查 yt-dlp 更新…')
                 void window.omniget
                   .engineUpdate('ytdlp')
                   .then((r) =>

@@ -28,6 +28,38 @@ test('P3 回归：UNC 路径拒绝（SMB 出站认证风险）', () => {
 })
 
 test('合法用户目录通过', () => {
-  assert.equal(validateSaveDir('D:\\downloads'), null)
-  assert.equal(validateSaveDir('C:\\Users\\me\\Downloads'), null)
+  // 跨平台审查修复：isAbsolute 语义随平台变化（'D:\x' 在 POSIX 是相对路径），
+  // 断言按平台分流，保证 ubuntu CI / mac 本地测试均可通过
+  if (process.platform === 'win32') {
+    assert.equal(validateSaveDir('D:\\downloads'), null)
+    assert.equal(validateSaveDir('C:\\Users\\me\\Downloads'), null)
+  } else {
+    assert.equal(validateSaveDir('/home/me/downloads'), null)
+    assert.equal(validateSaveDir('/opt/mydata/downloads'), null)
+  }
+})
+
+test('跨平台审查 P1：macOS /private 符号链接真实形态与顶层系统目录拒绝', () => {
+  assert.ok(validateSaveDir('/private/etc'))
+  assert.ok(validateSaveDir('/private/tmp/evil'))
+  assert.ok(validateSaveDir('/private/var/root'))
+  assert.ok(validateSaveDir('/library/fonts'))
+})
+
+test('回归审查 #2：盘符相对路径 bug——不存在的新目录不得被误判（win）', () => {
+  // realish 曾用 join('C:', ...) 产出 drive-relative 路径（'C:Users'），
+  // realpath 按「该盘当前目录」解析 → cwd 在 C:\Windows 时合法目录被误判为系统目录
+  if (process.platform === 'win32') {
+    assert.equal(validateSaveDir('C:\\Users\\nobody\\downloads-new-dir'), null)
+  }
+})
+
+test('回归审查 #13：盘符根 / 文件系统根拒绝（整盘落盘无意义且放行子路径绕过）', () => {
+  assert.ok(validateSaveDir('C:\\'))
+  assert.ok(validateSaveDir('D:\\'))
+  assert.ok(validateSaveDir('/'))
+})
+
+test('回归审查 #5：正斜杠 UNC 形态拒绝', () => {
+  assert.ok(validateSaveDir('//server/share'))
 })

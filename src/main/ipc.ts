@@ -19,6 +19,7 @@ import {
 } from '@shared/types'
 import { getSetting, getSettingParsed, setSetting } from './db'
 import { validateSaveDir } from './save-dir'
+import { SYSTEM_DIRS, credentialDirs, hitsAny, normPath, realishPath } from './sensitive-paths'
 import { createLogger } from './logger'
 import type { TaskManager } from './task/manager'
 import type { MusicAdapter } from './music/adapter'
@@ -353,21 +354,25 @@ export function registerIpcHandlers(): void {
       if (dirErr) throw new Error(dirErr)
     }
     let created = 0
-    let lastTaskId = ''
-    // 逐个创建（createNetdiskTask 各自校验 saveDir/URL）；个别失败不吞掉整体进度
+    const failed: Array<{ name: string; error: string }> = []
+    // 审查修复（P2-1）：逐个创建 + 部分成功语义——此前单个失败整批 reject，
+    // 已创建的任务无任何提示，用户按报错重试会产生整批重复任务
     for (const e of entries) {
-      const r = await taskManager.createNetdiskTask({
-        url: webdavUrlFor(base, e.path),
-        name: e.name,
-        size: Number(e.size) || 0,
-        saveDir,
-        threads: Number(input?.threads) || 8
-      })
-      lastTaskId = r.taskId
-      created++
+      try {
+        await taskManager.createNetdiskTask({
+          url: webdavUrlFor(base, e.path),
+          name: e.name,
+          size: Number(e.size) || 0,
+          saveDir,
+          threads: Number(input?.threads) || 8
+        })
+        created++
+      } catch (err) {
+        failed.push({ name: e.name, error: err instanceof Error ? err.message : String(err) })
+      }
     }
-    log.info(`netdisk batch download: ${created} task(s), last=${lastTaskId}`)
-    return { created }
+    log.info(`netdisk batch download: created=${created} failed=${failed.length}`)
+    return { created, failed }
   })
 
   // ── R1+R5：本地桥接信息（端口/token，设置页展示）─────────────────────
@@ -514,6 +519,8 @@ export function registerIpcHandlers(): void {
     'ui.keymap',
     'ui.pinnedTasks',
     'ui.clipboardWatch',
+    // 跨平台加固：GPU 兼容模式开关（ready 前主进程读取追加 disable-gpu，重启生效）
+    'ui.disableGpu',
     'onboarded',
     'download.saveDir',
     'download.maxConcurrent',
@@ -579,19 +586,17 @@ export function registerIpcHandlers(): void {
         if (/^\/\//.test(v.replace(/\\/g, '/'))) {
           throw new Error('不支持网络路径中的 Cookie 文件（存在凭据外泄风险）')
         }
-        const profile = (process.env.USERPROFILE ?? process.env.HOME ?? '').replace(/\\/g, '/')
-        const norm = v.replace(/\\/g, '/').toLowerCase()
+        // 黑名单统一来自 ../sensitive-paths（跨平台审查收敛口径）；TEMP 为 Cookie 读取面局部追加。
+        // 与 save-dir/preview 同口径做符号链接归一——macOS /tmp、/var 是 /private/* 的符号链接，
+        // 字面比对可被绕过
+        const norm = realishPath(v).replace(/\\/g, '/').toLowerCase()
         const blockedDirs = [
-          (process.env.SystemRoot ?? 'C:\\Windows').replace(/\\/g, '/').toLowerCase(),
-          'c:/program files',
-          'c:/program files (x86)',
-          process.env.TEMP ? process.env.TEMP.replace(/\\/g, '/').toLowerCase() : '',
-          profile ? `${profile}/.ssh`.toLowerCase() : '',
-          profile ? `${profile}/.gnupg`.toLowerCase() : '',
-          profile ? `${profile}/.aws`.toLowerCase() : '',
-          profile ? `${profile}/.kube`.toLowerCase() : ''
+          ...SYSTEM_DIRS,
+          ...credentialDirs(),
+          process.env.SystemRoot ? normPath(process.env.SystemRoot) : '',
+          process.env.TEMP ? normPath(process.env.TEMP) : ''
         ].filter(Boolean)
-        if (blockedDirs.some((d) => norm === d || norm.startsWith(d + '/'))) {
+        if (hitsAny(norm, blockedDirs)) {
           throw new Error('不允许使用系统或敏感目录中的文件作为 Cookie 文件')
         }
       }

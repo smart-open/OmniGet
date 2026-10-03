@@ -3,6 +3,28 @@
 > OmniGet 产品变更记录。版本号遵循 `0.x.y` 约定：**x（中间版本号）随功能里程碑递增**，y 为里程碑内的小修/加固版本。初始版本 0.1.0。
 > 格式参考 Keep a Changelog；日期为里程碑完成时间。里程碑与验收口径溯源至《OmniGet-产品技术设计文档》§10。
 
+## [0.7.1] - 2026-10-03
+
+### 跨平台兼容专项（Windows / macOS / Linux 全面审查修复）
+
+### 修复（mac/Linux 必现的功能阻断）
+- **打包内 yt-dlp 文件名错位**：sidecar 收集脚本按发布资产名落盘（`yt-dlp_macos`/`yt-dlp_linux`），运行时按 `yt-dlp` 查找——mac/Linux 包内视频引擎必缺失；落盘名统一为运行时口径（win32→`yt-dlp.exe`，其余→`yt-dlp`），CI 门禁同步
+- **打包态引擎目录只读**（macOS /Applications、AppImage squashfs、deb /opt）：引擎按需补齐/yt-dlp 热更全部 EROFS/EACCES 失败——引擎目录改候选链（可写打包目录 → `<userData>/engines` 写入 + 两级读取解析），热更器写目标改 `writableBinaryPath()`，`--ffmpeg-location` 传解析后的实际路径，JS 运行时 PATH 注入覆盖全部候选目录
+- **macOS magnet: 唤起失效**：协议 URL 经 `open-url` 事件投递（不走 second-instance argv）——补事件处理（ready 前入队，窗口就绪后补派发，共用去重逻辑）
+- **CI x64 dmg 捆绑 arm64 引擎**：mac job 分架构两段出包（--arm64 → `fetch-sidecars --target darwin-x64` 交叉收集 → --x64），门禁增加 `file` 架构断言；未规范命名的 dmg 产物显式告警
+- **热更版本跳过缺陷**：tag 相同但二进制缺失不再误报「已是最新」（重新下载补齐）
+
+### 修复（安全拦截面）
+- 保存目录校验：realpath 符号链接归一（macOS `/private/etc` 旁路）+ 正斜杠 UNC（`//server/share`）拦截 + 盘符根拒绝 + `join('C:', …)` 盘符相对路径误判修复
+- 敏感路径黑名单统一 `src/main/sensitive-paths.ts` 共享模块（save-dir / preview / Cookie 三面收敛；修复 `~/.ssh`、`~/Library/Keychains` 等条目在大小写敏感用户名下恒不匹配的实际失效）；writableDir 探测改写入探测口径（Windows ACL 语义）
+
+### 新增
+- **GPU 兼容模式**：`ui.disableGpu` 设置项（设置 → 外观）+ `OMNIGET_DISABLE_GPU=1`，ready 前追加 disable-gpu；GPU 进程崩溃一次性提示兼容模式出口
+- Linux 托盘菜单「显示主界面」提升首项（AppIndicator 无 click 事件的降级）；mac 公证前置 `build/entitlements.mac.plist`
+
+### 测试
+- 回归单测 116 → 119（save-dir 平台分流断言 + /private、盘符根、正斜杠 UNC 回归）
+
 ## [0.7.0] - 2026-10-02
 
 ### 新增（R7 续 + R4 续批次，Backlog #4/#8/#11/#16–#22）
