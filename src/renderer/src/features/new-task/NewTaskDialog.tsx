@@ -83,6 +83,8 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
   // R7 续（backlog #21/#20）：SponsorBlock 标记 + 直播录制时长（分钟，0=不限）
   const [sponsorBlock, setSponsorBlock] = useState(false)
   const [liveLimit, setLiveLimit] = useState('0')
+  // backlog #27（2026-10-03）：内嵌元数据与章节
+  const [embedMetadata, setEmbedMetadata] = useState(false)
   // R3：批量链接抓取
   const [batchMode, setBatchMode] = useState(false)
   const [batchBusy, setBatchBusy] = useState(false)
@@ -125,6 +127,8 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
       setEmbedSubs(false)
       setEmbedThumbnail(false)
       setDelogo(false)
+      setSponsorBlock(false)
+      setEmbedMetadata(false)
       setSpeedLimit('')
       if (!saveDir) {
         const sid = sessionRef.current
@@ -585,6 +589,8 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
               template: nameTemplate.trim() || undefined,
               // R7 续（backlog #21）：SponsorBlock 章节标记（YouTube）
               sponsorBlock: sponsorBlock || undefined,
+              // backlog #27（2026-10-03）：内嵌元数据与章节
+              embedMetadata: embedMetadata || undefined,
               // R7 续（backlog #20）：直播录制时长（分钟；仅 RE 引擎的直播流）
               liveRecordMinutes:
                 parsed?.live && liveLimit !== '0' ? Number(liveLimit) : undefined
@@ -1065,6 +1071,16 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
                       onChange={(e) => setSponsorBlock(e.target.checked)}
                     />
                     SponsorBlock：标记赞助/广告段为章节（YouTube）
+                  </label>
+
+                  {/* backlog #27（2026-10-03）：元数据与章节内嵌（yt-dlp 原生，ffmpeg） */}
+                  <label className="mt-2 flex cursor-pointer items-center gap-1.5 text-[11px] text-text-2">
+                    <input
+                      type="checkbox"
+                      checked={embedMetadata}
+                      onChange={(e) => setEmbedMetadata(e.target.checked)}
+                    />
+                    内嵌元数据与章节（标题/标签/章节写入文件）
                   </label>
 
                   {/* R7 续（backlog #20）：直播流录制时长（N_m3u8DL-RE） */}

@@ -4,11 +4,15 @@
 
 import { type ChildProcess } from 'child_process'
 import { mkdir, rm, stat, writeFile } from 'fs/promises'
-import { basename, extname, join } from 'path'
+import { basename, dirname, extname, join } from 'path'
 import type { ToolCreateInput, ToolEvent } from '@shared/types'
+import { sanitizeFilename } from '@shared/sanitize'
 import { createLogger } from './logger'
 import { toolPath, ensureVerified } from './orchestrator/binaries'
 import { spawnTreeAware, terminateTree } from './orchestrator/proc'
+import { probeStreams } from './toolbox/ffprobe'
+import { planTrackExtraction } from './toolbox/track-plan'
+import { lookupRecordingTags, parseNameQuery } from './toolbox/musicbrainz'
 
 const log = createLogger('toolbox')
 
@@ -33,14 +37,26 @@ export interface ToolDef {
   hidden?: boolean
   /** runtime=node：JS 执行体，返回产物路径 */
   compute?: (inputPath: string, outDir: string, params: Record<string, unknown>) => Promise<string>
-  build: (inputPath: string, outDir: string, params: Record<string, unknown>) => {
-    args: string[]
-    output: string
-    /** P2 修复：多产物工具（voice-sep 的伴奏+人声两轨）——取消时须逐个清理半成品 */
-    extraOutputs?: string[]
-    /** 执行前写入的辅助文件（如 concat 清单） */
-    prewrite?: { path: string; content: string }
-  }
+  /** backlog #28/#29：允许 async build（轨道提取需 ffprobe 探流、MusicBrainz 需联网匹配后再组参） */
+  build: (
+    inputPath: string,
+    outDir: string,
+    params: Record<string, unknown>
+  ) =>
+    | {
+        args: string[]
+        output: string
+        /** P2 修复：多产物工具（voice-sep 的伴奏+人声两轨）——取消时须逐个清理半成品 */
+        extraOutputs?: string[]
+        /** 执行前写入的辅助文件（如 concat 清单） */
+        prewrite?: { path: string; content: string }
+      }
+    | Promise<{
+        args: string[]
+        output: string
+        extraOutputs?: string[]
+        prewrite?: { path: string; content: string }
+      }>
 }
 
 function baseName(input: string): string {
@@ -687,6 +703,146 @@ export const TOOL_DEFS: ToolDef[] = [
     }
   },
   {
+    // backlog #28（2026-10-03）：轨道提取（MKVToolNix 范式，ffmpeg -map 流拷贝零新依赖）
+    id: 'track-extract',
+    label: '轨道提取',
+    category: 'video',
+    desc: '把视频内的音轨/字幕轨导出为独立文件（流拷贝零重编码，秒级）。音轨 → mka（任意编码可装）；字幕轨 → srt（ass 特效样式会丢失；PGS/DVB 图形字幕不支持）',
+    fields: [
+      { key: 'kind', label: '轨道类型', type: 'select', options: ['音轨', '字幕轨'], default: '音轨' },
+      { key: 'scope', label: '提取范围', type: 'select', options: ['全部轨道', '指定序号'], default: '全部轨道' },
+      { key: 'index', label: '轨道序号（0 起，仅「指定序号」时生效）', type: 'text', default: '0' }
+    ],
+    // async build：先 ffprobe 探流（序号越界/图形字幕在参数期即报错，不浪费一次执行额度）
+    build: async (input, outDir, params) => {
+      const kind = String(params.kind ?? '音轨') === '字幕轨' ? 'subtitle' : 'audio'
+      const mode = String(params.scope ?? '全部轨道') === '指定序号' ? 'index' : 'all'
+      const index = Math.max(0, Math.min(31, Math.round(Number(params.index) || 0)))
+      const streams = await probeStreams(input)
+      const plan = planTrackExtraction(streams, kind, mode, index, input, outDir, baseName(input))
+      if (plan.skippedBitmap > 0) {
+        log.info(`track-extract: skipped ${plan.skippedBitmap} bitmap subtitle track(s)`)
+      }
+      return {
+        args: plan.args,
+        output: plan.outputs[0]!,
+        extraOutputs: plan.outputs.slice(1)
+      }
+    }
+  },
+  {
+    // backlog #28（2026-10-03）：外挂字幕封装（MKVToolNix 范式，流拷贝秒级）
+    id: 'subtitle-mux',
+    label: '外挂字幕封装',
+    category: 'video',
+    desc: '视频 + srt/ass 字幕封装为 mkv/mp4 软字幕（流拷贝，秒级，不重编码）。mp4 容器字幕自动转 mov_text；mkv 原样直拷',
+    extraFile: { key: 'subtitle', label: '字幕文件', accept: '.srt,.ass,.ssa,.vtt' },
+    fields: [
+      { key: 'container', label: '封装容器', type: 'select', options: ['mkv', 'mp4'], default: 'mkv' },
+      { key: 'lang', label: '字幕语言代码（可选，如 chi / eng）', type: 'text', default: '' }
+    ],
+    build: (input, outDir, params) => {
+      const container = String(params.container) === 'mp4' ? 'mp4' : 'mkv'
+      // 语言代码白名单：ISO 639 两/三字母（白名单外静默忽略，防选项注入）
+      const lang = /^[a-z]{2,3}$/i.test(String(params.lang ?? '').trim())
+        ? String(params.lang).trim().toLowerCase()
+        : null
+      const out = join(outDir, `${baseName(input)}_muxed.${container}`)
+      return {
+        args: [
+          '-y', '-i', input, '-i', String(params.subtitle ?? ''),
+          '-map', '0', '-map', '1',
+          '-c', 'copy',
+          ...(container === 'mp4' ? ['-c:s', 'mov_text'] : []),
+          ...(lang ? ['-metadata:s:s:0', `language=${lang}`] : []),
+          out
+        ],
+        output: out
+      }
+    }
+  },
+  {
+    // backlog #29（2026-10-03）：MusicBrainz 补标签（工具箱过渡路线，不引入 beets/Python）
+    id: 'musicbrainz-tag',
+    label: 'MusicBrainz 补标签',
+    category: 'audio',
+    desc: '按「歌手 - 曲名」（可从文件名自动解析）查询 MusicBrainz 公开 API，把标题/歌手/专辑/日期写入音频标签（流拷贝，不改音频数据）。需联网；未命中时给出重试建议',
+    fields: [
+      { key: 'artist', label: '歌手（留空自动从文件名解析）', type: 'text', default: '' },
+      { key: 'title', label: '曲名（留空自动从文件名解析）', type: 'text', default: '' }
+    ],
+    // async build：先联网匹配再组参（产物名用匹配到的真实歌手/曲名）
+    build: async (input, outDir, params) => {
+      const parsed = parseNameQuery(baseName(input))
+      const artist = String(params.artist ?? '').trim() || parsed.artist
+      const title = String(params.title ?? '').trim() || parsed.title
+      if (!title) throw new Error('无法确定曲名：请在参数中填写曲名（文件名不含有效曲名）')
+      const tags = await lookupRecordingTags(artist, title)
+      const ext = extname(input).toLowerCase()
+      const known = ['.mp3', '.m4a', '.aac', '.flac', '.wav', '.ogg', '.opus']
+      if (!known.includes(ext)) {
+        throw new Error('仅支持音频文件（mp3/m4a/aac/flac/wav/ogg/opus）')
+      }
+      const display = [tags.artist ?? artist, tags.title ?? title]
+        .filter(Boolean)
+        .join(' - ') || baseName(input)
+      const out = join(outDir, `${sanitizeFilename(display)}${ext}`)
+      const meta: string[] = []
+      if (tags.title) meta.push('-metadata', `title=${tags.title}`)
+      if (tags.artist) meta.push('-metadata', `artist=${tags.artist}`)
+      if (tags.album) meta.push('-metadata', `album=${tags.album}`)
+      if (tags.date) meta.push('-metadata', `date=${tags.date}`)
+      return { args: ['-y', '-i', input, ...meta, '-c', 'copy', out], output: out }
+    }
+  },
+  {
+    // backlog #30（2026-10-03）：OpenSubtitles 字幕匹配（工具箱过渡路线，不引入 Bazarr）
+    id: 'subtitle-fetch',
+    label: 'OpenSubtitles 字幕匹配',
+    category: 'common',
+    desc: '按文件哈希在 OpenSubtitles 内容级精确匹配字幕，保存到视频同目录（zip/gzip 自动解包）。需自备免费 API Key（api.opensubtitles.com 注册）；免费账号每日查询/下载配额有限',
+    fields: [
+      { key: 'apiKey', label: 'API Key（注册后获取）', type: 'text', default: '' },
+      { key: 'languages', label: '字幕语言（逗号分隔，如 zh,en）', type: 'text', default: 'zh' }
+    ],
+    runtime: 'node',
+    build: () => ({ args: [], output: '' }),
+    compute: async (inputPath, _outDir, params) => {
+      const apiKey = String(params.apiKey ?? '').trim()
+      if (!apiKey) {
+        throw new Error('请先填写 OpenSubtitles API Key（api.opensubtitles.com 免费注册获取）')
+      }
+      const languages = /^[a-z]{2,3}(,[a-z]{2,3})*$/i.test(String(params.languages ?? '').trim())
+        ? String(params.languages).trim().toLowerCase()
+        : 'zh'
+      const { stat, open, writeFile } = await import('fs/promises')
+      const { fetchSubtitleForVideo } = await import('./toolbox/subtitle-fetch')
+      const size = (await stat(inputPath)).size
+      // 首/尾各 64KB（官方哈希口径；小文件允许头尾重叠）
+      const CHUNK = 65536
+      const head = Buffer.alloc(CHUNK)
+      const tail = Buffer.alloc(CHUNK)
+      const fh = await open(inputPath, 'r')
+      try {
+        await fh.read(head, 0, CHUNK, 0)
+        await fh.read(tail, 0, CHUNK, Math.max(0, size - CHUNK))
+      } finally {
+        await fh.close()
+      }
+      const sub = await fetchSubtitleForVideo(size, head, tail, apiKey, languages)
+      // 落盘到视频同目录（播放器可自动加载）；重名不覆盖，追加序号
+      const lang0 = languages.split(',')[0]
+      const contentExt = sub.body.slice(0, 13).toString('utf8').startsWith('[Script Info]') ? 'ass' : 'srt'
+      let out = join(dirname(inputPath), `${baseName(inputPath)}.${lang0}.${contentExt}`)
+      for (let i = 1; await stat(out).then(() => true).catch(() => false); i++) {
+        out = join(dirname(inputPath), `${baseName(inputPath)}.${lang0}.${i}.${contentExt}`)
+      }
+      await writeFile(out, sub.body)
+      log.info(`subtitle-fetch: saved ${out} (release=${sub.release ?? 'unknown'})`)
+      return out
+    }
+  },
+  {
     // Backlog：神经网络音轨分离 L2（可选增强组件，不随包分发）
     // 遵循 §4.7 "零内置模型"原则：Demucs 运行时与模型（+200MB）由用户自装；
     // 缺席时给出明确出口动作，不静默失败。
@@ -879,9 +1035,9 @@ export class ToolboxRunner {
       }
     }
     // 参数构建失败（如多区域剪辑无有效区域）也必须广播 failed 事件，不静默
-    let built: ReturnType<ToolDef['build']>
+    let built: Awaited<ReturnType<ToolDef['build']>>
     try {
-      built = def.build(input.sourcePath, outDir, input.params)
+      built = await def.build(input.sourcePath, outDir, input.params)
     } catch (err) {
       this.emit({
         taskId,

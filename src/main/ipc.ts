@@ -12,6 +12,8 @@ import {
   type ConfirmSelectionInput,
   type MusicDownloadInput,
   type MusicSearchInput,
+  type NetdiskDownloadInput,
+  type NetdiskEntry,
   type SubscriptionAddInput,
   type ToolCreateInput
 } from '@shared/types'
@@ -308,6 +310,66 @@ export function registerIpcHandlers(): void {
     checkSubscriptionNow(String(id), subHost())
   )
 
+  // ── backlog #26（2026-10-03）：网盘聚合（OpenList / WebDAV）──────────
+  ipcMain.handle(IPC_CHANNELS.netdiskProbe, async () => {
+    const { probeWebdav } = await import('./netdisk/webdav')
+    return probeWebdav()
+  })
+  ipcMain.handle(IPC_CHANNELS.netdiskSaveCreds, async (_e, input: { username?: string; password?: string }) => {
+    const username = typeof input?.username === 'string' ? input.username.trim() : ''
+    const password = typeof input?.password === 'string' ? input.password : ''
+    if (!username) throw new Error('用户名不能为空')
+    // 长度上限：防渲染层异常输入把巨型串写进凭据存储（Basic 编码前合理量级）
+    if (username.length > 128) throw new Error('用户名过长（上限 128 字符）')
+    if (password.length > 512) throw new Error('密码过长（上限 512 字符）')
+    const { saveWebdavCredentials } = await import('./netdisk/credentials')
+    saveWebdavCredentials(username, password)
+    // 保存后立即探测：失败时用户当场看到凭据问题（假成功比无反馈更糟）
+    const { probeWebdav } = await import('./netdisk/webdav')
+    return probeWebdav()
+  })
+  ipcMain.handle(IPC_CHANNELS.netdiskList, async (_e, path: string) => {
+    const { listWebdav } = await import('./netdisk/webdav')
+    return listWebdav(typeof path === 'string' ? path : '/')
+  })
+  ipcMain.handle(IPC_CHANNELS.netdiskDownload, async (_e, input: NetdiskDownloadInput) => {
+    if (!taskManager) throw new Error('任务系统尚未就绪，请稍候')
+    const { getWebdavEndpoint, webdavUrlFor } = await import('./netdisk/webdav')
+    const base = getWebdavEndpoint()
+    if (!base) throw new Error('未配置网盘/WebDAV 地址（设置 → 下载 → 网盘聚合）')
+    const entries = (Array.isArray(input?.entries) ? input.entries : []).filter(
+      (e): e is NetdiskEntry =>
+        !!e && !e.isDir && typeof e.path === 'string' && e.path.startsWith('/') && !e.path.includes('..')
+    )
+    if (entries.length === 0) throw new Error('请先勾选要下载的文件')
+    if (entries.length > 50) throw new Error('单次最多提交 50 个文件，请分批下载')
+    const saveDir = String(input?.saveDir ?? '').trim()
+    if (!saveDir) throw new Error('请先设置保存目录')
+    // 审查修复：目录合法性在循环前统一预校验——此前逐任务校验，第 N 个失败会
+    // 留下「已创建 N-1 个任务但整体报错」的半批次且无任何提示
+    {
+      const { validateSaveDir } = await import('./save-dir')
+      const dirErr = validateSaveDir(saveDir)
+      if (dirErr) throw new Error(dirErr)
+    }
+    let created = 0
+    let lastTaskId = ''
+    // 逐个创建（createNetdiskTask 各自校验 saveDir/URL）；个别失败不吞掉整体进度
+    for (const e of entries) {
+      const r = await taskManager.createNetdiskTask({
+        url: webdavUrlFor(base, e.path),
+        name: e.name,
+        size: Number(e.size) || 0,
+        saveDir,
+        threads: Number(input?.threads) || 8
+      })
+      lastTaskId = r.taskId
+      created++
+    }
+    log.info(`netdisk batch download: ${created} task(s), last=${lastTaskId}`)
+    return { created }
+  })
+
   // ── R1+R5：本地桥接信息（端口/token，设置页展示）─────────────────────
   ipcMain.handle(IPC_CHANNELS.bridgeInfo, async () => {
     const { getBridgeInfo } = await import('./bridge')
@@ -425,7 +487,10 @@ export function registerIpcHandlers(): void {
   // settings
   // 读取黑名单：与写白名单对称——渲染层被攻破时不得借 settingsGet 拖走敏感值
   //（bridge.token 可驱动全部 Web API；凭据类路径由各自专用 IPC 按需返回）
-  const RENDERER_READ_BLOCKED_SETTINGS = new Set<string>(['bridge.token'])
+  const RENDERER_READ_BLOCKED_SETTINGS = new Set<string>(
+    // backlog #26：WebDAV 凭据密文/明文兜底键均不回显渲染层（凭据仅注入请求头）
+    ['bridge.token', 'netdisk.auth.enc', 'netdisk.auth']
+  )
   ipcMain.handle(IPC_CHANNELS.settingsGet, (_e, key: string) => {
     const k = String(key ?? '')
     if (RENDERER_READ_BLOCKED_SETTINGS.has(k)) {
@@ -468,7 +533,10 @@ export function registerIpcHandlers(): void {
     'bt.upnp',
     'bt.forceEncryption',
     // R7 续（backlog #11）：自托管短视频解析服务地址（http 允许——常部署在局域网/本机）
-    'sidecar.videoApiUrl'
+    'sidecar.videoApiUrl',
+    // backlog #26（2026-10-03）：网盘/WebDAV 端点（http 允许——OpenList 常部署在局域网/本机；
+    // 凭据走专用 IPC，不在此白名单）
+    'netdisk.endpoint'
   ])
   ipcMain.handle(IPC_CHANNELS.settingsSet, (_e, key: string, value: unknown) => {
     const k = String(key ?? '')
@@ -487,6 +555,13 @@ export function registerIpcHandlers(): void {
       const v = typeof value === 'string' ? value.trim() : ''
       if (v && !/^https?:\/\//i.test(v)) {
         throw new Error('解析服务地址必须以 http:// 或 https:// 开头')
+      }
+    }
+    if (k === 'netdisk.endpoint') {
+      // backlog #26：同 sidecar 信任边界——http 放行（OpenList/WebDAV 常在局域网/本机）
+      const v = typeof value === 'string' ? value.trim() : ''
+      if (v && !/^https?:\/\//i.test(v)) {
+        throw new Error('网盘/WebDAV 地址必须以 http:// 或 https:// 开头')
       }
     }
     if (k === 'download.saveDir' && typeof value === 'string' && value.trim()) {

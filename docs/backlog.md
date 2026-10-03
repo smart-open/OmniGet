@@ -184,37 +184,39 @@
   - [ ] streamlink 二进制兜底评估：Python 生态、单文件分发难，仅当间接取流路线对主流平台失效时再议
 - **触发条件**：#20 已有录制时长 MVP，等直播录制使用反馈后排期。
 
-### 26. 🟠 网盘/WebDAV 下载源（OpenList，AList 分叉）
+### 26. ✅（2026-10-03）网盘/WebDAV 下载源（OpenList，AList 分叉）
 - **依据**：AList（~48K★）2025-06 易主争议后社区分叉 **OpenList**（40+ 网盘聚合——百度/阿里/夸克/OneDrive 等，WebDAV 与直链双出口，开源免费，社区已完成闭源 API 清查）。国内用户「网盘文件转直链/本地下载」需求真实，OmniGet 下载源目前完全无网盘能力；**不自研任何网盘协议**，只消费用户自托管 OpenList 的标准出口。
-- **待办**：
-  - [ ] WebDAV 任务类型：Basic/Digest 认证头（凭据安全存储，不入日志），分片下载走 aria2（`--header` 注入 Authorization）
-  - [ ] 设置页「网盘聚合（可选）」卡片：OpenList 端点配置 + 浏览目录 + 提交下载（与 #11 短视频 sidecar 同款交互范式）
-- **⚠ 安全口径**：沿用 #11 信任边界——用户显式配置的自托管地址放行 http、不做内网校验；凭据仅注入请求头，响应摘要不回显。
-- **优先级**：P1 候选（补齐能力矩阵「下载源」维度的最大空白）。
+- **已完成**：
+  - [x] ✅ 模块 `netdisk/webdav.ts` + `netdisk/credentials.ts`：PROPFIND Depth:1 列目录（命名空间前缀容忍解析，`propfind.test.ts`）、逐段百分号编码 URL 构造、401/404/非 207 全部给出口动作文案
+  - [x] ✅ 凭据安全存储：Electron safeStorage（Windows DPAPI/Keychain）加密落 settings 表（`netdisk.auth.enc`，读取黑名单 + 不进渲染层写白名单）；safeStorage 不可用降级明文并留痕。凭据仅注入请求头，不入日志/任务库
+  - [x] ✅ 设置 → 下载「网盘聚合（OpenList / WebDAV，可选）」卡片：端点配置（http 放行，同 sidecar 信任边界）+ 测试连接（区分可达/认证失败/路径不存在）+ 凭据保存（保存即自动测试）+ 目录浏览（目录导航/文件勾选）+ 提交下载（单次上限 50 文件）
+  - [x] ✅ 下载管线：`manager.createNetdiskTask`（http 类型直启、无 awaiting/勾选阶段，过并发闸门）→ aria2 addUri 每任务 `header` 注入 `Authorization: Basic`（`params.netdisk` 标记触发，重启恢复/重试重走注入）；`Aria2TaskOptions.header` 扩展
+- **⚠ 安全口径**：沿用 #11 信任边界——用户显式配置的自托管地址放行 http、不做内网校验（PROPFIND 已在浏览阶段核验可达与认证）；凭据仅注入请求头，响应摘要不回显。
+- **边界**：Basic 认证（OpenList WebDAV 即 Basic）；Digest 认证头注入不支持（aria2 原生 `http-user/passwd` 可作后续增强）。
 
-### 27. 🟠 yt-dlp 元数据内嵌（--embed-metadata）
+### 27. ✅（2026-10-03）yt-dlp 元数据内嵌（--embed-metadata）
 - **依据**：yt-dlp 原生 `--embed-metadata`（含 `--embed-chapters` 合并进同参数），零外部依赖；`adapters/ytdlp.ts` 已有 `--embed-thumbnail`（M3-5），元数据/章节内嵌未接——下载的影视/合集缺章节与标签信息。
-- **待办**：
-  - [ ] 对话框视频选项「内嵌元数据与章节」开关，映射 `--embed-metadata --embed-chapters`，随任务参数持久化（resume 重放）。
+- **已完成**：对话框视频选项「内嵌元数据与章节」开关（SponsorBlock 同款范式：`ConfirmSelectionInput.video.embedMetadata` → `VideoSelection` → ffmpeg 在位时注入 `--embed-metadata --embed-chapters`；会话内 pause/resume 凭 argsByTask 重放，重启恢复接受默认值——与既有 video 选项 M1-11 口径一致）。
 
-### 28. 🟡 工具箱轨道族补充（MKVToolNix 范式）
-- **依据**：MKVToolNix（V102，2026-09 仍活跃）差异化 = 轨道提取/轨道属性/章节/附件封装。盘点确认 OmniGet 工具箱 **LosslessCut 核心范式已覆盖**（无损剪切×2、拼接、多区域合并、去音轨，均 `-c copy`），剩余增量收敛为两项：
-- **待办**：
-  - [ ] 「轨道提取」：视频内音轨/字幕轨导出为独立文件（`ffmpeg -map 0:a:0/-map 0:s:0 -c copy`，零新依赖）
-  - [ ] 「外挂字幕封装」：视频 + srt/ass → mkv/mp4 封装（`-c copy`，流拷贝秒级）
+### 28. ✅（2026-10-03）工具箱轨道族补充（MKVToolNix 范式）
+- **依据**：MKVToolNix（V102，2026-09 仍活跃）差异化 = 轨道提取/轨道属性/章节/附件封装。盘点确认 OmniGet 工具箱 **LosslessCut 核心范式已覆盖**（无损剪切×2、拼接、多区域合并、去音轨，均 `-c copy`），剩余增量收敛为两项。
+- **已完成**：
+  - [x] ✅ 「轨道提取」工具（`track-extract`）：ffprobe 探流（`toolbox/ffprobe.ts`）→ 纯函数规划（`toolbox/track-plan.ts`，6 例单测）→ ffmpeg 多输出 `-map` 交错。音轨全部/指定序号 → `.mka` 流拷贝（任意编码可装）；字幕轨 → 统一转 `.srt`（mov_text/ass 均可转；PGS/DVB 图形字幕跳过并在描述明示，全图形轨明确报错）。序号越界/无轨在参数期即报错（不浪费执行额度）
+  - [x] ✅ 「外挂字幕封装」工具（`subtitle-mux`）：视频 + srt/ass/ssa/vtt → mkv（`-c copy` 直拷）/mp4（`-c:s mov_text` 自动转码），可选 ISO 639 语言代码（白名单校验）写 `-metadata:s:s:0 language`
+  - [x] ✅ 基建：`ToolDef.build` 支持 async（轨道提取探流 / MusicBrainz 联网匹配后组参），`toolbox.submit` 改 await（构建期异常仍走 failed 事件广播）
 - **⏸ 不引入 mkvmerge 独立二进制**（~30MB 增量，ffmpeg 覆盖主场景；仅轨道属性批量编辑需求出现再议）。
 
-### 29. ⏸ beets / MusicBrainz 音乐刮削（暂缓）
-- **依据**：beets（MusicBrainz 自动匹配 + 元数据归整）。OmniGet 音乐五平台引擎自带标题/歌手/封面元数据，MusicBrainz 增益仅在 yt-dlp 音频下载场景；beets 为 Python 生态不内嵌。
-- **触发条件**：若立项「本地音乐库整理」专项再评估；过渡路线 = 工具箱单工具调 MusicBrainz 公开 API 补标签。
+### 29. ✅（2026-10-03）beets / MusicBrainz 音乐刮削（过渡路线落地）
+- **依据**：beets（MusicBrainz 自动匹配 + 元数据归整）。OmniGet 音乐五平台引擎自带标题/歌手/封面元数据，MusicBrainz 增益在 yt-dlp 音频下载场景；beets 为 Python 生态不内嵌。
+- **已完成（原「过渡路线」升级为正式实现）**：工具箱「MusicBrainz 补标签」工具（`musicbrainz-tag`）——按「歌手 - 曲名」（可从文件名自动解析，下划线中和为空格）查询 MusicBrainz WS 2 公开 API（显式 User-Agent、10s 超时、503 限流明确提示），取 score 首条写入 title/artist/album/date 标签（`-metadata` + `-c copy` 流拷贝不改音频数据，产物名用匹配到的真实歌手/曲名）；纯函数（文件名解析/标签映射）4 例单测（`musicbrainz.test.ts`）。beets 本体维持不内嵌（Python 生态）。
 
-### 30. ⏸ 字幕库自动匹配（subliminal / Bazarr 范式，暂缓）
+### 30. ✅（2026-10-03）字幕库自动匹配（OpenSubtitles 单工具落地）
 - **依据**：Bazarr（30+ 字幕提供商哈希匹配，NAS 生态标配，活跃）。下载器场景 yt-dlp 已抓站内字幕（M3-5）；BT 影视外挂字幕匹配有价值，但需独立服务/Python 运行时。
-- **触发条件**：需求反馈后先做「OpenSubtitles API 单工具」入工具箱（文件哈希匹配 + 字幕下载落盘），不引入 Bazarr 全家桶。
+- **已完成（原触发条件兑现：OpenSubtitles API 单工具入工具箱，不引入 Bazarr 全家桶）**：工具箱「OpenSubtitles 字幕匹配」工具（`subtitle-fetch`，node 运行时）——官方文件哈希算法（size + 首/尾 64KB LE 求和，BigInt 64 位回绕，2 例手工向量单测）→ `api.opensubtitles.com` 哈希精确匹配（用户自备免费 API Key；401/406 配额/无命中全给出路）→ 下载授权 → zip（EOCD+central directory 最小解析，store/deflate，优先字幕扩展名）与 gzip 自动解包 → 落盘视频同目录（重名追加序号不覆盖；ass 内容按 `[Script Info]` 识别扩展名）。纯函数 6 例单测（`subtitle-hash.test.ts`）。**⚠ 安全口径**：API Key 经表单参数随任务 params 明文落本地任务库（免费个人 Key、库不出本机，与 cookieFile 路径同敏感级；如后续需升级可改走 safeStorage 凭据通道，同 #26）。
 
-### 31. ⏸ yt-dlp 外部插件目录（观察，倾向不做内置入口）
+### 31. ⏸ yt-dlp 外部插件目录（观察，不做内置入口——2026-10-03 复核维持）
 - **依据**：yt-dlp 原生插件机制（`yt_dlp_plugins` 包 / `--use-plugins`，社区 extractor 长尾，EJS 本身即插件形态）。允许用户向引擎目录自放插件包可解锁长尾站点且免热更主引擎，但等同「用户自带任意代码执行」，与适配脚本声明式热更的合规形态边界冲突（同 §四「开放社区脚本不做」判定）。
-- **处置**：不做内置入口/管理 UI；高级用户自行放置插件目录属引擎目录既有查找面，无需产品支持。
+- **处置**：不做内置入口/管理 UI；高级用户自行放置插件目录属引擎目录既有查找面，无需产品支持。（2026-10-03 复核：全仓无 `--use-plugins`/`yt_dlp_plugins` 引用，处置一致，无遗留代码。）
 
 ### 32. ⏸ rclone / slskd（不做）
 - **rclone**（70+ 云存储后端）：下载器场景 aria2 直链 + #26 WebDAV 已覆盖主诉求；二进制 ~50MB 违背包体预算（§3.3），不引入。

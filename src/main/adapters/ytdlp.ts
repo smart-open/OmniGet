@@ -33,6 +33,8 @@ export interface VideoSelection {
   template?: string
   /** R7 续（backlog #21）：SponsorBlock 广告段标记为章节（YouTube） */
   sponsorBlock?: boolean
+  /** backlog #27（2026-10-03）：内嵌元数据与章节（ffmpeg 后处理依赖） */
+  embedMetadata?: boolean
 }
 
 interface RawFormat {
@@ -216,6 +218,11 @@ export class YtDlpAdapter {
     // R7 续（backlog #21）：SponsorBlock 广告段标记为章节（YouTube 原生支持）
     if (opts.sponsorBlock) {
       args.push('--sponsorblock-mark', 'all')
+    }
+    // backlog #27（2026-10-03）：元数据与章节内嵌（零外部依赖；ffmpeg 在位才注入，
+    // 与 --embed-subs/--embed-thumbnail 同一 ffmpeg 依赖口径）
+    if (opts.embedMetadata && this.ffmpegOk) {
+      args.push('--embed-metadata', '--embed-chapters')
     }
     // M9：回传最终产物路径（--print 默认 --simulate，需 --no-simulate 才会真下载）
     args.push('--no-simulate', '--print', 'after_move:filepath')

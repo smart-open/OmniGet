@@ -117,6 +117,8 @@ export interface ConfirmSelectionInput {
     sponsorBlock?: boolean
     /** R7 续（backlog #20）：直播录制时长（分钟；仅 RE 引擎的直播流任务） */
     liveRecordMinutes?: number
+    /** backlog #27（2026-10-03）：内嵌元数据与章节（--embed-metadata --embed-chapters） */
+    embedMetadata?: boolean
   }
 }
 
@@ -323,6 +325,21 @@ export interface SubscriptionAddInput {
   intervalMin: number
 }
 
+/** backlog #26（2026-10-03）：网盘/WebDAV（OpenList）目录条目 */
+export interface NetdiskEntry {
+  name: string
+  isDir: boolean
+  size: number
+  /** 相对端点根的服务器路径（如 /movies/foo.mp4） */
+  path: string
+}
+
+export interface NetdiskDownloadInput {
+  entries: NetdiskEntry[]
+  saveDir: string
+  threads: number
+}
+
 /** 侧栏角标计数（SQL 全表口径，跨视图一致） */
 export interface TaskCounts {
   running: number
@@ -492,6 +509,11 @@ export interface OmniGetBridge {
   subscribeAdd(input: SubscriptionAddInput): Promise<Subscription>
   subscribeRemove(id: string): Promise<void>
   subscribeCheckNow(id: string): Promise<{ added: number }>
+  // backlog #26（2026-10-03）：网盘聚合（OpenList / WebDAV）
+  netdiskProbe(): Promise<{ ok: boolean; detail: string }>
+  netdiskSaveCreds(input: { username: string; password: string }): Promise<{ ok: boolean; detail: string }>
+  netdiskList(path: string): Promise<NetdiskEntry[]>
+  netdiskDownload(input: NetdiskDownloadInput): Promise<{ created: number }>
   // events
   onTaskEvents(listener: (events: TaskEvent[]) => void): () => void
   onEngineHealth(listener: (health: EngineHealth[]) => void): () => void
@@ -544,6 +566,11 @@ export const IPC_CHANNELS = {
   subscribeAdd: 'subscribe:add',
   subscribeRemove: 'subscribe:remove',
   subscribeCheckNow: 'subscribe:checkNow',
+  /** backlog #26（2026-10-03）：网盘聚合（OpenList / WebDAV） */
+  netdiskProbe: 'netdisk:probe',
+  netdiskSaveCreds: 'netdisk:saveCreds',
+  netdiskList: 'netdisk:list',
+  netdiskDownload: 'netdisk:download',
   eventTasks: 'event:tasks',
   eventEngines: 'event:engines',
   /** M→R：UI 动作（托盘/剪贴板/协议唤起 → 打开新建任务并预填） */

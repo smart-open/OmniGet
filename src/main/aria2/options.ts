@@ -51,6 +51,8 @@ export type Aria2TaskOptions = {
   /** R7 续审查加固：sidecar 兜底直链常校验 UA/referer（与探测同源伪装） */
   'user-agent'?: string
   referer?: string
+  /** backlog #26（2026-10-03）：网盘/WebDAV 任务的 Basic 认证头（凭据经安全存储读取） */
+  header?: string
   'bt-save-metadata'?: string
   pause?: string
   // P1 加固：allow-overwrite 从全局启动参数收窄为每任务——仅增量补下（re-add 凭

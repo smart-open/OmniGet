@@ -5,6 +5,7 @@ import { ArrowClockwise, CheckCircle, FolderOpen, Trash } from '@phosphor-icons/
 import type {
   AppUpdateCheck,
   AdapterScriptInfo,
+  NetdiskEntry,
   ScheduleRule,
   Subscription,
   TrackerEntry
@@ -316,6 +317,22 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
   const [sidecarProbeMsg, setSidecarProbeMsg] = useState<{ ok: boolean; detail: string } | null>(
     null
   )
+  // backlog #26（2026-10-03）：网盘聚合（OpenList / WebDAV）
+  const [netdiskUrl, setNetdiskUrl] = useState('')
+  const [netdiskUser, setNetdiskUser] = useState('')
+  const [netdiskPass, setNetdiskPass] = useState('')
+  const [netdiskProbing, setNetdiskProbing] = useState(false)
+  const [netdiskProbeMsg, setNetdiskProbeMsg] = useState<{ ok: boolean; detail: string } | null>(
+    null
+  )
+  const [netdiskBrowse, setNetdiskBrowse] = useState(false)
+  const [netdiskPath, setNetdiskPath] = useState('/')
+  const [netdiskEntries, setNetdiskEntries] = useState<NetdiskEntry[]>([])
+  const [netdiskLoading, setNetdiskLoading] = useState(false)
+  const [netdiskError, setNetdiskError] = useState('')
+  const [netdiskSel, setNetdiskSel] = useState<Set<string>>(new Set())
+  const [netdiskSaveDir, setNetdiskSaveDir] = useState('')
+  const [netdiskDownloading, setNetdiskDownloading] = useState(false)
   const [saveDir, setSaveDir] = useState('')
   // R2/R7：并发上限与自动归档
   const [maxConcurrent, setMaxConcurrent] = useState('0')
@@ -382,6 +399,8 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
       setTemplate(String((await window.omniget.settingsGet('naming.template')) ?? '{{title}}'))
       setCookieFile(String((await window.omniget.settingsGet('ytdlp.cookieFile')) ?? ''))
       setSidecarUrl(String((await window.omniget.settingsGet('sidecar.videoApiUrl')) ?? ''))
+      setNetdiskUrl(String((await window.omniget.settingsGet('netdisk.endpoint')) ?? ''))
+      setNetdiskSaveDir(await window.omniget.defaultSaveDir())
       setSaveDir(String((await window.omniget.settingsGet('download.saveDir')) ?? ''))
       setMaxConcurrent(String((await window.omniget.settingsGet('download.maxConcurrent')) ?? 0))
       setAutoArchive((await window.omniget.settingsGet('download.autoArchive')) === true)
@@ -460,6 +479,50 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
     window.omniget.listTrackers().then(setTrackers).catch(() => {
       toast('操作成功，但 Tracker 列表刷新失败', 'warning')
     })
+
+  // ── backlog #26（2026-10-03）：网盘目录浏览 / 提交下载 ──────────────
+  function netdiskNav(path: string): void {
+    setNetdiskLoading(true)
+    setNetdiskError('')
+    window.omniget
+      .netdiskList(path || '/')
+      .then((list) => {
+        setNetdiskEntries(list)
+        setNetdiskPath(path || '/')
+        setNetdiskSel(new Set())
+      })
+      .catch((err) => setNetdiskError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setNetdiskLoading(false))
+  }
+  function netdiskToggleBrowse(): void {
+    if (netdiskBrowse) {
+      setNetdiskBrowse(false)
+      return
+    }
+    setNetdiskBrowse(true)
+    netdiskNav('/')
+  }
+  function netdiskDownloadSelected(): void {
+    const picked = netdiskEntries.filter((e) => !e.isDir && netdiskSel.has(e.path))
+    if (picked.length === 0) return
+    setNetdiskDownloading(true)
+    window.omniget
+      .netdiskDownload({ entries: picked, saveDir: netdiskSaveDir, threads: 8 })
+      .then((r) => {
+        toast(`已提交 ${r.created} 个网盘下载任务`, 'success')
+        setNetdiskSel(new Set())
+      })
+      .catch((err) => toastError('提交网盘下载', err))
+      .finally(() => setNetdiskDownloading(false))
+  }
+  const fmtNetdiskSize = (n: number): string =>
+    n >= 1024 ** 3
+      ? `${(n / 1024 ** 3).toFixed(1)} GB`
+      : n >= 1024 ** 2
+        ? `${(n / 1024 ** 2).toFixed(1)} MB`
+        : n >= 1024
+          ? `${(n / 1024).toFixed(0)} KB`
+          : `${n} B`
 
   if (!settingsLoaded) {
     return (
@@ -654,6 +717,197 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                   测试{sidecarProbeMsg.ok ? '通过' : '失败'}：{sidecarProbeMsg.detail}
                 </p>
               )}
+            </Section>
+
+            {/* backlog #26（2026-10-03）：网盘聚合（OpenList / WebDAV） */}
+            <Section title="网盘聚合（OpenList / WebDAV，可选）">
+              <TextRow
+                label="WebDAV 端点地址"
+                value={netdiskUrl}
+                onChange={(v) => {
+                  setNetdiskUrl(v)
+                  setNetdiskProbeMsg(null)
+                }}
+                mono
+                hint="自托管 OpenList（AList 分叉）等网盘聚合服务的 WebDAV 出口，示例 http://127.0.0.1:5240/dav；留空 = 禁用"
+              />
+              <p className="mt-1 text-[10px] leading-relaxed text-text-3">
+                不内置任何网盘协议：仅消费你自托管服务的标准 WebDAV 出口；凭据经系统安全存储加密保存，不写入日志
+              </p>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    window.omniget
+                      .settingsSet('netdisk.endpoint', netdiskUrl.trim())
+                      .then(() => flash('网盘端点已保存'))
+                      .catch((err) => toastError('保存网盘端点', err))
+                  }}
+                >
+                  保存
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={netdiskProbing || !netdiskUrl.trim()}
+                  onClick={() => {
+                    setNetdiskProbing(true)
+                    setNetdiskProbeMsg(null)
+                    window.omniget
+                      .netdiskProbe()
+                      .then((r) => setNetdiskProbeMsg(r))
+                      .catch((err) => toastError('测试网盘连接', err))
+                      .finally(() => setNetdiskProbing(false))
+                  }}
+                >
+                  {netdiskProbing ? '测试中…' : '测试连接'}
+                </Button>
+              </div>
+              {netdiskProbeMsg && (
+                <p
+                  className={`mt-1 text-[10px] ${
+                    netdiskProbeMsg.ok ? 'text-green-500' : 'text-red-400'
+                  }`}
+                >
+                  测试{netdiskProbeMsg.ok ? '通过' : '失败'}：{netdiskProbeMsg.detail}
+                </p>
+              )}
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <input
+                  value={netdiskUser}
+                  onChange={(e) => setNetdiskUser(e.target.value)}
+                  placeholder="WebDAV 用户名"
+                  autoComplete="off"
+                  className="h-8 w-40 rounded-ctl border border-border bg-surface-2 px-2 text-xs outline-none focus:border-accent"
+                />
+                <input
+                  value={netdiskPass}
+                  onChange={(e) => setNetdiskPass(e.target.value)}
+                  placeholder="WebDAV 密码"
+                  type="password"
+                  autoComplete="new-password"
+                  className="h-8 w-40 rounded-ctl border border-border bg-surface-2 px-2 text-xs outline-none focus:border-accent"
+                />
+                <Button
+                  size="sm"
+                  disabled={!netdiskUser.trim()}
+                  onClick={() => {
+                    window.omniget
+                      .netdiskSaveCreds({ username: netdiskUser.trim(), password: netdiskPass })
+                      .then((r) => {
+                        setNetdiskPass('')
+                        setNetdiskProbeMsg(r)
+                        if (r.ok) flash('WebDAV 凭据已保存（加密存储）')
+                      })
+                      .catch((err) => toastError('保存 WebDAV 凭据', err))
+                  }}
+                >
+                  保存凭据
+                </Button>
+              </div>
+              <p className="mt-1 text-[10px] text-text-3">
+                凭据保存后立即自动测试连接；匿名访问可填用户名 guest、密码留空
+              </p>
+
+              {/* 目录浏览 + 提交下载 */}
+              <div className="mt-3 border-t border-border pt-3">
+                <div className="flex items-center gap-2">
+                  <Button size="sm" variant="outline" onClick={netdiskToggleBrowse}>
+                    {netdiskBrowse ? '收起目录' : '浏览目录'}
+                  </Button>
+                  <span className="num min-w-0 flex-1 truncate text-[10px] text-text-3">
+                    {netdiskPath}
+                    {netdiskLoading ? ' · 加载中…' : ''}
+                  </span>
+                </div>
+                {netdiskBrowse && (
+                  <>
+                    {netdiskError && (
+                      <p className="mt-2 text-[10px] text-red-400">{netdiskError}</p>
+                    )}
+                    <div className="mt-2 max-h-56 overflow-y-auto rounded-panel border border-border">
+                      {netdiskPath !== '/' && (
+                        <button
+                          className="row-line flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-text-2 hover:bg-surface-2"
+                          onClick={() => netdiskNav(netdiskPath.replace(/\/[^/]+\/?$/, '') || '/')}
+                        >
+                          <span className="text-text-3">↩</span> 返回上级
+                        </button>
+                      )}
+                      {netdiskEntries.map((e) => (
+                        <div
+                          key={`${e.path}${e.name}`}
+                          className="row-line flex items-center gap-2 px-3 py-1.5 text-xs"
+                        >
+                          {e.isDir ? (
+                            <button
+                              className="press min-w-0 flex-1 truncate text-left text-text-2 hover:text-text-1"
+                              onClick={() => netdiskNav(e.path)}
+                            >
+                              <span className="text-text-3">▸</span> {e.name}
+                            </button>
+                          ) : (
+                            <>
+                              <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2">
+                                <input
+                                  type="checkbox"
+                                  checked={netdiskSel.has(e.path)}
+                                  onChange={(ev) => {
+                                    const next = new Set(netdiskSel)
+                                    if (ev.target.checked) next.add(e.path)
+                                    else next.delete(e.path)
+                                    setNetdiskSel(next)
+                                  }}
+                                />
+                                <span className="min-w-0 flex-1 truncate text-text-2">{e.name}</span>
+                              </label>
+                              <span className="num shrink-0 text-[10px] text-text-3">
+                                {fmtNetdiskSize(e.size)}
+                              </span>
+                            </>
+                          )}
+                        </div>
+                      ))}
+                      {!netdiskLoading && netdiskEntries.length === 0 && (
+                        <p className="px-3 py-3 text-[11px] text-text-3">目录为空</p>
+                      )}
+                    </div>
+                    <div className="mt-2 flex items-center gap-2">
+                      <input
+                        value={netdiskSaveDir}
+                        onChange={(e) => setNetdiskSaveDir(e.target.value)}
+                        className="num h-8 min-w-0 flex-1 rounded-ctl border border-border bg-surface-2 px-2 text-xs outline-none focus:border-accent"
+                        placeholder="保存目录"
+                      />
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        icon={<FolderOpen size={13} />}
+                        onClick={() =>
+                          void window.omniget
+                            .pickFolder()
+                            .then((dir) => {
+                              if (dir) setNetdiskSaveDir(dir)
+                            })
+                            .catch((err) => toastError('选择文件夹', err))
+                        }
+                      >
+                        浏览
+                      </Button>
+                      <Button
+                        size="sm"
+                        disabled={netdiskDownloading || netdiskSel.size === 0}
+                        onClick={netdiskDownloadSelected}
+                      >
+                        {netdiskDownloading ? '提交中…' : `下载所选（${netdiskSel.size}）`}
+                      </Button>
+                    </div>
+                    <p className="mt-1 text-[10px] leading-relaxed text-text-3">
+                      勾选文件提交下载：经 aria2 分片直下（认证自动注入）；目录仅用于浏览导航。单次最多 50 个文件
+                    </p>
+                  </>
+                )}
+              </div>
             </Section>
 
             {/* R2/R7：队列与归档 */}

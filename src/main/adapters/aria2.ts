@@ -12,7 +12,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { generateMagnet, normalizeInfohash, parseTorrentFile } from '../torrent/parse'
 import { cacheTorrentFile, findCachedTorrent, readCachedTorrent } from '../torrent/cache'
-import { readTaskOriginUrl, readTaskOutName, readTaskSpeedLimit, readTaskUrls } from '../task/params'
+import { parseParamsJson, readTaskOriginUrl, readTaskOutName, readTaskSpeedLimit, readTaskUrls } from '../task/params'
 import { buildTaskOptions } from '../aria2/options'
 import { createLogger } from '../logger'
 import { diagnose } from '../diagnosis'
@@ -502,6 +502,14 @@ export class Aria2Adapter implements EngineAdapter {
       if (originUrl) {
         opts['user-agent'] = BROWSER_UA
         opts.referer = originUrl
+      }
+      // backlog #26（2026-10-03）：网盘/WebDAV 任务（params.netdisk）注入 Basic 认证头。
+      // 凭据从安全存储读取（不入任务库/日志/params）；重启恢复与重试都会重走本路径，
+      // 凭据更新后新启动的任务自动使用新值
+      if (parseParamsJson(task.params).netdisk === true) {
+        const { basicAuthHeader } = await import('../netdisk/webdav')
+        const auth = basicAuthHeader()
+        if (auth) opts.header = `Authorization: ${auth}`
       }
       return (await this.rpc().call('addUri', urls, opts)) as string
     } catch (err) {

@@ -704,6 +704,70 @@ export class TaskManager {
   }
 
   /**
+   * backlog #26（2026-10-03）：网盘/WebDAV（OpenList）任务创建。
+   * 与常规 http 任务的区别：URL 来自用户显式配置的自托管端点（信任边界同 backlog #11，
+   * 不做内网校验/无 HEAD 探测——PROPFIND 已在浏览阶段核验可达与认证），凭据由 aria2
+   * 适配器在 start 时从安全存储读取注入；创建即过并发闸门直启（无 awaiting/勾选阶段）。
+   */
+  async createNetdiskTask(input: {
+    url: string
+    name: string
+    size: number
+    saveDir: string
+    threads: number
+  }): Promise<{ taskId: string }> {
+    const url = typeof input.url === 'string' && /^https?:\/\//i.test(input.url.trim()) ? input.url.trim() : ''
+    if (!url) throw new Error('下载地址无效（必须为 http/https）')
+    const name = sanitizeFilename(String(input.name ?? '').replace(/[\\/]+/g, '_')) || 'file'
+    const saveDir = String(input.saveDir ?? '').trim()
+    if (!saveDir) throw new Error('请先设置保存目录')
+    const dirErr = this.validateSaveDir(saveDir)
+    if (dirErr) throw new Error(dirErr)
+    const threads = Math.round(Math.min(64, Math.max(1, input.threads || 8)))
+    // 审查修复：在途查重——同一网盘文件重复提交时，第二个任务会因 aria2
+    // allow-overwrite=false 以 "File already exists" 失败，徒增垃圾 failed 行
+    // （与视频任务创建期在途去重同口径）
+    const dup = listTasks({ status: ['parsing', 'awaiting', 'queued', 'running'] }).find(
+      (t) => t.engine === 'aria2' && t.source === url
+    )
+    if (dup) {
+      throw new Error(`「${dup.name}」已在下载队列中，请勿重复提交`)
+    }
+    const task: TaskExt = {
+      id: uuidv7(),
+      type: 'http',
+      source: url,
+      name,
+      engine: 'aria2',
+      status: 'queued',
+      saveDir,
+      totalBytes: Math.max(0, Number(input.size) || 0),
+      downloadedBytes: 0,
+      speedBps: 0,
+      threads,
+      // netdisk 标记：aria2.start 据此注入 Basic 认证头（凭据不落任务库）
+      params: JSON.stringify({ urls: [url], outName: name, netdisk: true }),
+      createdAt: Date.now()
+    }
+    insertTask(task)
+    // 审查修复：跳过 parse 阶段导致 task_files 为空——回收站「删除（含文件）」
+    // 对网盘任务一个文件都不删（B6 承诺落空），Inspector 文件列表也为空。
+    // 此处按 outName 预登记（size 取 PROPFIND 值，完成后由轮询回填 downloaded）
+    saveTaskFiles(task.id, [
+      { path: name, size: task.totalBytes, selected: true, downloaded: 0 }
+    ])
+    this.pushEvent({ taskId: task.id, status: 'queued' })
+    this.gateStart(
+      this.runWhenQueued(task.id, async (cur) => {
+        const gid = await this.aria2.start(cur)
+        updateTaskFields(cur.id, { engineGid: gid })
+      })
+    )
+    log.info(`netdisk task created: ${name} (${(task.totalBytes / 1024 / 1024).toFixed(1)} MB)`)
+    return { taskId: task.id }
+  }
+
+  /**
    * 确认勾选（§6.1 task:confirmSelection）。
    * - awaiting：常规流程（磁力 pause 态 changeOption+unpause / .torrent addTorrent）
    * - completed（B10，§4.5 增量补下）：同 infohash re-add + 新 select-file，

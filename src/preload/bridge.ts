@@ -88,6 +88,11 @@ const api: OmniGetBridge = {
   subscribeAdd: (input) => ipcRenderer.invoke(IPC_CHANNELS.subscribeAdd, input),
   subscribeRemove: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.subscribeRemove, id),
   subscribeCheckNow: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.subscribeCheckNow, id),
+  // backlog #26（2026-10-03）：网盘聚合（OpenList / WebDAV）
+  netdiskProbe: () => ipcRenderer.invoke(IPC_CHANNELS.netdiskProbe),
+  netdiskSaveCreds: (input) => ipcRenderer.invoke(IPC_CHANNELS.netdiskSaveCreds, input),
+  netdiskList: (path: string) => ipcRenderer.invoke(IPC_CHANNELS.netdiskList, path),
+  netdiskDownload: (input) => ipcRenderer.invoke(IPC_CHANNELS.netdiskDownload, input),
   onTaskEvents: (listener: (events: TaskEvent[]) => void) => {
     const wrapped = (_e: unknown, events: TaskEvent[]): void => listener(events)
     ipcRenderer.on(IPC_CHANNELS.eventTasks, wrapped)
