@@ -340,6 +340,13 @@ export interface NetdiskDownloadInput {
   threads: number
 }
 
+/** 审查修复（P2-1）：批量提交改为部分成功语义——created 与 failed 并行返回，
+ * 此前整批 reject 会掩盖已创建的任务并诱导用户重试产生重复 */
+export interface NetdiskDownloadResult {
+  created: number
+  failed: Array<{ name: string; error: string }>
+}
+
 /** 侧栏角标计数（SQL 全表口径，跨视图一致） */
 export interface TaskCounts {
   running: number
@@ -513,7 +520,7 @@ export interface OmniGetBridge {
   netdiskProbe(): Promise<{ ok: boolean; detail: string }>
   netdiskSaveCreds(input: { username: string; password: string }): Promise<{ ok: boolean; detail: string }>
   netdiskList(path: string): Promise<NetdiskEntry[]>
-  netdiskDownload(input: NetdiskDownloadInput): Promise<{ created: number }>
+  netdiskDownload(input: NetdiskDownloadInput): Promise<NetdiskDownloadResult>
   // events
   onTaskEvents(listener: (events: TaskEvent[]) => void): () => void
   onEngineHealth(listener: (health: EngineHealth[]) => void): () => void

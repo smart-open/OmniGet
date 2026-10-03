@@ -157,12 +157,12 @@ export interface FetchResult {
   failed: Array<{ name: string; error: string }>
 }
 
-function manifestUrl(): string {
-  return `${mirrorBase()}/${dirKey()}/manifest.json`
+function manifestUrl(base: string): string {
+  return `${base}/${dirKey()}/manifest.json`
 }
 
-async function fetchManifest(): Promise<Record<string, string>> {
-  const res = await undiciFetch(manifestUrl(), { signal: AbortSignal.timeout(15_000) })
+async function fetchManifest(base: string): Promise<Record<string, string>> {
+  const res = await undiciFetch(manifestUrl(base), { signal: AbortSignal.timeout(15_000) })
   if (!res.ok) throw new Error(`manifest 获取失败（HTTP ${res.status}）`)
   const raw = (await res.json()) as { files?: Record<string, string> }
   if (!raw?.files || typeof raw.files !== 'object') throw new Error('manifest 格式不合法')
@@ -236,9 +236,14 @@ let fetchChain: Promise<unknown> = Promise.resolve()
 
 async function runFetchMissingEngines(opts: FetchOptions): Promise<FetchResult> {
   const result: FetchResult = { installed: [], skipped: [], failed: [] }
-  // C2 修复：分发源必须可信（https + 白名单域 + 公网地址），否则拒绝安装
+  // C2 修复：分发源必须可信（https + 白名单域 + 公网地址），否则拒绝安装。
+  // 审查修复（TOCTOU，10-03）：基址只读一次并全程使用快照——此前 assertTrustedMirror
+  // 校验的是当时的 mirrorBase()，而 fetchManifest/下载 URL 各自重读 settings；
+  // 被攻破的渲染层可在校验通过后的 IO 窗口内改写 engines.mirror，让 manifest 与
+  // 二进制都来自未校验源（SHA256 自签 → TOFU 基线被污染 → 供应链防线整体绕过）
+  const base = mirrorBase()
   try {
-    await assertTrustedMirror(mirrorBase())
+    await assertTrustedMirror(base)
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err)
     log.warn(`engine mirror untrusted: ${error}`)
@@ -255,9 +260,9 @@ async function runFetchMissingEngines(opts: FetchOptions): Promise<FetchResult> 
 
   let manifest: Record<string, string>
   try {
-    manifest = await fetchManifest()
+    manifest = await fetchManifest(base)
   } catch (err) {
-    const error = `${err instanceof Error ? err.message : String(err)}（分发源：${manifestUrl()}）`
+    const error = `${err instanceof Error ? err.message : String(err)}（分发源：${manifestUrl(base)}）`
     for (const e of wanted) result.failed.push({ name: e.name, error })
     log.warn(`engine manifest unavailable: ${error}`)
     return result
@@ -272,7 +277,7 @@ async function runFetchMissingEngines(opts: FetchOptions): Promise<FetchResult> 
     }
     try {
       await downloadAndVerify(
-        `${mirrorBase()}/${dirKey()}/${encodeURIComponent(file)}`,
+        `${base}/${dirKey()}/${encodeURIComponent(file)}`,
         sha,
         pathOf(e.name),
         (received, total) => opts.onProgress?.(e.name, received, total)

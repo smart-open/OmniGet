@@ -80,6 +80,10 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
   const [embedSubs, setEmbedSubs] = useState(false)
   const [embedThumbnail, setEmbedThumbnail] = useState(false)
   const [delogo, setDelogo] = useState(false)
+  // 审查修复（P2-4）：delogo 判定此前比较 sniffType（TaskType，恒不等于平台名）
+  // → 复选框永不渲染、功能整体死代码；改存嗅探到的平台标识
+  const [sniffPlatform, setSniffPlatform] = useState<string | null>(null)
+  const isShortVideo = sniffPlatform !== null && ['douyin', 'kuaishou', 'xiaohongshu', 'xigua', 'weibo'].includes(sniffPlatform)
   // R7 续（backlog #21/#20）：SponsorBlock 标记 + 直播录制时长（分钟，0=不限）
   const [sponsorBlock, setSponsorBlock] = useState(false)
   const [liveLimit, setLiveLimit] = useState('0')
@@ -129,6 +133,10 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
       setDelogo(false)
       setSponsorBlock(false)
       setEmbedMetadata(false)
+      setSniffPlatform(null)
+      // 审查修复（P2-5）：直播录制时长此前不在重置清单——上一会话选的 30/60 分钟
+      // 会静默套到新会话的直播任务上，录制被截断
+      setLiveLimit('0')
       setSpeedLimit('')
       if (!saveDir) {
         const sid = sessionRef.current
@@ -277,6 +285,7 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
     setTaskId(res.taskId)
     setParsed(res.parsed)
     setSniffType(res.sniff.type)
+    setSniffPlatform(res.sniff.platform ?? null)
     const list = (res.parsed.files ?? []) as TaskFile[]
     setFiles(list)
     setSelected(new Set(list.map((f) => f.path)))
@@ -584,7 +593,9 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
               audioFormat: 'mp3',
               embedSubs,
               embedThumbnail,
-              delogo: delogo && (sniffType === 'video' ? false : true),
+              // 审查修复（P2-4）：delogo 仅短视频平台有意义（markShortVideo 只对
+              // 平台清单内任务生效）；复选框也仅在短视频任务渲染
+              delogo: delogo || undefined,
               // R4 续（backlog #4）：任务级命名模板（空值回落全局 naming.template）
               template: nameTemplate.trim() || undefined,
               // R7 续（backlog #21）：SponsorBlock 章节标记（YouTube）
@@ -1156,11 +1167,8 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
                       />
                       内嵌封面
                     </label>
-                    {/* M3-7：短视频 L3 显式选择 */}
-                    {sniffType &&
-                      ['douyin', 'kuaishou', 'xiaohongshu', 'xigua', 'weibo'].includes(
-                        sniffType
-                      ) && (
+                    {/* M3-7：短视频 L3 显式选择（按嗅探平台判定，而非 TaskType） */}
+                    {isShortVideo && (
                         <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-text-2">
                           <input
                             type="checkbox"
@@ -1218,11 +1226,11 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
                       placeholder="例：2M / 500K"
                       aria-invalid={!speedLimitValid}
                       className={`num h-7 w-32 rounded-ctl border bg-surface-2 px-2 text-xs outline-none focus:border-accent ${
-                        speedLimitValid ? 'border-border' : 'border-red-400'
+                        speedLimitValid ? 'border-border' : 'border-danger'
                       }`}
                     />
                     {!speedLimitValid && (
-                      <p className="mt-1 text-[10px] text-red-400">
+                      <p className="mt-1 text-[10px] text-danger">
                         格式：数字 + 可选 K/M，例：2M / 500K
                       </p>
                     )}

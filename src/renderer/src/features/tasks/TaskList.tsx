@@ -485,13 +485,15 @@ const TaskRow = memo(function TaskRow({
     })
     if (!ok) return
     await window.omniget.controlTask({ taskId: task.id, action: 'remove', withFiles: false })
-    await useTasks.getState().load('all')
+    // 审查修复（P3-2）：按当前视图过滤器重载——固定 load('all') 污染 loadedFilter，
+    // 触发数据源守卫双载 + 骨架闪烁（restore() 已修过同型问题，此处三处补齐）
+    await useTasks.getState().load(useTasks.getState().loadedFilter ?? 'all')
     toast('任务已移入回收站', 'success')
   }
 
   async function control(action: 'pause' | 'resume' | 'remove' | 'top'): Promise<void> {
     await window.omniget.controlTask({ taskId: task.id, action, withFiles: false })
-    await useTasks.getState().load(isTrash ? 'trash' : 'all')
+    await useTasks.getState().load(isTrash ? 'trash' : (useTasks.getState().loadedFilter ?? 'all'))
     if (action === 'pause') toast('任务已暂停', 'success')
     else if (action === 'resume') toast('任务已继续下载', 'success')
   }
@@ -499,7 +501,7 @@ const TaskRow = memo(function TaskRow({
   /** R6：失败任务一键重试（failed → queued；重载后行离开当前视图） */
   async function retry(): Promise<void> {
     await window.omniget.retryTask(task.id)
-    await useTasks.getState().load(isTrash ? 'trash' : 'all')
+    await useTasks.getState().load(isTrash ? 'trash' : (useTasks.getState().loadedFilter ?? 'all'))
     toast(`已重新入队「${task.name || task.source}」`, 'success')
   }
 

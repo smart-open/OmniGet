@@ -187,6 +187,9 @@ export class TaskManager {
         removeArchiveKey(readTaskOriginUrl(task) ?? task.source)
         removeArchiveKey(task.source)
       }
+      // 审查修复（P2-3 配套）：失败/暂停外的终态路径无人调用 persistCliProduct，
+      // 适配器 outputFiles 登记需在此兜底注销（防 Map 无界增长；暂停保留供 resume）
+      if (e.status === 'failed') this.dropEngineOutputs(task.id)
       // P1 加固：yt-dlp 单视频完成时产物落 task_files（此前 video/music 无 task_files，
       // 回收站「删除（含文件）」对这两类任务一个文件都不删）
       // R7 续（backlog #17）：nm3u8（N_m3u8DL-RE）同型复用产物落库
@@ -208,18 +211,24 @@ export class TaskManager {
 
   /** yt-dlp/nm3u8 单视频产物落 task_files（合集任务解析期已有文件树，跳过） */
   private persistCliProduct(task: TaskExt, e: TaskEvent): void {
-    if (getTaskFiles(task.id).length > 0) return
+    if (getTaskFiles(task.id).length > 0) {
+      this.dropEngineOutputs(task.id)
+      return
+    }
+    // 审查修复（P2-3）：适配器在 onExit 内 emit completed 后「同步」清理
+    // outputFiles，而本方法在 250ms 合并窗口 flush 后才执行——届时 getOutputFiles
+    // 恒为空，M9 精确产物追踪沦为死代码、回落「目录内最新视频」猜测（多任务并发
+    // 完成时错拿他任务产物 → 含文件删除误删）。改为：此处在调用线程同步捕获，
+    // 随即从适配器注销（防 Map 无界增长），异步持久化使用捕获值
+    const tracked = (
+      task.engine === 'nm3u8'
+        ? this.nm3u8?.getOutputFiles(task.id)
+        : this.ytdlp?.getOutputFiles(task.id)
+    ) ?? []
+    this.dropEngineOutputs(task.id)
     void (async () => {
       const { readdir, stat } = await import('fs/promises')
       const { join, relative, isAbsolute } = await import('path')
-      // R4-P2：优先用适配器精确追踪的产物（M9 --print after_move:filepath / RE 混流
-      // 产物路径）——此前按「目录内最新视频」猜测，多任务共用保存目录并发完成时会
-      // 错拿他任务产物，回收站「含文件删除」误删
-      const tracked = (
-        task.engine === 'nm3u8'
-          ? this.nm3u8?.getOutputFiles(task.id)
-          : this.ytdlp?.getOutputFiles(task.id)
-      ) ?? []
       const absTracked = tracked.filter((p) => isAbsolute(p))
       const products: { path: string; size: number }[] = []
       for (const abs of absTracked) {
@@ -302,15 +311,37 @@ export class TaskManager {
   /** 排队启动包装：执行时重读任务并校验仍为 queued（过期/删除即放弃）。
    * P2 加固：launching 集合防同一任务并发 re-add 两次（磁力 waitMagnetMetadata
    * 最长 90s 期间 DB 一直是 queued，第二个入队的同任务 job 会穿透状态检查）。 */
-  private runWhenQueued(taskId: string, job: (t: TaskExt) => Promise<void>): () => void {
+  private runWhenQueued(taskId: string, job: (t: TaskExt) => Promise<string | void>): () => void {
     return () => {
       void (async () => {
         if (this.launching.has(taskId)) return
         this.launching.add(taskId)
         try {
+          // P1 修复（全功能审查 10-03）：成功路径此前不校验回收站——排队任务在
+          // startQueue 滞留期间被删除（softDeleteTask 只写 deleted_at，status 仍是
+          // queued）时，槽位释放后闭包照常执行，回收站任务被复活下载（幽灵任务）
           const cur = getTask(taskId) as TaskExt | null
-          if (!cur || cur.status !== 'queued') return
-          await job(cur)
+          if (!cur || cur.status !== 'queued' || isTrashed(taskId)) return
+          const gid = await job(cur)
+          // P2 修复：启动在途窗口（磁力 metadata 最长 90s）内的并发操作收口——
+          // 仅对 aria2 引擎生效（ytdlp/nm3u8 暂停走各自的 supervisor.pause 按
+          // taskId 查找，不依赖 gid）
+          if (typeof gid === 'string' && gid && cur.engine === 'aria2') {
+            const fresh = getTask(taskId) as TaskExt | null
+            if (!fresh || isTrashed(taskId)) {
+              // 在途删除：适配器已 addUri/addTorrent，移除孤儿 gid（否则无人
+              // 轮询、不可暂停不可删，直到应用退出）
+              await this.aria2.remove({ ...cur, engineGid: gid }).catch(() => {})
+              return
+            }
+            if (fresh.status === 'paused') {
+              // 在途暂停：对新 gid 补一发 pause——否则适配器 start 内部的
+              // unpause 让引擎继续下载，paused 又被轮询 active→running
+              // 合法转移静默撤销
+              await this.aria2.pause({ ...fresh, engineGid: gid }).catch(() => {})
+              return
+            }
+          }
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
           // P3 加固：await 期间状态可能已被轮询改写（如用户刚暂停）——重读复核再转移
@@ -583,6 +614,7 @@ export class TaskManager {
           this.runWhenQueued(task.id, async (cur) => {
             const gid = await this.aria2.start(cur)
             updateTaskFields(cur.id, { engineGid: gid })
+            return gid
           })
         )
       }
@@ -761,6 +793,7 @@ export class TaskManager {
       this.runWhenQueued(task.id, async (cur) => {
         const gid = await this.aria2.start(cur)
         updateTaskFields(cur.id, { engineGid: gid })
+        return gid
       })
     )
     log.info(`netdisk task created: ${name} (${(task.totalBytes / 1024 / 1024).toFixed(1)} MB)`)
@@ -782,6 +815,10 @@ export class TaskManager {
   }): Promise<void> {
     const task = getTask(input.taskId) as TaskExt | null
     if (!task) throw new Error('任务不存在或已删除')
+    // 审查修复（P2）：回收站任务的 status 仍是 awaiting/completed——无此防线时
+    // confirmSelection 会复活回收站任务下载（completed 路径还会清 completedAt、
+    // 扰动统计回撤记账），与 retryTask 的口径对齐
+    if (isTrashed(task.id)) throw new Error('任务已在回收站中，无法开始下载')
     // P3 修复：threads 钳制到 1–64（与 createTask 同口径）——渲染层可传任意整数
     // 入库并透传给 aria2 split
     const threads = Math.min(64, Math.max(1, Math.floor(Number(input.threads) || 16)))
@@ -823,6 +860,7 @@ export class TaskManager {
             reverseCompletion(prevCompletedAt, task.totalBytes ?? 0)
           }
           updateTaskFields(cur.id, { engineGid: gid })
+          return gid
         })
       )
       return
@@ -838,15 +876,17 @@ export class TaskManager {
     this.gateStart(this.runWhenQueued(task.id, (cur) => this.startConfirmed(cur, input)))
   }
 
-  /** awaiting→queued 后的引擎启动（磁力 changeOption+unpause / .torrent addTorrent / ytdlp spawn） */
+  /** awaiting→queued 后的引擎启动（磁力 changeOption+unpause / .torrent addTorrent / ytdlp spawn）。
+   * 返回 aria2 引擎的 gid 供 runWhenQueued 做在途删除/暂停收口（ytdlp/nm3u8 无需） */
   private async startConfirmed(
     task: TaskExt,
     input: { selectedPaths?: string[]; threads: number; video?: ConfirmSelectionInput['video'] }
-  ): Promise<void> {
+  ): Promise<string | void> {
+    let gid: string | undefined
     if (task.engine === 'ytdlp') {
       // M3：格式选择 → spawn 下载（合集按 --playlist-items 回放）
       if (input.video) this.ytdlp?.setVideoOptions(task.id, input.video)
-      const gid = await this.ytdlp!.start(
+      gid = await this.ytdlp!.start(
         task,
         this.isPlaylistTask(task) ? this.selectionFor(task) : undefined
       )
@@ -856,7 +896,7 @@ export class TaskManager {
       // 审查修复：必须整对象透传 input.video——此前白名单只取 formatId，
       // liveRecordMinutes 被丢弃，用户设置的直播录制时长永不生效（RE 无限录制）
       if (input.video) this.nm3u8?.setVideoOptions(task.id, input.video)
-      const gid = await this.nm3u8!.start(task)
+      gid = await this.nm3u8!.start(task)
       updateTaskFields(task.id, { engineGid: gid, threads: input.threads })
     } else if (task.pendingGid) {
       // 磁力暂停态：changeOption(select-file/dir/seed-ratio) + unpause（§4.2 Step3）
@@ -874,12 +914,14 @@ export class TaskManager {
       }
       updateTaskFields(task.id, { engineGid: task.pendingGid, threads: input.threads })
       await this.aria2.resume({ ...task, engineGid: task.pendingGid })
+      gid = task.pendingGid
     } else {
       // .torrent：addTorrent 注入 select-file（按 task_files 顺序映射索引）+ dir
-      const gid = await this.aria2.start(task, this.selectionFor(task))
+      gid = await this.aria2.start(task, this.selectionFor(task))
       updateTaskFields(task.id, { engineGid: gid, threads: input.threads })
     }
     this.pushEvent({ taskId: task.id, status: 'queued' })
+    return gid
   }
 
   // ── 控制（§6.1 task:control）───────────────────────────────────────
@@ -934,9 +976,11 @@ export class TaskManager {
             }
           }
           // P2 加固：await 期间轮询事件可能已把任务转移到 completed/failed——
-          // 用旧快照 transition 会把 DB 状态回写覆盖，必须重读复核
+          // 用旧快照 transition 会把 DB 状态回写覆盖，必须重读复核。
+          // 审查修复（P3）：并发删除窗口（outcome='removed' 落到通用收尾）内
+          // 不得给回收站行写 paused / 广播幽灵 paused 事件
           const fresh = getTask(input.taskId) as TaskExt | null
-          if (!fresh || (fresh.status !== 'running' && fresh.status !== 'queued')) return
+          if (!fresh || isTrashed(fresh.id) || (fresh.status !== 'running' && fresh.status !== 'queued')) return
           this.transition(fresh, 'paused')
           this.merger.drop(fresh.id) // 丢弃窗口内陈旧 running 事件，防止暂停被回放回退
           this.pushEvent({ taskId: fresh.id, status: 'paused' })
@@ -1020,6 +1064,8 @@ export class TaskManager {
         } else {
           softDeleteTask(task.id) // 回收站：默认保留文件（§4.5）
         }
+        // 产物登记随任务删除一并注销（remove 不产生 failed 事件，无人兜底清理）
+        this.dropEngineOutputs(task.id)
         // P3 修复：删除运行中任务时速度快照表此前只增不减（removed→failed 事件
         // 被 isTrashed 守卫拦截，currentEvents.delete 永不执行）
         this.currentEvents.delete(task.id)
@@ -1100,6 +1146,31 @@ export class TaskManager {
     }
   }
 
+  /** 适配器产物登记注销（persistCliProduct 捕获后 / failed 终态兜底） */
+  private dropEngineOutputs(taskId: string): void {
+    this.ytdlp?.dropOutputFiles(taskId)
+    this.nm3u8?.dropOutputFiles(taskId)
+  }
+
+  /**
+   * 审查修复（P1-2）：aria2 子进程中途崩溃重启后，新会话 gid 全部失效——
+   * running/verifying 任务每秒 tellStatus 报错被吞，永远收不到事件（无法暂停、
+   * 无法重试，无任何出口）。与 recoverOnStartup 同语义：按 aria2 侧任务重置回
+   * queued，由 recoverEngineTasks re-add 续传（BT 凭 infohash、http 凭 URL）。
+   */
+  async recoverAria2Restart(): Promise<void> {
+    const rows = listTasks({ status: ['running', 'paused', 'verifying', 'seeding'] }).filter(
+      (t) => t.engine === 'aria2'
+    )
+    for (const t of rows) {
+      updateTaskFields(t.id, { status: 'queued', engineGid: null })
+      this.pushEvent({ taskId: t.id, status: 'queued' })
+    }
+    if (rows.length > 0) {
+      log.warn(`aria2 中途重启：${rows.length} 个任务已重置回排队待续传`)
+    }
+  }
+
   // ── 持久化恢复（M1-11，§4.5）──────────────────────────────────────
 
   /**
@@ -1169,6 +1240,7 @@ export class TaskManager {
             return
           }
           updateTaskFields(cur.id, { engineGid: gid })
+          if (cur.engine === 'aria2') return gid
           // P3 加固：await 后重读复核，防旧快照覆盖轮询已写入的状态
           const fresh = getTask(cur.id) as TaskExt | null
           if (fresh && fresh.status === 'queued') {
@@ -1222,6 +1294,7 @@ export class TaskManager {
           gid = await this.aria2.start(fresh, this.selectionFor(cur))
         }
         updateTaskFields(cur.id, { engineGid: gid, error: null })
+        if (cur.engine === 'aria2') return gid
         // P3 加固：await 后重读复核，防旧快照覆盖轮询已写入的状态
         const fresh = getTask(taskId) as TaskExt | null
         if (fresh && fresh.status === 'queued') {
@@ -1336,6 +1409,9 @@ export class TaskManager {
       // H5：以产物实际大小记账
       const { stat } = await import('fs/promises')
       const size = await stat(output).then((s) => s.size).catch(() => 0)
+      // 审查修复（P3）：total_bytes 恒 0 → recomputeDailyStats 跨天后工具产物
+      // 字节数归零（统计口径漂移）；与 completion 增量同源回写
+      updateTaskFields(task.id, { totalBytes: size })
       // M3 修复：产物落 task_files——否则「彻底删除（含文件）」对工具任务只删记录，
       // 工具箱输出目录下的产物永久残留
       saveTaskFiles(task.id, [

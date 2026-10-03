@@ -303,6 +303,12 @@ export class Nm3u8Adapter {
     return this.outputFiles.get(taskId) ?? []
   }
 
+  /** 审查修复（P2-3 同型）：manager 同步捕获产物后注销（cleanupTaskState 不再提前
+   * 清理——否则 250ms 合并窗口后 getOutputFiles 恒空，精确追踪沦为死代码） */
+  dropOutputFiles(taskId: string): void {
+    this.outputFiles.delete(taskId)
+  }
+
   setVideoOptions(taskId: string, sel: Nm3u8Selection): void {
     this.videoOpts.set(taskId, sel)
   }
@@ -317,7 +323,7 @@ export class Nm3u8Adapter {
     this.argsByTask.delete(taskId)
     this.videoOpts.delete(taskId)
     this.lineTails.delete(taskId)
-    this.outputFiles.delete(taskId)
+    // outputFiles 改由 manager.dropEngineOutputs 注销（completed 事件合并窗口后读取）
     if (!keepPauseMark) this.userPaused.delete(taskId)
     this.supervisor.dropTask(taskId)
   }

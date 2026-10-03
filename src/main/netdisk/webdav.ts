@@ -129,6 +129,11 @@ export async function listWebdav(path: string): Promise<NetdiskEntry[]> {
   const base = getWebdavEndpoint()
   if (!base) throw new Error('未配置网盘/WebDAV 地址（设置 → 下载 → 网盘聚合）')
   const clean = ('/' + (path ?? '/')).replace(/\/+/g, '/')
+  // 审查修复（安全发现 3）：拒绝路径穿越/非法字符——被攻破的渲染层不得借
+  // netdisk:list 以主进程为代理探测端点根之外的任意服务器路径
+  if (/(^|\/)\.\.?(\/|$)/.test(clean) || clean.includes('\0') || clean.includes('\\')) {
+    throw new Error('目录路径不合法')
+  }
   const url = webdavUrlFor(base, clean)
   const headers: Record<string, string> = { Depth: '1' }
   const auth = basicAuthHeader()
