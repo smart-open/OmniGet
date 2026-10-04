@@ -3,6 +3,30 @@
 > OmniGet 产品变更记录。版本号遵循 `0.x.y` 约定：**x（中间版本号）随功能里程碑递增**，y 为里程碑内的小修/加固版本。初始版本 0.1.0。
 > 格式参考 Keep a Changelog；日期为里程碑完成时间。里程碑与验收口径溯源至《OmniGet-产品技术设计文档》§10。
 
+## [0.8.0] - 2026-10-04
+
+### 一期「发布就绪」（roadmap 1.1/1.3；backlog §一 #2/#3、#16、#21）
+
+- **Windows CI 代码签名开启（§一 #2）**：`build.yml` win 打包以 CLI 覆盖 `-c.win.signAndEditExecutable=true`（CI 具备 winCodeSign 缓存解压的特权条件，恢复 exe 图标/版本信息印刻；本地 `electron-builder.yml` 维持 `false`，无特权机器构建不受影响）；EV 证书可选通道——向仓库 secrets 配置 `WINDOWS_CSC_LINK` / `WINDOWS_CSC_KEY_PASSWORD` 即自动启用 signtool 签名，未配置（空值）时仅资源印刻
+- **GitHub Releases 发布侧资产（§一 #3，引擎按需下载/自动更新通道激活）**：
+  - `fetch-sidecars.mjs` 新增 deno（yt-dlp EJS 运行时）与 N_m3u8DL-RE 收集（软失败仅告警，不阻断出包）
+  - 新脚本 `scripts/gen-engine-manifest.mjs`：按 `engine-fetch.ts` ENGINE_FILES 同口径扫描引擎目录，产出 `<platform>-<arch>/manifest.json`（逐文件 SHA256）+ 引擎文件本体
+  - `build.yml` 新增 release job：tag 推送自动创建 GitHub Release——三平台安装包 + latest.yml/blockmap（electron-updater 元数据）+ 引擎资产一并挂载；资产按 `<platform>-<arch>-<文件名>` 扁平化（GitHub Release 资产是平铺命名空间，不支持子目录）
+  - `engine-fetch.ts` 资产定位双口径：目录式 `<platform>-<arch>/manifest.json` 404 时回退扁平 `<platform>-<arch>-manifest.json`（自建镜像/raw 分支维持目录式）
+- **SponsorBlock「跳过赞助/广告段」（#21 待办）**：`--sponsorblock-remove all` 物理剪切广告段（ffmpeg 在位才注入，随任务参数持久化、retry/resume 重放）；两个 SponsorBlock 选项收敛为**仅 YouTube 任务显示**（嗅探平台门控，此前标记选项对全部视频任务渲染）
+- **EJS 零包体方案落地（#16 调查项，jsruntime 第三级回退）**：`ELECTRON_RUN_AS_NODE=1` 下 Electron 主二进制即 Node.js 运行时——把自身可执行文件以 node 名注册进引擎目录（落盘三级：硬链接零拷贝 → 符号链接 → 复制；`node --version` 实测验证；应用更新后按体积对齐重建），spawn yt-dlp 时注入环境变量（子进程继承，yt-dlp 链路均非 Electron 进程无副作用）——不增一分包体/下载量获得 Node 运行时，VidBee 式捆绑 Node（+50MB）路线不再需要；健康页公示「Electron 复用（零包体）」；与 deno 同口径不入 TOFU（主进程从不执行，备案）
+
+### 回归审查修复（对本批次全部改动的审查）
+
+- **P1 陈旧 shim 环境变量缺失**：应用更新后 enginesDir 的 node 硬链接仍指向旧 exe inode（体积对齐重建在 tier-3，一级查找先行命中），原实现仅对 `source='shim'` 注入 `ELECTRON_RUN_AS_NODE=1`——yt-dlp 无环境变量调起旧 Electron 二进制会启动 GUI 而非 Node 运行时；改为凡解析自引擎目录的 node 一律注入（该变量为 Electron 专属，真 node.exe 零感知）
+- **P2 移除 shim 复制兜底**：跨卷（Windows 便携版）同步复制 ~200MB 发生在所有 yt-dlp spawn 经过的同步探测路径，阻塞主进程数秒以上；只保留硬链接（同卷）/符号链接（POSIX），跨卷降级「缺失」走 deno 按需下载主路径
+- P3：fetch-sidecars 软失败后不再误报「全部就位」（区分核心四件套与按需下载引擎软失败计数）
+
+### 遗留（外部资源 / 人工，roadmap 一期未关账项）
+
+- macOS 签名与公证：等待 Apple Developer 证书（§一 #1）
+- 音乐五平台逐平台人工回归（§三 #10）；yt-dlp EJS 真机验证需代理环境复测
+
 ## [0.7.3] - 2026-10-04
 
 ### 第七轮全面审查修复（五域并行：主链路 / 音乐网络 / 工具箱更新 / 渲染层 / 基建安全）

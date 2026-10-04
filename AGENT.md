@@ -1,6 +1,6 @@
 # AGENT.md — OmniGet 项目记忆
 
-> 最后更新：2026-10-02 ｜ 维护约定：每完成一个里程碑/批次后更新「进度」与「关键决策」
+> 最后更新：2026-10-04 ｜ 维护约定：每完成一个里程碑/批次后更新「进度」与「关键决策」
 
 ## 1. 项目是什么
 
@@ -53,6 +53,7 @@ resources/engines/ sidecar 按 <platform> 目录；构建经 extraResources
 - ✅ M3 视频 11/11：yt-dlp 监督器/适配器（进度模板/退出码分类/pause=SIGTERM/resume 重spawn）+ ffmpeg sidecar + 格式选择器（分辨率筛选/预览卡片/仅音频）+ 合集 playlist-items 回放 + 字幕/封面/cookie + 短视频 L1/L2/L3（wm_level 回填）+ 热更器（SHA256 TOFU + 回滚）
 - ✅ M4 打磨 13/17 + 🔶3 + ⏭1（可选悬浮窗）：回收站/统计页/快捷键+帮助/设置页（模板·调度·Tracker）/工具箱八件套/向导/诊断/完整性探测；🔶 Inspector layoutId、electron-updater 真机通道、三平台出包
 - ✅ 产品化批次（R1–R7/T1–T6，0.5.x–0.6.0）+ R7 续/R4 续批次（0.7.0，backlog #4/#8/#11/#16–#22）：N_m3u8DL-RE 引擎 + 直播录制、订阅追更中心（DB v2）、双档案去重、SponsorBlock、短视频解析服务 sidecar、JS 运行时探测（jsruntime.ts）、迷你悬浮窗（?view=mini）、预设导入导出/命名模板、BT 树虚拟化、sanitize 平台差异化；typecheck + 93/93 单测（2026-10-02）
+- ✅ 一期「发布就绪」代码侧（0.8.0，2026-10-04，roadmap 一期）：Windows CI 签名开启 + EV 可选通道；release job tag 推送自动建 Release（安装包 + latest.yml/blockmap + 引擎资产 manifest.json 扁平化）；engine-fetch 目录式 404 回退扁平口径；SponsorBlock 跳过段（仅 YouTube 显示）；EJS 零包体 shim（ELECTRON_RUN_AS_NODE）；typecheck + 125/125 单测。关账余外部/人工项（macOS 证书、五平台真机回归、EJS 代理复测）
 - ⬜ 收口演示（全部人工项）：磁力 `dc9e7581…` GUI、10k 60fps、mac/Linux 清单、五平台各一次成功、B 站 1080P+cookie / YouTube 4K / 抖音快手短链、light 走查、三态走查、NSIS 出包
 
 ## 5. 关键决策与约定（不可随意更改）
@@ -150,13 +151,19 @@ npm run dev               # GUI 冒烟（看日志：aria2 online / tray created
 - 设置页分区 / 工具箱说明：见对应 feature
 
 ## 9. 已知待办 / 坑
-- ~~Sidecar 全家桶 ~262MB~~ → 引擎按需下载机制已就绪（R6，manifest+SHA256+TOFU）；发布侧需在 Releases 提供 `<platform>-<arch>/manifest.json` 与引擎资产（backlog #3，🔴 首个 release）
+- ~~Sidecar 全家桶 ~262MB~~ → 引擎按需下载机制已就绪（R6，manifest+SHA256+TOFU）；发布侧资产链已就绪（0.8.0 release job：tag 推送自动挂 manifest.json + 引擎文件；首个 release 待打 v0.8.0 tag，发布仓库须与 `DEFAULT_MIRROR`（smart-open/OmniGet）对齐）
 - 真机回归项见 `docs/backlog.md` §三（主题走查/10k 60fps/mac·Linux 冒烟/五平台逐平台人工回归）
 - Windows 冒烟清理命令（Stop-Process/taskkill）需审批，脚本化时注意
 - 音乐进度为阶段文案（引擎无字节回调）；试听依赖第三方镜像可用性（断流有黄条兜底）
 - 收口演示项：磁力 `dc9e7581…` GUI 全链路、10k 60fps、mac/Linux 清单、五平台各一次成功
 
 ## 10. 审查与修复记录
+
+**一期发布就绪批次（2026-10-04，0.8.0，roadmap 一期 / backlog §一 #2/#3、#16、#21）**：typecheck 双端 + 125/125 单测。要点——
+1. **Windows CI 签名**：build.yml win 打包 CLI 覆盖 `-c.win.signAndEditExecutable=true`（本地 yml 维持 false）；EV 证书可选——`WINDOWS_CSC_LINK`/`WINDOWS_CSC_KEY_PASSWORD` secrets 空值时 electron-builder 跳过签名仅资源印刻
+2. **Release 发布侧资产**：fetch-sidecars 新增 deno / N_m3u8DL-RE（软失败不阻断出包）→ `scripts/gen-engine-manifest.mjs`（ENGINE_FILES 同口径 SHA256 清单 + 引擎文件本体）→ release job（tag 推送，`gh release create` 失败回退 `--clobber` 上传）；**GitHub Release 资产是平铺命名空间**——资产按 `<platform>-<arch>-<文件名>` 扁平化，engine-fetch 目录式 404 回退扁平口径（自建镜像维持目录式）
+3. **SponsorBlock 跳过段**：`sponsorBlockRemove` → `--sponsorblock-remove all`（ffmpeg 在位口径，随 params 持久化重放）；两个 SponsorBlock 选项门控 `sniffPlatform === 'youtube'`（此前标记选项对全部视频任务渲染，与 roadmap「仅 YouTube 任务显示」口径不符）
+4. **EJS 零包体 shim**（backlog #16 调查结论）：jsruntime 三级回退 enginesDir → PATH → Electron 复用——`ELECTRON_RUN_AS_NODE=1` 下自身二进制即 Node 运行时，以 node 名注册进 enginesDir（硬链接零拷贝 → 符号链接，**不做跨卷复制兜底**；`--version` 实测验证防壳形态异常；体积对齐重建随应用更新）；凡引擎目录解析出的 node 一律注入 env（陈旧硬链接防 GUI 误拉起）；不入 TOFU（主进程从不执行，同 deno 备案）。回归审查同批修 P1×1/P2×1/P3×1（见 CHANGELOG 0.8.0）
 
 **R7 续 + R4 续批次（2026-10-02，0.7.0，backlog #4/#8/#11/#16–#22）**：typecheck 双端 + 93/93 单测 + N_m3u8DL-RE 真机 E2E（真实 m3u8 → demo.mp4 68MB）。要点——
 1. **N_m3u8DL-RE 引擎接入**：`adapters/nm3u8.ts`（`-M format=mp4` 混流、`N/M xx%` 分片进度、pause=SIGTERM 保留分片、exit 0 stat 回填）+ 清单解析纯函数 `nm3u8-parse.ts`（6 例，引号感知属性解析 → master 变体格式选择）+ manager 全量接线（engine 路由 RE 在位走 nm3u8/缺失回落 yt-dlp、确认/暂停/恢复/重试/重启恢复/并发闸门/健康面板「nm3u8」行）；清单链接嗅探分型按 pathname（仅 `.m3u8/.m3u/.mpd`，防误报）

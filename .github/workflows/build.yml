@@ -101,11 +101,21 @@ jobs:
         # 但下方「Rename artifacts (windows)」已补生成 latest.yml 并保留重命名的
         # blockmap——win 发布资产挂上即恢复 electron-updater 整包/差量自动更新。
         # mac/linux 仍走应用内手动检查（GitHub API 比对 + 引擎热更）通道
+        #
+        # 一期（backlog §一 #2）：CI runner 具备 winCodeSign 缓存解压的特权条件，
+        # 用 CLI 覆盖开启 signAndEditExecutable（恢复 exe 图标/版本信息印刻；
+        # 本地 electron-builder.yml 维持 false，无特权机器构建不再炸）。
+        # EV 证书（可选）：向仓库 secrets 配置 WINDOWS_CSC_LINK（PFX base64 或 URL）/
+        # WINDOWS_CSC_KEY_PASSWORD 后自动启用 signtool 签名；未配置（空值）时
+        # electron-builder 跳过签名仅做资源印刻，构建不受影响
         run: |
           case "${{ matrix.platform }}" in
-            win) npx electron-builder --win --publish never ;;
+            win) npx electron-builder --win --publish never -c.win.signAndEditExecutable=true ;;
             linux) npx electron-builder --linux --publish never ;;
           esac
+        env:
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
 
       # ── mac：arm64 runner 分架构两段出包（x64 dmg 不能捆绑 arm64 sidecar）──
       # 架构断言（file 命令）：aria2 的 macos-darwin 资产架构未证实（单一资产覆盖两段
@@ -230,6 +240,20 @@ jobs:
           for f in *-amd64.deb;       do [ -e "$f" ] && mv "$f" "OmniGet_${V}_x64.deb"; done
           ls OmniGet_* || true
 
+      # ── 一期（backlog §一 #3）：发布侧引擎资产 ─────────────────────────
+      # 应用内引擎按需下载（engine-fetch）的数据源：<platform>-<arch>/manifest.json
+      # + 引擎文件本体（含 deno / N_m3u8DL-RE 软收集项——缺失时清单相应缺条目）
+      - name: Prepare engine dist
+        run: node scripts/gen-engine-manifest.mjs
+
+      - name: Upload engine dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: omniget-engine-dist-${{ matrix.platform }}
+          path: release/engine-dist
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -245,3 +269,48 @@ jobs:
             release/OmniGet*.deb
           if-no-files-found: warn
           retention-days: 14
+
+  # ── 一期（backlog §一 #3）：tag 推送自动创建 GitHub Release ──────────
+  # 挂齐三平台安装包 + latest.yml/blockmap（electron-updater 自动更新元数据）
+  # + <platform>-<arch> 引擎资产（按需下载/热更通道）。Release 资产是平铺
+  # 命名空间，引擎资产按 <platform>-<arch>-<文件名> 扁平化上传
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: omniget-*
+          path: dist
+
+      - name: Flatten release assets
+        shell: bash
+        run: |
+          mkdir rel
+          for d in dist/omniget-win dist/omniget-mac dist/omniget-linux; do
+            [ -d "$d" ] && cp "$d"/OmniGet* "$d"/latest.yml rel/ 2>/dev/null || true
+          done
+          # 引擎资产按 manifest.json 所在目录定位（与 upload-artifact 的目录层级无关）
+          for d in $(find dist -type f -name manifest.json | xargs -n1 dirname); do
+            key=$(basename "$d")
+            cp "$d/manifest.json" "rel/${key}-manifest.json"
+            for f in "$d"/*; do
+              b=$(basename "$f")
+              [ "$b" = manifest.json ] && continue
+              cp "$f" "rel/${key}-${b}"
+            done
+          done
+          ls -la rel
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "OmniGet ${{ github.ref_name }}" \
+            --generate-notes \
+            rel/* \
+          || gh release upload "${{ github.ref_name }}" rel/* --clobber

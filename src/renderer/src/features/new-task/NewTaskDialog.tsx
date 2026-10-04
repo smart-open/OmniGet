@@ -88,8 +88,12 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
   // → 复选框永不渲染、功能整体死代码；改存嗅探到的平台标识
   const [sniffPlatform, setSniffPlatform] = useState<string | null>(null)
   const isShortVideo = sniffPlatform !== null && ['douyin', 'kuaishou', 'xiaohongshu', 'xigua', 'weibo'].includes(sniffPlatform)
+  // 一期 0.8.0（backlog #21）：SponsorBlock 选项仅对 YouTube 任务显示（嗅探平台口径）
+  const isYouTube = sniffPlatform === 'youtube'
   // R7 续（backlog #21/#20）：SponsorBlock 标记 + 直播录制时长（分钟，0=不限）
   const [sponsorBlock, setSponsorBlock] = useState(false)
+  // 一期 0.8.0（backlog #21 待办）：跳过赞助/广告段
+  const [sponsorBlockRemove, setSponsorBlockRemove] = useState(false)
   const [liveLimit, setLiveLimit] = useState('0')
   // backlog #27（2026-10-03）：内嵌元数据与章节
   const [embedMetadata, setEmbedMetadata] = useState(false)
@@ -136,6 +140,7 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
       setEmbedThumbnail(false)
       setDelogo(false)
       setSponsorBlock(false)
+      setSponsorBlockRemove(false)
       setEmbedMetadata(false)
       setSniffPlatform(null)
       // 审查修复（P2-5）：直播录制时长此前不在重置清单——上一会话选的 30/60 分钟
@@ -617,6 +622,8 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
               template: nameTemplate.trim() || undefined,
               // R7 续（backlog #21）：SponsorBlock 章节标记（YouTube）
               sponsorBlock: sponsorBlock || undefined,
+              // 一期 0.8.0（backlog #21 待办）：跳过赞助/广告段（YouTube）
+              sponsorBlockRemove: sponsorBlockRemove || undefined,
               // backlog #27（2026-10-03）：内嵌元数据与章节
               embedMetadata: embedMetadata || undefined,
               // R7 续（backlog #20）：直播录制时长（分钟；仅 RE 引擎的直播流）
@@ -1091,15 +1098,27 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
                     </label>
                   </div>
 
-                  {/* R7 续（backlog #21）：SponsorBlock 广告段标记（yt-dlp 原生，YouTube） */}
-                  <label className="mt-2 flex cursor-pointer items-center gap-1.5 text-[11px] text-text-2">
-                    <input
-                      type="checkbox"
-                      checked={sponsorBlock}
-                      onChange={(e) => setSponsorBlock(e.target.checked)}
-                    />
-                    SponsorBlock：标记赞助/广告段为章节（YouTube）
-                  </label>
+                  {/* R7 续（backlog #21）+ 一期 0.8.0：SponsorBlock 标记/跳过（yt-dlp 原生，仅 YouTube 任务显示） */}
+                  {isYouTube && (
+                    <>
+                      <label className="mt-2 flex cursor-pointer items-center gap-1.5 text-[11px] text-text-2">
+                        <input
+                          type="checkbox"
+                          checked={sponsorBlock}
+                          onChange={(e) => setSponsorBlock(e.target.checked)}
+                        />
+                        SponsorBlock：标记赞助/广告段为章节（YouTube）
+                      </label>
+                      <label className="mt-1.5 flex cursor-pointer items-center gap-1.5 text-[11px] text-text-2">
+                        <input
+                          type="checkbox"
+                          checked={sponsorBlockRemove}
+                          onChange={(e) => setSponsorBlockRemove(e.target.checked)}
+                        />
+                        SponsorBlock：跳过赞助/广告段（剪切掉对应片段，需 ffmpeg）
+                      </label>
+                    </>
+                  )}
 
                   {/* backlog #27（2026-10-03）：元数据与章节内嵌（yt-dlp 原生，ffmpeg） */}
                   <label className="mt-2 flex cursor-pointer items-center gap-1.5 text-[11px] text-text-2">

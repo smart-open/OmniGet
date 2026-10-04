@@ -30,11 +30,12 @@
 ## 一期（0.8.x）发布就绪 — 约 4 周
 
 > **主题：把「能下载」变成「敢发布」。** 发布链路与已知兼容性风险先清账，后续各期功能才有可发布载体。
+> **进度（2026-10-04）**：代码侧三项全部落地（0.8.0），关账仅余外部资源/人工项（macOS 证书、五平台真机回归、EJS 代理复测）。
 
 ### 1.1 发布链路收口（backlog §一）
 
-- [ ] 🟠 Windows CI 代码签名：开启 `signAndEditExecutable`（恢复 exe 图标/版本信息），EV 证书可选（backlog §一 #2）
-- [ ] 🟠 GitHub Releases 发布侧资产：`<platform>-<arch>/manifest.json` + 引擎文件 + deno 资产，激活引擎按需下载与自动更新通道（backlog §一 #3）
+- [x] ✅（2026-10-04）Windows CI 代码签名：`build.yml` CLI 覆盖开启 `signAndEditExecutable`（恢复 exe 图标/版本信息）；EV 证书可选通道就绪（`WINDOWS_CSC_LINK`/`WINDOWS_CSC_KEY_PASSWORD` secrets 配置即签名）（backlog §一 #2）
+- [x] ✅（2026-10-04）GitHub Releases 发布侧资产：release job tag 推送自动建 Release——`<platform>-<arch>/manifest.json`（SHA256）+ 引擎文件 + deno 资产扁平化挂载；`engine-fetch` 目录式 404 回退扁平口径（backlog §一 #3；首个 release 待打 v0.8.0 tag）
 - [ ] 🟠 macOS 签名与公证：视 Apple 证书到位情况（backlog §一 #1，等待外部资源）
 
 ### 1.2 音乐五平台真机回归（音乐线生命线）
@@ -43,8 +44,8 @@
 
 ### 1.3 零成本清账
 
-- [ ] 🟠 SponsorBlock「跳过赞助/广告段」开关（backlog #21 待办，仅 YouTube 任务显示，L1/L2 参数注入）
-- [ ] 🟠 yt-dlp EJS 运行时真机验证（代理环境复测）+ `ELECTRON_RUN_AS_NODE` 零包体方案调查（backlog #16，YouTube 兼容性直接影响视频线口碑）
+- [x] ✅（2026-10-04）SponsorBlock「跳过赞助/广告段」开关（backlog #21 待办，`--sponsorblock-remove all`，仅 YouTube 任务显示，ffmpeg 在位注入，随任务参数持久化重放）
+- [x] ✅（2026-10-04）yt-dlp EJS 运行时零包体方案落地（backlog #16）：ELECTRON_RUN_AS_NODE shim（自身二进制以 node 名注册引擎目录，硬链接零拷贝 + 实测验证 + 版本对齐重建）；🟠 代理环境真机复测仍待人工（backlog #16）
 
 **验收口径**：三平台出包可发、五平台音乐逐平台通过。
 

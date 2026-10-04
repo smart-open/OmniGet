@@ -32,6 +32,8 @@ export interface VideoSelection {
   template?: string
   /** R7 续（backlog #21）：SponsorBlock 广告段标记为章节（YouTube） */
   sponsorBlock?: boolean
+  /** 一期 0.8.0（backlog #21 待办）：SponsorBlock 跳过赞助/广告段（YouTube；ffmpeg 剪辑后处理） */
+  sponsorBlockRemove?: boolean
   /** backlog #27（2026-10-03）：内嵌元数据与章节（ffmpeg 后处理依赖） */
   embedMetadata?: boolean
 }
@@ -217,6 +219,11 @@ export class YtDlpAdapter {
     // R7 续（backlog #21）：SponsorBlock 广告段标记为章节（YouTube 原生支持）
     if (opts.sponsorBlock) {
       args.push('--sponsorblock-mark', 'all')
+    }
+    // 一期 0.8.0（backlog #21 待办）：跳过赞助/广告段（--sponsorblock-remove 物理剪切，
+    // 依赖 ffmpeg 后处理——与 embed-metadata 同一 ffmpeg 在位口径）
+    if (opts.sponsorBlockRemove && this.ffmpegOk) {
+      args.push('--sponsorblock-remove', 'all')
     }
     // backlog #27（2026-10-03）：元数据与章节内嵌（零外部依赖；ffmpeg 在位才注入，
     // 与 --embed-subs/--embed-thumbnail 同一 ffmpeg 依赖口径）

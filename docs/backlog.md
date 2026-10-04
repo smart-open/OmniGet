@@ -36,17 +36,17 @@
   - [ ] 取消 yml 注释 + 提供 `build/entitlements.mac.plist`
 - **备注**：无证书期间分发口径（2026-10-01 确认暂无 Apple 开发者账号）：未签名 dmg，用户首开需右键 →「打开」或 `xattr -cr /Applications/OmniGet.app`；应用已实现 TOFU 引擎指纹校验，未签名不影响运行时安全闸门。
 
-### 2. 🟠 Windows CI 代码签名
-- **现状**：本地构建因 winCodeSign 特权缺失以 `signAndEditExecutable: false` 绕过（exe 无图标/版本信息印刻）。
-- **待办**：
-  - [ ] CI 上开启 `signAndEditExecutable`（恢复 exe 图标/版本信息），见 `electron-builder.yml` 内注释
-  - - [ ] 可选：EV 代码签名证书（设计文档 §8，可显著降低杀软误报）
+### 2. ✅（2026-10-04）Windows CI 代码签名
+- **已完成（一期 0.8.0）**：
+  - [x] ✅ CI 上开启 `signAndEditExecutable`：`build.yml` win 打包 CLI 覆盖 `-c.win.signAndEditExecutable=true`（CI 具备 winCodeSign 特权条件，恢复 exe 图标/版本信息印刻）；本地 `electron-builder.yml` 维持 `false`
+  - [x] ✅ 可选 EV 证书通道：secrets 配置 `WINDOWS_CSC_LINK` / `WINDOWS_CSC_KEY_PASSWORD` 即自动启用 signtool 签名（显著降低杀软误报）；未配置（空值）仅资源印刻，构建不受影响
 
-### 3. 🟠 GitHub Releases 发布侧资产（引擎按需下载生效前提）
-- **现状**：R6 引擎按需下载机制已就绪（`updater/engine-fetch.ts`，manifest SHA256 + TOFU），但下载端点在发布侧资产缺失时会明确报"manifest 获取失败"。
-- **待办**：
-  - [ ] GitHub Releases 提供 `<platform>-<arch>/manifest.json` 与引擎文件资产
-  - [ ] 创建首个 release（electron-updater 需 latest 元数据，拉不到时静默跳过；Linux 手动更新通道版本比对同样依赖）
+### 3. ✅（2026-10-04）GitHub Releases 发布侧资产（引擎按需下载生效前提）
+- **已完成（一期 0.8.0）**：
+  - [x] ✅ 发布资产生成链：`fetch-sidecars.mjs` 新增 deno / N_m3u8DL-RE 收集（软失败不阻断出包）→ `scripts/gen-engine-manifest.mjs` 产出 `<platform>-<arch>/manifest.json`（SHA256）+ 引擎文件本体 → `build.yml` release job tag 推送自动创建 Release（三平台安装包 + latest.yml/blockmap + 引擎资产）
+  - [x] ✅ GitHub Release 资产是平铺命名空间（不支持子目录）——资产按 `<platform>-<arch>-<文件名>` 扁平化上传；`engine-fetch.ts` 目录式 404 回退扁平口径（自建镜像/raw 分支维持目录式）
+- **待办（发布动作）**：
+  - [ ] 打 v0.8.0 tag 推送即自动产出首个 release（electron-updater 需 latest 元数据；确认发布仓库与 `DEFAULT_MIRROR`（smart-open/OmniGet）对齐）
 
 ---
 
@@ -148,7 +148,7 @@
   - [x] ✅ 引擎清单增加 deno（按需下载位，kind=tool 不入 TOFU；待 #3 release 资产提供 `deno.exe` + SHA256）
 - **待办**：
   - [ ] 真机验证：本机直连 YouTube 超时无法实测 EJS 报错形态，需代理环境复测（健康页公示已可让用户侧自行发现）
-  - [ ] 调查零包体方案：Electron 主进程 `ELECTRON_RUN_AS_NODE=1` 包装器充当 node 运行时（VidBee 方案增包体 ~50MB，优先验证免增方案）
+  - [x] ✅（2026-10-04）零包体方案落地（一期 0.8.0）：`jsruntime.ts` 第三级回退——enginesDir/PATH 均无运行时时，把自身二进制以 node 名注册进引擎目录（`ELECTRON_RUN_AS_NODE=1` 下 Electron 主二进制即 Node.js 运行时；落盘三级：硬链接零拷贝 → 符号链接 → 复制；`node --version` 实测验证 + 应用更新后按体积对齐重建），spawn yt-dlp 注入环境变量（子进程继承，链路无 Electron 进程无副作用）；健康页公示「Electron 复用（零包体）」；不入 TOFU（主进程从不执行，同 deno 备案）——VidBee 式捆绑 Node（+50MB）路线不再需要
 - **⚠ 影响面**：仅 YouTube 等依赖 nsig 挑战的站点；国内站点提取不受影响，故未在历史回归中暴露。
 
 ### 17. 🟠 HLS/DASH 流媒体引擎（N_m3u8DL-RE）——两阶段全部落地
@@ -184,7 +184,7 @@
 - **依据**：yt-dlp 原生 `--sponsorblock-mark` / `--sponsorblock-remove`（社区众包广告段数据库），零外部依赖。
 - **已完成**：对话框视频选项「SponsorBlock：标记赞助/广告段为章节」→ `ConfirmSelectionInput.video.sponsorBlock` → `--sponsorblock-mark all` 参数注入（随任务参数持久化，resume 重放）。
 - **依据**：yt-dlp 原生 `--sponsorblock-mark` / `--sponsorblock-remove`（社区众包广告段数据库），零外部依赖。
-- **待办**：[ ] 新建对话框视频选项加「跳过赞助/广告段」开关（仅 YouTube 任务显示），映射 L1/L2 参数注入。
+- **待办**：[x] ✅（2026-10-04）「跳过赞助/广告段」开关落地（一期 0.8.0）：`ConfirmSelectionInput.video.sponsorBlockRemove` → `--sponsorblock-remove all`（ffmpeg 在位才注入，随任务参数持久化、retry/resume 重放）；两个 SponsorBlock 选项收敛为仅 YouTube 任务显示（嗅探平台门控）。
 
 ### 22. ✅（2026-10-02）已下载去重（--download-archive）
 - **依据**：spotDL sync / Pinchflat 均以 archive 文件为去重底座；OmniGet 重复粘贴同一合集 URL 会重复下载。

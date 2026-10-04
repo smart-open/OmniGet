@@ -165,17 +165,36 @@ function manifestUrl(base: string): string {
   return `${base}/${dirKey()}/manifest.json`
 }
 
-async function fetchManifest(base: string): Promise<Record<string, string>> {
-  const res = await undiciFetch(manifestUrl(base), { signal: AbortSignal.timeout(15_000) })
-  if (!res.ok) {
-    // 404 = 分发源尚无当前平台目录（发布资产未就绪，backlog #3）——给出可自解释
-    // 的文案，避免每次启动的"补齐失败"通知让用户误判为故障
-    const hint = res.status === 404 ? '（分发源暂未提供该平台的引擎清单，等待发布资产）' : ''
-    throw new Error(`manifest 获取失败（HTTP ${res.status}）${hint}`)
+/** 一期 0.8.0（backlog §一 #3）：资产定位双口径。
+ * 自建镜像/raw 分支用目录式（<platform>-<arch>/manifest.json）；GitHub Releases
+ * 的资产是平铺命名空间（不支持子目录），发布工作流按
+ * <platform>-<arch>-<文件名> 上传——目录式 404 时回退扁平口径。 */
+type MirrorLayout = 'dir' | 'flat'
+
+function fileUrl(base: string, layout: MirrorLayout, file: string): string {
+  return layout === 'dir'
+    ? `${base}/${dirKey()}/${encodeURIComponent(file)}`
+    : `${base}/${dirKey()}-${encodeURIComponent(file)}`
+}
+
+async function fetchManifest(base: string): Promise<{ files: Record<string, string>; layout: MirrorLayout }> {
+  let lastStatus = 0
+  for (const layout of ['dir', 'flat'] as const) {
+    const url = layout === 'dir' ? manifestUrl(base) : `${base}/${dirKey()}-manifest.json`
+    const res = await undiciFetch(url, { signal: AbortSignal.timeout(15_000) })
+    if (res.status === 404) {
+      // 目录式 404 = 分发源可能只提供扁平资产，继续试下一口径
+      lastStatus = 404
+      continue
+    }
+    if (!res.ok) throw new Error(`manifest 获取失败（HTTP ${res.status}）`)
+    const raw = (await res.json()) as { files?: Record<string, string> }
+    if (!raw?.files || typeof raw.files !== 'object') throw new Error('manifest 格式不合法')
+    return { files: raw.files, layout }
   }
-  const raw = (await res.json()) as { files?: Record<string, string> }
-  if (!raw?.files || typeof raw.files !== 'object') throw new Error('manifest 格式不合法')
-  return raw.files
+  // 404 = 分发源尚无当前平台目录（发布资产未就绪，backlog #3）——给出可自解释
+  // 的文案，避免每次启动的"补齐失败"通知让用户误判为故障
+  throw new Error(`manifest 获取失败（HTTP ${lastStatus}）（分发源暂未提供该平台的引擎清单，等待发布资产）`)
 }
 
 /** 第七轮：空闲超时——60s 无任何字节进度才中断（硬 10min 总超时对弱网大引擎
@@ -325,14 +344,18 @@ async function runFetchMissingEngines(opts: FetchOptions): Promise<FetchResult> 
   if (wanted.length === 0) return result
 
   let manifest: Record<string, string>
+  let layout: MirrorLayout = 'dir'
   try {
-    manifest = await fetchManifest(base)
+    const m = await fetchManifest(base)
+    manifest = m.files
+    layout = m.layout
   } catch (err) {
     const error = `${err instanceof Error ? err.message : String(err)}（分发源：${manifestUrl(base)}）`
     for (const e of wanted) result.failed.push({ name: e.name, error })
     log.warn(`engine manifest unavailable: ${error}`)
     return result
   }
+  if (layout === 'flat') log.info(`engine mirror uses flat asset naming (${dirKey()}-<file>)`)
 
   for (const e of wanted) {
     const file = fileOf(e.name)
@@ -343,7 +366,7 @@ async function runFetchMissingEngines(opts: FetchOptions): Promise<FetchResult> 
     }
     try {
       await downloadAndVerify(
-        `${base}/${dirKey()}/${encodeURIComponent(file)}`,
+        fileUrl(base, layout, file),
         sha,
         pathOf(e.name),
         (received, total) => opts.onProgress?.(e.name, received, total)

@@ -115,6 +115,8 @@ export interface ConfirmSelectionInput {
     template?: string
     /** R7 续（backlog #21）：SponsorBlock 广告段标记为章节（YouTube） */
     sponsorBlock?: boolean
+    /** 一期 0.8.0（backlog #21 待办）：SponsorBlock 跳过赞助/广告段（YouTube；ffmpeg 剪辑依赖） */
+    sponsorBlockRemove?: boolean
     /** R7 续（backlog #20）：直播录制时长（分钟；仅 RE 引擎的直播流任务） */
     liveRecordMinutes?: number
     /** backlog #27（2026-10-03）：内嵌元数据与章节（--embed-metadata --embed-chapters） */

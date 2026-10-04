@@ -274,13 +274,81 @@ async function fetchFfmpeg() {
   }
 }
 
+/** 一期 0.8.0（backlog §一 #3/#16）：deno——yt-dlp 外部 JS 运行时（YouTube EJS 硬要求）。
+ * 引擎按需下载机制的发布侧资产（app 内不捆绑，kind=tool 不入 TOFU） */
+async function fetchDeno() {
+  const bin = plat === 'win32' ? 'deno.exe' : 'deno'
+  if (!(await need(bin))) return
+  const assetName =
+    arch === 'arm64'
+      ? plat === 'darwin'
+        ? 'deno-aarch64-apple-darwin.zip'
+        : 'deno-aarch64-unknown-linux-gnu.zip'
+      : plat === 'darwin'
+        ? 'deno-x86_64-apple-darwin.zip'
+        : 'deno-x86_64-unknown-linux-gnu.zip'
+  console.log('deno (denoland/deno) …')
+  const rel = ghLatest('denoland/deno')
+  const asset = rel.assets?.find((a) => a.name === assetName)
+  if (!asset) throw new Error(`deno release ${rel.tag_name} 缺少资产 ${assetName}`)
+  const tmp = join(tmpdir(), assetName)
+  await unlink(tmp).catch(() => {})
+  download(asset.browser_download_url, tmp)
+  const ex = join(tmpdir(), `deno-x-${Date.now()}`)
+  await mkdir(ex, { recursive: true })
+  unzip(tmp, ex)
+  const found = findFile(ex, plat === 'win32' ? /^deno\.exe$/i : /^deno$/)
+  if (!found) throw new Error('解包后未找到 deno')
+  await place(found, bin)
+}
+
+/** 一期 0.8.0（backlog §一 #3/#17）：N_m3u8DL-RE——HLS/DASH 引擎按需下载资产
+ * （发布侧直接放置解包后单文件，免 zip 解压支持口径与 app 内一致） */
+async function fetchNm3u8Re() {
+  const bin = plat === 'win32' ? 'N_m3u8DL-RE.exe' : 'N_m3u8DL-RE'
+  if (!(await need(bin))) return
+  const pat =
+    plat === 'win32'
+      ? /N_m3u8DL-RE_.*win-x64.*\.zip$/i
+      : arch === 'arm64'
+        ? plat === 'darwin'
+          ? /N_m3u8DL-RE_.*osx-arm64.*\.tar\.gz$/i
+          : /N_m3u8DL-RE_.*linux-arm64.*\.tar\.gz$/i
+        : plat === 'darwin'
+          ? /N_m3u8DL-RE_.*osx-x64.*\.tar\.gz$/i
+          : /N_m3u8DL-RE_.*linux-x64.*\.tar\.gz$/i
+  console.log('N_m3u8DL-RE (nilaoda/N_m3u8DL-RE) …')
+  const rel = ghLatest('nilaoda/N_m3u8DL-RE')
+  const asset = rel.assets?.find((a) => pat.test(a.name))
+  if (!asset) throw new Error(`N_m3u8DL-RE release ${rel.tag_name} 无匹配平台资产`)
+  const tmp = join(tmpdir(), asset.name)
+  await unlink(tmp).catch(() => {})
+  download(asset.browser_download_url, tmp)
+  const ex = join(tmpdir(), `nre-x-${Date.now()}`)
+  await mkdir(ex, { recursive: true })
+  if (asset.name.endsWith('.zip')) unzip(tmp, ex)
+  else untar(tmp, ex)
+  const found = findFile(ex, plat === 'win32' ? /^N_m3u8DL-RE\.exe$/i : /^N_m3u8DL-RE$/)
+  if (!found) throw new Error('解包后未找到 N_m3u8DL-RE')
+  await place(found, bin)
+}
+
 await mkdir(OUT, { recursive: true })
 console.log(`[sidecars] 目标目录：${OUT}`)
 let failed = 0
-for (const job of [fetchYtDlp, fetchAria2, fetchFfmpeg]) {
+// SOFT：按需下载增强项（deno / N_m3u8DL-RE app 内不捆绑）——收集失败仅告警不阻断出包，
+// 应用侧运行时经发布资产按需补齐；核心四件套（yt-dlp/aria2/ffmpeg 族）失败仍硬失败
+const SOFT = new Set(['fetchDeno', 'fetchNm3u8Re'])
+let softFailed = 0
+for (const job of [fetchYtDlp, fetchAria2, fetchFfmpeg, fetchDeno, fetchNm3u8Re]) {
   try {
     await job()
   } catch (err) {
+    if (SOFT.has(job.name)) {
+      softFailed++
+      console.error(`  ⚠ ${job.name}: ${err.message}（软失败：不影响出包，发布资产将缺少该引擎）`)
+      continue
+    }
     failed++
     console.error(`  ✗ ${job.name}: ${err.message}`)
   }
@@ -288,6 +356,8 @@ for (const job of [fetchYtDlp, fetchAria2, fetchFfmpeg]) {
 if (failed > 0) {
   console.error(`[sidecars] ${failed} 项失败——请重试或手动放置到引擎目录`)
   process.exitCode = 1
+} else if (softFailed > 0) {
+  console.log(`[sidecars] 核心四件套就位（${softFailed} 项按需下载引擎软失败，发布资产将缺少，见上方告警）`)
 } else {
   console.log('[sidecars] 全部就位')
 }

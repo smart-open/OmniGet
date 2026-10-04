@@ -36,7 +36,9 @@ win:
       arch:
         - x64
   # 本机无符号链接特权时 winCodeSign 缓存解压失败（darwin dylib 软链）。
-  # 开启 Windows「开发者模式」或 CI（管理员特权）后可移除此开关，恢复 exe 图标/版本戳印。
+  # 开启 Windows「开发者模式」后可移除此开关，恢复 exe 图标/版本戳印。
+  # 一期（backlog §一 #2）：CI 已用 CLI 覆盖 -c.win.signAndEditExecutable=true；
+  # EV 证书经 CI secrets（WINDOWS_CSC_LINK / WINDOWS_CSC_KEY_PASSWORD）接入
   signAndEditExecutable: false
 nsis:
   oneClick: false
