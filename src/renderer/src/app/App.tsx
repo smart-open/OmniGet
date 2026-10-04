@@ -32,6 +32,7 @@ import { TaskList } from '../features/tasks/TaskList'
 import { NewTaskDialog } from '../features/new-task/NewTaskDialog'
 import { MusicWorkbench } from '../features/music/MusicWorkbench'
 import { MusicLibrary } from '../features/library/MusicLibrary'
+import { VideoLibrary } from '../features/library/VideoLibrary'
 import { SettingsPage } from '../features/settings/SettingsPage'
 import { StatsPage } from '../features/stats/StatsPage'
 import { ToolboxPage } from '../features/toolbox/ToolboxPage'
@@ -82,6 +83,8 @@ const NAV_GROUPS: { title?: string; items: NavItem[] }[] = [
     title: '库',
     items: [
       { id: 'library', label: '音乐库', icon: MusicNote },
+      // 三期（0.10.x）：视频媒体库（封面墙浏览已下载视频）
+      { id: 'videoLibrary', label: '视频库', icon: MonitorPlay },
       { id: 'trash', label: '回收站', icon: Trash, badge: 'trash' }
     ]
   }
@@ -229,7 +232,7 @@ export default function App() {
   // 任务弹「移入回收站」确认。R4-P3：切走时清空搜索词（跨视图残留 query 会在
   // 返回时突然生效，造成「搜不全」困惑）
   useEffect(() => {
-    if (['music', 'health', 'settings', 'stats', 'toolbox'].includes(active)) {
+    if (['music', 'videoLibrary', 'health', 'settings', 'stats', 'toolbox'].includes(active)) {
       select(null)
       setQuery((q) => (q ? '' : q))
     } else if (active === 'trash') {
@@ -385,7 +388,7 @@ export default function App() {
 
   // 顶栏搜索作用域提示：query 只过滤任务列表视图（TaskList），不作用于
   // 音乐/设置/工具箱等功能页——placeholder 动态标注当前分组，消除「搜不到」困惑
-  const isTaskListView = !['music', 'health', 'settings', 'stats', 'toolbox'].includes(active)
+  const isTaskListView = !['music', 'videoLibrary', 'library', 'health', 'settings', 'stats', 'toolbox'].includes(active)
   const activeGroupLabel = NAV_GROUPS.flatMap((g) => g.items).find((i) => i.id === active)?.label
   const searchPlaceholder =
     isTaskListView && activeGroupLabel ? `在「${activeGroupLabel}」内搜索…` : t('search.placeholder')
@@ -607,6 +610,8 @@ export default function App() {
               <MusicWorkbench onOpenTasks={() => setActive('all')} />
             ) : active === 'library' ? (
               <MusicLibrary />
+            ) : active === 'videoLibrary' ? (
+              <VideoLibrary />
             ) : active === 'health' ? (
               <HealthPage />
             ) : active === 'settings' ? (

@@ -15,6 +15,7 @@ import {
   type NetdiskDownloadInput,
   type NetdiskEntry,
   type SubscriptionAddInput,
+  type SubscriptionUpdateInput,
   type ToolCreateInput
 } from '@shared/types'
 import { getDb, getSetting, getSettingParsed, setSetting } from './db'
@@ -28,6 +29,7 @@ import {
   checkSubscriptionNow,
   listSubscriptions,
   removeSubscription,
+  updateSubscription,
   type SubscriptionHost
 } from './subscribe'
 
@@ -246,6 +248,29 @@ export function registerIpcHandlers(): void {
     return retagTrack(id)
   })
 
+  // 三期（0.10.x）：视频媒体库（视频任务完成即登记，封面墙浏览）
+  ipcMain.handle(IPC_CHANNELS.videoLibrary, async () => {
+    const { listVideos } = await import('./video/library')
+    return listVideos().map((r) => ({
+      id: r.id,
+      taskId: r.task_id,
+      path: r.path,
+      title: r.title,
+      platform: r.platform,
+      size: r.size,
+      durationSec: r.duration_sec,
+      coverPath: r.cover_path,
+      createdAt: r.created_at
+    }))
+  })
+  ipcMain.handle(IPC_CHANNELS.videoLibraryRemove, async (_e, videoId: string) => {
+    const { removeVideo } = await import('./video/library')
+    const id = typeof videoId === 'string' ? videoId.trim() : ''
+    if (!id) throw new Error('缺少条目 ID')
+    const removed = removeVideo(id)
+    if (!removed) throw new Error('条目不存在或已被移除')
+  })
+
   // engine（M3-9：yt-dlp 热更器）
   ipcMain.handle(IPC_CHANNELS.engineUpdate, async (_e, engine: 'ytdlp') => {
     if (engine !== 'ytdlp') throw new Error('仅支持 yt-dlp 引擎更新')
@@ -347,6 +372,9 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.subscribeList, () => listSubscriptions())
   ipcMain.handle(IPC_CHANNELS.subscribeAdd, (_e, input: SubscriptionAddInput) =>
     addSubscription(input)
+  )
+  ipcMain.handle(IPC_CHANNELS.subscribeUpdate, (_e, input: SubscriptionUpdateInput) =>
+    updateSubscription(input)
   )
   ipcMain.handle(IPC_CHANNELS.subscribeRemove, (_e, id: string) => removeSubscription(String(id)))
   ipcMain.handle(IPC_CHANNELS.subscribeCheckNow, (_e, id: string) =>

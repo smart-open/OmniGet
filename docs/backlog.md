@@ -178,6 +178,7 @@
   - [x] ✅ 设置页「订阅追更」卡片：添加（名称/URL/间隔 1h~1d）/立即检查/删除，展示累计入队与上次检查/错误；IPC 四通道 + bridge
   - [x] ✅ 定时器：10min tick，到期源串行检查；单源单次上限 20 条；入队即登记档案防重复；新增经通知条公示
 - **边界**：保存目录取全局下载目录；默认参数（无预设/模板）；检查依赖 yt-dlp 引擎。
+- **三期升级（2026-10-04，0.10.0，roadmap「订阅中心升级」）**：DB v4 扩列；新增 RSS/Atom 源类型（`subscribe-rss.ts` 零依赖解析：enclosure > media:content > yt:videoId > link）；每源保存目录（validateSaveDir 同口径）/参数预设（`download.videoPresets` id → 确认参数映射）/命名模板；条目级过滤——最短时长秒（yt-dlp 条目 duration，RSS 无时长视为通过）+ 标题关键词（逗号/顿号分隔任一命中）；设置页卡片编辑模式（回填/更新，新通道 `subscribe:update`）。遗留：RSS 条目不支持时长过滤（源无该信息）
 
 ### 19. ✅（2026-10-02）yt-dlp 外部下载器 aria2c（可选加速）
 - **依据**：Seal 内嵌 yt-dlp + ffmpeg + aria2 三件套并以 aria2c 为默认下载器；CLI 社区成熟范式 `--downloader aria2c --downloader-args "-x 16 -k 1M"`。OmniGet 自带 aria2 零包体成本。
@@ -198,19 +199,27 @@
 - **依据**：spotDL sync / Pinchflat 均以 archive 文件为去重底座；OmniGet 重复粘贴同一合集 URL 会重复下载。
 - **已完成**：双档案设计（`task/archive.ts`）——自有 `download.archive`（`sha1:<hex>` 键，URL 明文不落盘）：创建期命中拒绝（文案给关闭路径）、完成/订阅入队即登记；yt-dlp 原生 `ytdlp.archive`（`--download-archive`，合集条目级去重）。设置 `download.dedupe` 默认开，关闭后两档案均不启用。合集/订阅源 URL 不入自有档案（防订阅源被封死），条目级由 yt-dlp 档案负责。
 
-### 23. ⏸ 弹幕下载与压制（B站 xml→ass，BBDown 范式）
-- **暂缓原因**：BBDown 专属能力，yt-dlp 不产弹幕；需独立 B 站 API 适配 + xml→ass 转换工具（可先入工具箱）。等需求反馈。
+### 23. ✅（2026-10-04，三期 0.10.0）弹幕下载与压制（B站 xml→ass，BBDown 范式）
+- **依据**：BBDown 专属能力，yt-dlp 不产弹幕；需独立 B 站 API 适配 + xml→ass 转换工具。
+- **已完成**：
+  - [x] ✅ `danmaku/convert.ts` 纯函数：B站弹幕 XML → ASS（滚动 `\move` 轨迹 + 底部/顶部定轨车道分配、颜色/字号/透明度、`{}` 特效注入防御、3000 条上限）；4 例单测
+  - [x] ✅ 工具箱「弹幕转换」工具（runtime=node，画布宽/字号/不透明度参数）
+  - [x] ✅ B站视频任务可选压制：确认面板开关（仅 bilibili 非直播任务显示）→ 完成时公开 API 取 cid（`web-interface/view`）→ 拉弹幕 XML（`dm/listsoa`）→ ffmpeg subtitles 烧录 `_弹幕` 副本（原片保留；失败仅附注不判任务失败）
+- **边界**：多 P 视频暂不支持（取主 cid）；压制为重编码（libx264 veryfast），长视频耗时较长；直播弹幕不做
 
 ### 24. ⏸ 主页级批量抓取（f2 / TikTokDownload 范式）
 - **依据**：f2（2.4K★）支持用户主页/合集/点赞/收藏列表批量解析下载；TikTokDownload（8.4K★，已由 f2 接棒）。OmniGet 合集树已覆盖 playlist 场景，「主页全量 + 筛选下载」为增量。
 - **⚠ 合规印证**：f2 内置 msToken/ABogus 等签名算法并遭平台风控对抗——再次印证 backlog #11「不自研签名」决策正确；主页批量仅基于公开 flat-parse 接口。
 - **暂缓原因**：与 #18 订阅中心重叠度高（订阅=主页批量的自动化形态），先做 #18。
 
-### 25. 🟡 直播间 URL 直录入口（streamlink 范式，条件触发）
+### 25. ✅（2026-10-04，三期 0.10.0）直播间 URL 直录入口
 - **依据**：streamlink（~11K★，活跃）以**平台插件**把直播间地址（B站/斗鱼/虎牙/抖音/Twitch/YouTube 等）解析为流清单/直链，LiveRecorder 等无人值守录制脚本生态均以其为底座。OmniGet #20 直播录制已走 N_m3u8DL-RE 路线，但入口仅限 `.m3u8/.mpd` 清单链接——用户手里通常是**直播间地址**（形如 `live.bilibili.com/xxx`），当前嗅探无分型，落 http 类型必然失败。
-- **待办**：
-  - [ ] 直播间 URL 分型（各平台直播间页 URL 规则表）→ 经 yt-dlp `-g`/平台公开 API 间接取流清单喂给 RE（零新依赖优先）
-  - [ ] streamlink 二进制兜底评估：Python 生态、单文件分发难，仅当间接取流路线对主流平台失效时再议
+- **已完成**：
+  - [x] ✅ 嗅探器直播间分型（`live/rooms.ts` 纯函数规则表：live.bilibili.com / douyu.com / huya.com / live.douyin.com，房间号段校验 + 伪房间段排除；先于普通视频域命中）
+  - [x] ✅ 解析链（`live/resolve.ts`）：yt-dlp `-J` 解析直播间页取最佳 HLS 清单直链（零新依赖）→ `manifestUrl` 改写 task.source 喂 RE（B站公开 API `room_playing` 兜底，合规红线：不自研签名）；B站/抖音按参数注入 `--header`（CDN 校验 Referer）；RE 缺席回落 yt-dlp 原生录制
+  - [x] ✅ 直播 URL 不入去重档案（重复录制常态）；录制时长选择复用既有直播流 UI
+  - [x] ⏸ streamlink 二进制兜底：间接取流路线对四平台均可用，维持不议
+- **遗留**：各平台直播间真机回归（斗鱼/虎牙 extractor 健康度随 yt-dlp 上游浮动）
 - **触发条件**：#20 已有录制时长 MVP，等直播录制使用反馈后排期。
 
 ### 26. ✅（2026-10-03）网盘/WebDAV 下载源（OpenList，AList 分叉）

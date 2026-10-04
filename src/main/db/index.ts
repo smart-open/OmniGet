@@ -113,6 +113,38 @@ const MIGRATIONS: Migration[] = [
         CREATE INDEX idx_music_tracks_task ON music_tracks(task_id);
       `)
     }
+  },
+  {
+    version: 4,
+    name: 'phase3-video-depth',
+    up: (db) => {
+      // 三期（0.10.x）：订阅升级（backlog #18 边界收敛）——RSS 源 + 每源
+      // 保存目录/参数预设/命名模板 + 条目级过滤（时长/关键词）
+      db.exec(`
+        ALTER TABLE subscriptions ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'ytdlp';
+        ALTER TABLE subscriptions ADD COLUMN save_dir TEXT;
+        ALTER TABLE subscriptions ADD COLUMN preset_id INTEGER;
+        ALTER TABLE subscriptions ADD COLUMN template TEXT;
+        ALTER TABLE subscriptions ADD COLUMN filter_min_sec INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE subscriptions ADD COLUMN filter_keywords TEXT;
+      `)
+      // 视频媒体库 MVP：视频任务完成即登记一行（路径冗余存 task_files 之外，
+      // 与 music_tracks 同口径——封面/时长/平台等跨任务元数据列）
+      db.exec(`
+        CREATE TABLE videos (
+          id          TEXT PRIMARY KEY,
+          task_id     TEXT,
+          path        TEXT NOT NULL,
+          title       TEXT NOT NULL,
+          platform    TEXT,
+          size        INTEGER DEFAULT 0,
+          duration_sec REAL,
+          cover_path  TEXT,
+          created_at  INTEGER NOT NULL
+        );
+        CREATE INDEX idx_videos_task ON videos(task_id);
+      `)
+    }
   }
 ]
 

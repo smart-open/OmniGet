@@ -919,6 +919,42 @@ export const TOOL_DEFS: ToolDef[] = [
     ],
     // 不走 ffmpeg：由 ToolboxRunner.submit 分支到 runDemucs
     build: () => ({ args: [], output: '' })
+  },
+  {
+    // 三期（0.10.x，backlog #23）：B站弹幕 xml → ASS（BBDown 范式）
+    id: 'danmaku-convert',
+    label: '弹幕转换',
+    category: 'video',
+    desc: 'B站弹幕 XML 转 ASS 字幕（滚动/底部/顶部车道分配，可作压制输入）',
+    runtime: 'node',
+    fields: [
+      { key: 'width', label: '画布宽度', type: 'number', default: '1920' },
+      { key: 'fontSize', label: '基准字号', type: 'number', default: '38' },
+      { key: 'opacity', label: '不透明度(1-100)', type: 'number', default: '100' }
+    ],
+    compute: async (inputPath, outDir, params) => {
+      const { readFile, writeFile } = await import('fs/promises')
+      const { xmlToAss } = await import('./danmaku/convert')
+      const clampInt = (v: unknown, min: number, max: number, dflt: number): number => {
+        const n = Math.round(Number(v))
+        return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : dflt
+      }
+      const xml = await readFile(inputPath, 'utf8')
+      // 审查加固：错误输入此前会静默产出仅含头的空 ASS 并报成功——必须显式报错
+      const { parseDanmakuXml } = await import('./danmaku/convert')
+      if (parseDanmakuXml(xml).length === 0) {
+        throw new Error('未解析到任何弹幕（请确认输入是B站弹幕 XML 文件）')
+      }
+      const ass = xmlToAss(xml, {
+        width: clampInt(params.width, 320, 7680, 1920),
+        fontSize: clampInt(params.fontSize, 12, 200, 38),
+        opacity: clampInt(params.opacity, 1, 100, 100)
+      })
+      const out = join(outDir, `${baseName(inputPath)}.ass`)
+      await writeFile(out, ass, 'utf8')
+      return out
+    },
+    build: () => ({ args: [], output: '' }) // runtime=node 不走 ffmpeg（compute 兜底声明）
   }
 ]
 

@@ -155,7 +155,7 @@ export class Nm3u8Adapter {
   async start(task: Task): Promise<string> {
     await ensureVerified('nm3u8re')
     const opts = this.videoOpts.get(task.id) ?? {}
-    const args = this.buildArgs(task, opts)
+    const args = await this.buildArgs(task, opts)
     this.emit({ taskId: task.id, status: 'running', message: '开始下载' })
     this.argsByTask.set(task.id, { args })
     const saveName = sanitizeFilename(task.name || 'stream')
@@ -171,7 +171,7 @@ export class Nm3u8Adapter {
   }
 
   /** v0.6.0-beta 实测选项；分片选择用 url=<变体URI正则> 精确锁定 + 音频取最佳 */
-  private buildArgs(task: Task, opts: Nm3u8Selection): string[] {
+  private async buildArgs(task: Task, opts: Nm3u8Selection): Promise<string[]> {
     const args = [
       task.source,
       '--save-dir',
@@ -187,6 +187,14 @@ export class Nm3u8Adapter {
       'zh-CN',
       '--disable-update-check'
     ]
+    // 三期（backlog #25）：直播间直录的平台请求头（B站/抖音 CDN 校验 Referer，
+    // 缺头取流 403）。任务参数 roomUrl 为直播间页 URL，detectLiveRoom 命中才注入
+    try {
+      const { liveHeaderArgs } = await import('../live/resolve')
+      args.push(...liveHeaderArgs(task.params))
+    } catch {
+      // 动态导入失败不阻断（虎牙/斗鱼等无头可用）
+    }
     if (opts.formatId) {
       args.push('-sv', `url=${escapeRegex(opts.formatId)}:for=best`, '-sa', 'for=best')
     } else {

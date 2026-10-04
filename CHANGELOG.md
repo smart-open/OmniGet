@@ -3,6 +3,20 @@
 > OmniGet 产品变更记录。版本号遵循 `0.x.y` 约定：**x（中间版本号）随功能里程碑递增**，y 为里程碑内的小修/加固版本。初始版本 0.1.0。
 > 格式参考 Keep a Changelog；日期为里程碑完成时间。里程碑与验收口径溯源至《OmniGet-产品技术设计文档》§10。
 
+## [0.10.0] - 2026-10-04
+
+### 三期「视频纵深：追更与录制中枢」（roadmap 三期四项落地；BT 流式预览维持条件触发不排入）
+
+- **直播间 URL 直录入口（backlog #25）**：嗅探器新增直播间页分型（`live.bilibili.com`/`douyu.com`/`huya.com`/`live.douyin.com`，房间号段校验，先于普通视频域命中；douyu/huya 此前落 http 类型必然失败）→ 新模块 `live/resolve.ts`：yt-dlp `-J` 解析直播间页取最佳 HLS 清单直链（B站直播/斗鱼/虎牙/抖音 extractor 零新依赖），B站另备公开 API（`room_playing`）兜底——解析出的 `manifestUrl` 改写 `task.source` 喂 N_m3u8DL-RE 走既有 nm3u8 管线（录制时长选择复用直播流 UI）；RE 缺席回落 yt-dlp 原生录制；直播 CDN 校验 Referer 的平台（B站/抖音）按参数自动注入 `--header`；直播 URL 不入去重档案（重复录制常态）
+- **弹幕下载与压制（backlog #23）**：新模块 `danmaku/convert.ts`——B站弹幕 XML → ASS 纯函数转换（滚动 `\move` 轨迹 + 底部/顶部定轨车道分配、颜色/字号/透明度、大括号特效注入防御、3000 条上限）；工具箱新增「弹幕转换」工具（runtime=node）；B站视频任务确认面板新增「弹幕压制」开关（完成时公开 API 取 cid → 拉弹幕 XML → ffmpeg subtitles 烧录 `_弹幕` 副本，原片保留，失败仅附注不判任务失败）
+- **订阅中心升级（backlog #18 边界收敛）**：DB 迁移 v4（subscriptions 扩列 + videos 表）；订阅源新增**RSS/Atom 源**类型（`subscribe-rss.ts` 零依赖解析，enclosure > media:content > yt:videoId > link 取值优先级）；每源可指定**保存目录**（校验同任务创建口径）、**参数预设**（映射 `download.videoPresets` → 确认参数）、**命名模板**；条目级过滤——最短时长（秒；yt-dlp 条目带 duration，RSS 无时长信息视为通过）+ 标题关键词（逗号/顿号分隔任一命中）；设置页订阅卡片升级：编辑模式（回填/更新）、源类型/预设下拉与过滤输入，新通道 `subscribe:update`
+- **视频媒体库 MVP**：DB v4 新增 `videos` 表；视频任务完成登记产物（标题/平台/体积/ffprobe 时长，同路径复用行保留封面）+ ffmpeg 抽帧封面（10% 时长位次，落 `userData/covers/`，fire-and-forget 失败留痕）；侧栏「库」组新增「视频库」视图——封面墙（16:9 卡片 + 时长角标）+ 检索 + 本地预览播放（`omniget-preview://local` Range 流式）+ 定位文件 + 移除条目（不删文件，二次确认）；MVP 只覆盖单视频/直播录制产物（合集任务走文件树不在此路径）
+
+### 测试
+
+- 新增 4 组单测（live/rooms 房间识别 3 例 / danmaku 转换 4 例 / subscribe-rss 解析与过滤 4 例 / sniffer 直播间分型扩展）；store 迁移测试升至 user_version=4；全量 151/151，typecheck 双端通过
+- 顺带修复：i18n 缺 `nav.library` 键（侧栏「音乐库」此前显示键名回退）
+
 ## [0.9.0] - 2026-10-04
 
 ### 二期「音乐纵深」（roadmap 二期五项全落地）

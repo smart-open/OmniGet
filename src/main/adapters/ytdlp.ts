@@ -36,6 +36,8 @@ export interface VideoSelection {
   sponsorBlockRemove?: boolean
   /** backlog #27（2026-10-03）：内嵌元数据与章节（ffmpeg 后处理依赖） */
   embedMetadata?: boolean
+  /** 三期（backlog #23）：B站弹幕压制（完成后取公开弹幕 XML → ASS → ffmpeg 烧录） */
+  danmaku?: boolean
 }
 
 interface RawFormat {
@@ -364,6 +366,31 @@ export class YtDlpAdapter {
         } catch (err) {
           log.warn('delogo failed', err)
           message = message ?? 'delogo 失败，保留原片'
+        }
+      }
+      // 三期（backlog #23）：B站弹幕压制（可选增强；失败只附注，不判任务失败）
+      const burnPlatform = this.platformByTask.get(task.id)
+      if (ctx.video.danmaku && burnPlatform === 'bilibili' && this.ffmpegOk && !ctx.video.audioOnly) {
+        const video = tracked
+          .filter((f) => /\.(mp4|mkv|webm|mov)$/i.test(f) && !f.includes('_nowm') && !f.includes('_弹幕'))
+          .pop()
+        if (video) {
+          this.emit({
+            taskId: task.id,
+            status: 'running',
+            message: '弹幕压制中（视频重编码，请耐心等待）…'
+          })
+          try {
+            const { burnDanmaku } = await import('../danmaku/burn')
+            const r = await burnDanmaku(task.source, video)
+            const list = this.outputFiles.get(task.id)
+            if (list && !list.includes(r.output)) list.push(r.output)
+            message = `${message ? `${message}；` : ''}弹幕压制完成（${r.comments} 条）`
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err)
+            log.warn(`danmaku burn failed for ${task.id}: ${msg}`)
+            message = `${message ? `${message}；` : ''}弹幕压制失败：${msg}（原片已保留）`
+          }
         }
       }
       this.emit({

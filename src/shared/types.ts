@@ -121,6 +121,8 @@ export interface ConfirmSelectionInput {
     liveRecordMinutes?: number
     /** backlog #27（2026-10-03）：内嵌元数据与章节（--embed-metadata --embed-chapters） */
     embedMetadata?: boolean
+    /** 三期（backlog #23）：B站弹幕压制（完成时取公开弹幕 XML→ASS→ffmpeg 烧录） */
+    danmaku?: boolean
   }
 }
 
@@ -349,7 +351,8 @@ export interface CreateTaskResultStarted {
 
 export type CreateTaskResult = CreateTaskResultAwaiting | CreateTaskResultStarted | CreateTaskResultFailed
 
-/** R7 续（backlog #18）：订阅追更源（频道/UP主/歌单 URL 定时抓新） */
+/** R7 续（backlog #18）：订阅追更源（频道/UP主/歌单 URL 定时抓新）。
+ * 三期（0.10.x）升级：RSS 源、每源保存目录/参数预设/命名模板、条目级过滤 */
 export interface Subscription {
   id: string
   name: string
@@ -361,12 +364,50 @@ export interface Subscription {
   lastCheckedAt: number | null
   lastError: string | null
   createdAt: number
+  /** 源类型：ytdlp（频道/UP主/歌单，yt-dlp flat-parse）| rss（RSS/Atom 订阅） */
+  sourceKind: 'ytdlp' | 'rss'
+  /** 每源保存目录（空 = 全局 download.saveDir） */
+  saveDir: string | null
+  /** 参数预设 ID（download.videoPresets 内，空 = 默认参数） */
+  presetId: number | null
+  /** 每源命名模板（空 = 预设模板 → 全局 naming.template） */
+  template: string | null
+  /** 条目过滤：最短时长秒（0 = 不过滤；yt-dlp 条目有 duration，RSS 无） */
+  filterMinSec: number
+  /** 条目过滤：标题关键词（逗号/顿号分隔，任一命中即保留；空 = 不过滤） */
+  filterKeywords: string | null
 }
 
 export interface SubscriptionAddInput {
   name: string
   url: string
   intervalMin: number
+  sourceKind?: 'ytdlp' | 'rss'
+  saveDir?: string
+  presetId?: number | null
+  template?: string
+  filterMinSec?: number
+  filterKeywords?: string
+}
+
+/** 三期（backlog #18 边界收敛）：订阅源编辑（全字段覆盖，id 必填） */
+export interface SubscriptionUpdateInput extends SubscriptionAddInput {
+  id: string
+}
+
+/** 三期（0.10.x）：视频媒体库条目（视频任务完成即登记，封面墙浏览） */
+export interface VideoLibraryItem {
+  id: string
+  taskId: string | null
+  path: string
+  title: string
+  platform: string | null
+  size: number
+  /** 秒（ffprobe 探测，失败为 null） */
+  durationSec: number | null
+  /** 封面 jpg 绝对路径（userData/covers/；抽取失败为 null，前端占位图） */
+  coverPath: string | null
+  createdAt: number
 }
 
 /** backlog #26（2026-10-03）：网盘/WebDAV（OpenList）目录条目 */
@@ -490,6 +531,10 @@ export interface OmniGetBridge {
   musicLibraryRemove(trackId: string): Promise<void>
   /** 二期：MusicBrainz 一键补标签（原地回写 + 库行同步） */
   musicLibraryRetag(trackId: string): Promise<MusicRetagResult>
+  /** 三期：视频媒体库（视频任务完成即登记） */
+  videoLibrary(): Promise<VideoLibraryItem[]>
+  /** 三期：从视频库移除条目（不删文件） */
+  videoLibraryRemove(id: string): Promise<void>
   /** BT 端口自检：检测 aria2 listen-port 本地是否在监听（外网可达性需用户自行放行防火墙） */
   diagBtPort(): Promise<{
     listening: boolean
@@ -567,9 +612,10 @@ export interface OmniGetBridge {
   importFile(ext?: string): Promise<{ name: string; content: string } | null>
   /** R7 续（backlog #11）：短视频解析服务连接测试（主进程代发探测，渲染层无 Node 能力） */
   sidecarProbe(baseUrl: string): Promise<{ ok: boolean; detail: string }>
-  // R7 续（backlog #18）：订阅追更
+  // R7 续（backlog #18）：订阅追更（三期：编辑/每源参数/过滤）
   subscribeList(): Promise<Subscription[]>
   subscribeAdd(input: SubscriptionAddInput): Promise<Subscription>
+  subscribeUpdate(input: SubscriptionUpdateInput): Promise<Subscription>
   subscribeRemove(id: string): Promise<void>
   subscribeCheckNow(id: string): Promise<{ added: number }>
   // backlog #26（2026-10-03）：网盘聚合（OpenList / WebDAV）
@@ -607,6 +653,9 @@ export const IPC_CHANNELS = {
   musicLibrary: 'music:library',
   musicLibraryRemove: 'music:library:remove',
   musicLibraryRetag: 'music:library:retag',
+  /** 三期：视频媒体库（视频任务完成即登记，封面墙浏览） */
+  videoLibrary: 'video:library',
+  videoLibraryRemove: 'video:library:remove',
   diagBtPort: 'diag:btPort',
   diagBtExternal: 'diag:btExternal',
   appCheckUpdate: 'app:checkUpdate',
@@ -635,6 +684,7 @@ export const IPC_CHANNELS = {
   /** R7 续（backlog #18）：订阅追更 */
   subscribeList: 'subscribe:list',
   subscribeAdd: 'subscribe:add',
+  subscribeUpdate: 'subscribe:update',
   subscribeRemove: 'subscribe:remove',
   subscribeCheckNow: 'subscribe:checkNow',
   /** backlog #26（2026-10-03）：网盘聚合（OpenList / WebDAV） */

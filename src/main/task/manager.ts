@@ -21,7 +21,7 @@ import { createLogger } from '../logger'
 import { normalizeInfohash } from '../torrent/parse'
 import { sniff, type SniffResult } from '../sniffer'
 import { expandInputSource, extractHttpUrls, isVideoHostUrl } from '../shortlink'
-import { parseParamsJson, readTaskOriginUrl, readTaskSpeedLimit } from '../task/params'
+import { parseParamsJson, readTaskOriginUrl, readTaskPlatform, readTaskSpeedLimit } from '../task/params'
 import type { Aria2Adapter } from '../adapters/aria2'
 import { cleanupStaleMetadataDirs } from '../adapters/aria2'
 import type { MusicAdapter } from '../music/adapter'
@@ -269,6 +269,24 @@ export class TaskManager {
         task.id,
         products.map((p) => ({ path: p.path, size: p.size || size, selected: true, downloaded: p.size || size }))
       )
+      // 三期（0.10.x）：视频媒体库登记（视频产物完成即入库；合集任务文件树在
+      // parse 期已有，不进此路径——MVP 只覆盖单视频/直播录制产物）
+      const { registerVideo, generateCover } = await import('../video/library')
+      for (const p of products) {
+        if (!/\.(mp4|mkv|webm|mov|flv|ts)$/i.test(p.path)) continue
+        const absPath = join(task.saveDir, p.path)
+        const fileSize = p.size || (await stat(absPath).then((s) => s.size).catch(() => 0))
+        if (fileSize < 1024) continue // 防半成品/损坏文件入库
+        const videoId = registerVideo({
+          taskId: task.id,
+          path: absPath,
+          title: task.name || p.path,
+          platform: readTaskPlatform(task) ?? undefined,
+          size: fileSize
+        })
+        // 封面抽取 fire-and-forget（失败留痕不阻断；同路径重复完成由库内覆盖去重）
+        void generateCover(videoId, absPath)
+      }
     })().catch((err) => {
       // 修复：saveTaskFiles 同步异常（如退出阶段 DB 已关闭）不得逃逸为 unhandledRejection
       log.warn(`persistYtdlpProduct failed for ${task.id}`, err)
@@ -493,6 +511,7 @@ export class TaskManager {
     // 设置 download.dedupe 可关。短链展开后的 s.source 为判定对象
     if (
       s.type === 'video' &&
+      !s.liveRoom && // 三期（#25）：直播录制可重复——同一直播间多次录制是常态，不走去重
       getSettingParsed<boolean>('download.dedupe') !== false &&
       isArchived(s.source)
     ) {
@@ -581,7 +600,8 @@ export class TaskManager {
         s.type === 'video'
           ? // R7 续（backlog #17）：HLS/DASH 清单链接且 N_m3u8DL-RE 在位 → 专用引擎；
             // 否则回落 yt-dlp（generic extractor 原生支持 HLS，第一阶段口径）
-            s.platform === 'hls' && isBinaryPresent('nm3u8re')
+            // 三期（backlog #25）：直播间页 URL 同走 RE（RE 缺席回落 yt-dlp 原生录制）
+            (s.platform === 'hls' || s.liveRoom) && isBinaryPresent('nm3u8re')
             ? 'nm3u8'
             : 'ytdlp'
           : s.type === 'tool'
@@ -616,7 +636,11 @@ export class TaskManager {
           task.engine === 'ytdlp'
             ? await this.ytdlp!.parse(task)
             : task.engine === 'nm3u8'
-              ? await this.nm3u8!.parse(task)
+              ? // 三期（backlog #25）：直播间任务解析走 live/resolve（yt-dlp -J/B站公开
+                // API 取流清单）——nm3u8.parse 只会拉 task.source（此刻还是直播间页 URL）
+                s.liveRoom
+                ? await import('../live/resolve').then((m) => m.resolveLiveRoom(task))
+                : await this.nm3u8!.parse(task)
               : await this.aria2.parse(task, isAborted)
       } catch (parseErr) {
         // R7 续（backlog #11）：yt-dlp 解析失败（快手/小红书无 extractor、抖音风控等）
@@ -646,6 +670,15 @@ export class TaskManager {
       task.name = parsed.name
       task.infohash = parsed.infohash
       task.pendingGid = parsed.pendingGid
+      // 三期（backlog #25）：直播间任务改喂流清单——task.source 改写为清单直链
+      //（RE 直接消费），原直播间页 URL 存 params.roomUrl（平台请求头注入依据）。
+      // 清单有时效（分钟~小时级）：重启恢复的直播任务凭过期清单失败属预期，
+      // 重新粘贴直播间地址即可（不回滚——录制窗口本就稍纵即逝）
+      if (parsed.manifestUrl && task.engine === 'nm3u8') {
+        const prev = parseParamsJson(task.params)
+        task.params = JSON.stringify({ ...prev, roomUrl: task.source })
+        task.source = parsed.manifestUrl
+      }
       // R7 P1 多源 + 审查修复：parse 校验通过的镜像回写 params（剔除探测失败/
       // 大小不一致/内网项）。必须整体重写且保留旧字段（speedLimit 等）——原实现
       // ① 覆盖丢 speedLimit；② 仅 >1 镜像通过才回写，未校验的原始镜像（含内网

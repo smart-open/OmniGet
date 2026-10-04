@@ -37,6 +37,9 @@ const api: OmniGetBridge = {
     ipcRenderer.invoke(IPC_CHANNELS.musicLibraryRemove, trackId),
   musicLibraryRetag: (trackId: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.musicLibraryRetag, trackId),
+  // 三期：视频媒体库
+  videoLibrary: () => ipcRenderer.invoke(IPC_CHANNELS.videoLibrary),
+  videoLibraryRemove: (videoId: string) => ipcRenderer.invoke(IPC_CHANNELS.videoLibraryRemove, videoId),
   diagBtPort: () => ipcRenderer.invoke(IPC_CHANNELS.diagBtPort),
   diagBtExternal: () => ipcRenderer.invoke(IPC_CHANNELS.diagBtExternal),
   checkAppUpdate: () => ipcRenderer.invoke(IPC_CHANNELS.appCheckUpdate),
@@ -95,6 +98,7 @@ const api: OmniGetBridge = {
   // R7 续（backlog #18）：订阅追更
   subscribeList: () => ipcRenderer.invoke(IPC_CHANNELS.subscribeList),
   subscribeAdd: (input) => ipcRenderer.invoke(IPC_CHANNELS.subscribeAdd, input),
+  subscribeUpdate: (input) => ipcRenderer.invoke(IPC_CHANNELS.subscribeUpdate, input),
   subscribeRemove: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.subscribeRemove, id),
   subscribeCheckNow: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.subscribeCheckNow, id),
   // backlog #26（2026-10-03）：网盘聚合（OpenList / WebDAV）

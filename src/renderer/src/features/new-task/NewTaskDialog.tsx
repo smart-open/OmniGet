@@ -97,6 +97,8 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
   const [liveLimit, setLiveLimit] = useState('0')
   // backlog #27（2026-10-03）：内嵌元数据与章节
   const [embedMetadata, setEmbedMetadata] = useState(false)
+  // 三期（backlog #23）：B站弹幕压制（仅 bilibili 任务显示）
+  const [danmaku, setDanmaku] = useState(false)
   // R3：批量链接抓取
   const [batchMode, setBatchMode] = useState(false)
   const [batchBusy, setBatchBusy] = useState(false)
@@ -626,6 +628,8 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
               sponsorBlockRemove: sponsorBlockRemove || undefined,
               // backlog #27（2026-10-03）：内嵌元数据与章节
               embedMetadata: embedMetadata || undefined,
+              // 三期（backlog #23）：B站弹幕压制
+              danmaku: danmaku || undefined,
               // R7 续（backlog #20）：直播录制时长（分钟；仅 RE 引擎的直播流）
               liveRecordMinutes:
                 parsed?.live && liveLimit !== '0' ? Number(liveLimit) : undefined
@@ -1129,6 +1133,18 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
                     />
                     内嵌元数据与章节（标题/标签/章节写入文件）
                   </label>
+
+                  {/* 三期（backlog #23）：B站弹幕压制（仅 bilibili 非直播任务显示） */}
+                  {sniffPlatform === 'bilibili' && !parsed?.live && (
+                    <label className="mt-2 flex cursor-pointer items-center gap-1.5 text-[11px] text-text-2">
+                      <input
+                        type="checkbox"
+                        checked={danmaku}
+                        onChange={(e) => setDanmaku(e.target.checked)}
+                      />
+                      弹幕压制：下载完成后烧录B站弹幕（重编码，耗时较久；原片保留）
+                    </label>
+                  )}
 
                   {/* R7 续（backlog #20）：直播流录制时长（N_m3u8DL-RE） */}
                   {parsed?.live && (

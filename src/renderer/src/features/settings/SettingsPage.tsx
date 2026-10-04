@@ -409,6 +409,59 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
   const [subInterval, setSubInterval] = useState('1440')
   const [subBusyId, setSubBusyId] = useState<string | null>(null)
   const [subAdding, setSubAdding] = useState(false)
+  // 三期（backlog #18 边界收敛）：RSS 源 + 每源保存目录/预设/模板 + 条目过滤
+  const [subKind, setSubKind] = useState<'ytdlp' | 'rss'>('ytdlp')
+  const [subSaveDir, setSubSaveDir] = useState('')
+  const [subPresetId, setSubPresetId] = useState('')
+  const [subTemplate, setSubTemplate] = useState('')
+  const [subMinSec, setSubMinSec] = useState('')
+  const [subKeywords, setSubKeywords] = useState('')
+  const [subEditingId, setSubEditingId] = useState<string | null>(null)
+  // 参数预设下拉（download.videoPresets 仅取 id/name）
+  const [videoPresets, setVideoPresets] = useState<Array<{ id: number; name: string }>>([])
+
+  /** 三期：订阅表单 → 主进程入参（空值裁剪，预设下拉空串 = 不指定） */
+  function subPayload() {
+    return {
+      name: subName.trim(),
+      url: subUrl.trim(),
+      intervalMin: Number(subInterval),
+      sourceKind: subKind,
+      saveDir: subSaveDir.trim() || undefined,
+      presetId: subPresetId ? Number(subPresetId) : null,
+      template: subTemplate.trim() || undefined,
+      filterMinSec: Math.max(0, Math.round(Number(subMinSec) || 0)),
+      filterKeywords: subKeywords.trim() || undefined
+    }
+  }
+
+  /** 三期：表单复位（编辑退出/保存后调用） */
+  function resetSubForm(): void {
+    setSubEditingId(null)
+    setSubName('')
+    setSubUrl('')
+    setSubInterval('1440')
+    setSubKind('ytdlp')
+    setSubSaveDir('')
+    setSubPresetId('')
+    setSubTemplate('')
+    setSubMinSec('')
+    setSubKeywords('')
+  }
+
+  /** 三期：行「编辑」→ 表单回填 */
+  function startEditSub(s: Subscription): void {
+    setSubEditingId(s.id)
+    setSubName(s.name)
+    setSubUrl(s.url)
+    setSubInterval(String(s.intervalMin))
+    setSubKind(s.sourceKind)
+    setSubSaveDir(s.saveDir ?? '')
+    setSubPresetId(s.presetId != null ? String(s.presetId) : '')
+    setSubTemplate(s.template ?? '')
+    setSubMinSec(s.filterMinSec > 0 ? String(s.filterMinSec) : '')
+    setSubKeywords(s.filterKeywords ?? '')
+  }
   const [upnp, setUpnp] = useState(true)
   const [btEncrypt, setBtEncrypt] = useState(true)
   const [rules, setRules] = useState<ScheduleRule[]>([])
@@ -473,6 +526,11 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
       if (rulesRes.ok) setRules(rulesRes.v)
       else rulesLoadFailedRef.current = true
       if (subsRes.ok) setSubs(subsRes.v)
+      // 三期：订阅源参数预设下拉（失败静默——下拉为空仍可用默认参数）
+      window.omniget
+        .settingsGet('download.videoPresets')
+        .then((v) => setVideoPresets(Array.isArray(v) ? (v as Array<{ id: number; name: string }>) : []))
+        .catch(() => {})
       const [
         template, musicTemplate, cookieFile, sidecarUrl, netdiskUrl, netdiskSaveDir, saveDir,
         maxConcurrent, autoArchive, dedupe, ytdlpAria2c, upnp, btEncrypt,
@@ -1174,14 +1232,23 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                       <p className="truncate text-xs text-text-1">{s.name}</p>
                       <p className="num truncate text-[10px] text-text-3">{s.url}</p>
                       <p className="mt-0.5 text-[10px] text-text-3">
-                        每 {s.intervalMin} 分钟检查 · 累计 {s.addedTotal} 条
+                        {s.sourceKind === 'rss' ? 'RSS' : 'yt-dlp'} · 每 {s.intervalMin} 分钟检查 ·
+                        累计 {s.addedTotal} 条
                         {s.lastCheckedAt
                           ? ` · 上次 ${new Date(s.lastCheckedAt).toLocaleString()}`
                           : ' · 未检查'}
+                        {s.saveDir && ` · 独立目录`}
+                        {(s.presetId != null || s.template || s.filterMinSec > 0 || s.filterKeywords) &&
+                          ' · 自定义参数'}
+                        {s.filterMinSec > 0 && ` · ≥${s.filterMinSec}s`}
+                        {s.filterKeywords && ` · 关键词:${s.filterKeywords}`}
                         {s.lastError && <span className="text-danger"> · {s.lastError}</span>}
                       </p>
                     </div>
                     <div className="flex shrink-0 gap-1.5">
+                      <Button size="sm" variant="outline" onClick={() => startEditSub(s)}>
+                        {subEditingId === s.id ? '编辑中' : '编辑'}
+                      </Button>
                       <Button
                         size="sm"
                         variant="outline"
@@ -1217,6 +1284,9 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                               .subscribeRemove(s.id)
                               .then(() => {
                                 setSubs(subs.filter((x) => x.id !== s.id))
+                                // 审查修复：删除的若是正在编辑的条目，表单复位（否则
+                                // 表单停在已删条目上，保存时报「订阅不存在」）
+                                if (subEditingId === s.id) resetSubForm()
                                 flash('订阅已删除')
                               })
                               .catch((err) => toastError('删除订阅', err))
@@ -1236,10 +1306,18 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                   placeholder="名称"
                   className="h-8 w-32 rounded-ctl border border-border bg-surface-2 px-2 text-xs outline-none focus:border-accent"
                 />
+                <select
+                  value={subKind}
+                  onChange={(e) => setSubKind(e.target.value === 'rss' ? 'rss' : 'ytdlp')}
+                  className="h-8 rounded-ctl border border-border bg-surface-2 px-2 text-xs outline-none focus:border-accent"
+                >
+                  <option value="ytdlp">频道/合集</option>
+                  <option value="rss">RSS 订阅</option>
+                </select>
                 <input
                   value={subUrl}
                   onChange={(e) => setSubUrl(e.target.value)}
-                  placeholder="频道 / 合集 / 歌单链接"
+                  placeholder={subKind === 'rss' ? 'RSS / Atom 订阅地址' : '频道 / 合集 / 歌单链接'}
                   className="num h-8 min-w-0 flex-1 rounded-ctl border border-border bg-surface-2 px-2 text-xs outline-none focus:border-accent"
                 />
                 <select
@@ -1252,29 +1330,95 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                   <option value="720">每 12 小时</option>
                   <option value="1440">每天</option>
                 </select>
-                <Button
-                  size="sm"
-                  disabled={subAdding || !subName.trim() || !subUrl.trim()}
-                  onClick={() => {
-                    // 审查修复（P3-5）：防重入——双击此前会重复登记订阅
-                    setSubAdding(true)
-                    window.omniget
-                      .subscribeAdd({ name: subName.trim(), url: subUrl.trim(), intervalMin: Number(subInterval) })
-                      .then((s) => {
-                        setSubs([...subs, s])
-                        setSubName('')
-                        setSubUrl('')
-                        flash('订阅已添加')
-                      })
-                      .catch((err) => toastError('添加订阅', err))
-                      .finally(() => setSubAdding(false))
-                  }}
+              </div>
+              {/* 三期：每源参数（保存目录/预设/模板）与条目过滤（时长/关键词） */}
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <input
+                  value={subSaveDir}
+                  onChange={(e) => setSubSaveDir(e.target.value)}
+                  placeholder="保存目录（留空 = 全局下载目录）"
+                  className="num h-8 min-w-0 flex-1 rounded-ctl border border-border bg-surface-2 px-2 text-xs outline-none focus:border-accent"
+                />
+                <select
+                  value={subPresetId}
+                  onChange={(e) => setSubPresetId(e.target.value)}
+                  className="h-8 rounded-ctl border border-border bg-surface-2 px-2 text-xs outline-none focus:border-accent"
                 >
-                  {subAdding ? '添加中…' : '添加'}
-                </Button>
+                  <option value="">默认参数</option>
+                  {videoPresets.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      预设：{p.name}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  value={subTemplate}
+                  onChange={(e) => setSubTemplate(e.target.value)}
+                  placeholder="命名模板（留空 = 全局）"
+                  className="h-8 w-48 rounded-ctl border border-border bg-surface-2 px-2 text-xs outline-none focus:border-accent"
+                />
+                <input
+                  value={subMinSec}
+                  onChange={(e) => setSubMinSec(e.target.value)}
+                  placeholder="最短秒数"
+                  className="num h-8 w-24 rounded-ctl border border-border bg-surface-2 px-2 text-xs outline-none focus:border-accent"
+                />
+                <input
+                  value={subKeywords}
+                  onChange={(e) => setSubKeywords(e.target.value)}
+                  placeholder="标题关键词过滤（逗号分隔，任一命中）"
+                  className="h-8 min-w-0 flex-1 rounded-ctl border border-border bg-surface-2 px-2 text-xs outline-none focus:border-accent"
+                />
+                {subEditingId ? (
+                  <>
+                    <Button
+                      size="sm"
+                      disabled={subAdding || !subName.trim() || !subUrl.trim()}
+                      onClick={() => {
+                        // UX 硬性标准：编辑保存失败必须可见反馈
+                        setSubAdding(true)
+                        window.omniget
+                          .subscribeUpdate({ id: subEditingId, ...subPayload() })
+                          .then((s) => {
+                            setSubs(subs.map((x) => (x.id === s.id ? s : x)))
+                            resetSubForm()
+                            flash('订阅已更新')
+                          })
+                          .catch((err) => toastError('更新订阅', err))
+                          .finally(() => setSubAdding(false))
+                      }}
+                    >
+                      {subAdding ? '保存中…' : '保存修改'}
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={resetSubForm}>
+                      取消
+                    </Button>
+                  </>
+                ) : (
+                  <Button
+                    size="sm"
+                    disabled={subAdding || !subName.trim() || !subUrl.trim()}
+                    onClick={() => {
+                      // 审查修复（P3-5）：防重入——双击此前会重复登记订阅
+                      setSubAdding(true)
+                      window.omniget
+                        .subscribeAdd(subPayload())
+                        .then((s) => {
+                          setSubs([...subs, s])
+                          resetSubForm()
+                          flash('订阅已添加')
+                        })
+                        .catch((err) => toastError('添加订阅', err))
+                        .finally(() => setSubAdding(false))
+                    }}
+                  >
+                    {subAdding ? '添加中…' : '添加'}
+                  </Button>
+                )}
               </div>
               <p className="mt-1 text-[10px] leading-relaxed text-text-3">
-                新内容自动按默认参数入队（保存目录 = 全局下载目录），单次最多 20 条；去重档案防止重复下载
+                新内容自动入队（单次最多 20 条，去重档案防重复）；每源可指定保存目录、参数预设与命名模板，条目可按时长/关键词过滤；RSS
+                条目不支持时长过滤
               </p>
             </Section>
 

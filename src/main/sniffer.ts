@@ -4,6 +4,7 @@
 
 import { fileURLToPath } from 'url'
 import type { TaskType } from '@shared/types'
+import { detectLiveRoom } from './live/rooms'
 
 export interface SniffResult {
   type: TaskType
@@ -11,6 +12,8 @@ export interface SniffResult {
   /** 短视频平台（抖音/快手等）→ noWatermark 默认 true */
   noWatermark?: boolean
   platform?: string
+  /** 三期（backlog #25）：直播间页 URL（live.bilibili.com/xxx 等）→ N_m3u8DL-RE 直录 */
+  liveRoom?: boolean
 }
 
 /** file:// → 本地路径（跨平台：Windows 盘符、%20 转义、file://localhost 形态）；非 file: 输入原样返回 */
@@ -58,6 +61,13 @@ export function sniff(input: string): SniffResult | null {
       // 尾巴会随 source 进引擎导致 404
       const clean = u.toString()
       const host = u.hostname.toLowerCase()
+      // 三期（backlog #25）：直播间页 URL 分型——必须在 VIDEO_DOMAINS 之前
+      //（live.bilibili.com/live.douyin.com 否则被普通视频域抢先命中；douyu/huya
+      // 此前落 http 类型必然失败）。解析链（yt-dlp -J / B站公开 API）在 live/resolve.ts
+      const live = detectLiveRoom(clean)
+      if (live) {
+        return { type: 'video', source: clean, platform: live.platform, liveRoom: true }
+      }
       for (const { pattern, platform } of VIDEO_DOMAINS) {
         if (pattern.test(host)) {
           const shortlink = SHORTLINK_DOMAINS.test(host)

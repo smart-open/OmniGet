@@ -28,6 +28,9 @@
 
 ```
 src/main/          主进程：index.ts(单实例锁+编排) ipc.ts(§6.1白名单注册表) logger.ts
+  live/            三期直播间直录：rooms.ts(URL分型/平台请求头纯函数) resolve.ts(yt-dlp -J/B站公开API取流清单)
+  danmaku/         三期弹幕：convert.ts(xml→ass纯函数) burn.ts(B站公开API取弹幕+ffmpeg烧录)
+  video/           三期视频库：library.ts(videos表登记/封面抽帧/时长探测)
   orchestrator/    ports.ts(aria2 RPC 端口分配) binaries.ts(TOFU SHA256+ensureVerified) aria2.ts(监督器+WS RPC客户端) proc.ts(跨平台进程树终止)
   task/            state-machine.ts(§4.1守卫) manager.ts(编排) store.ts(SQLite读写) events.ts(250ms合并) id.ts(uuidv7)
   adapters/        aria2.ts(parse/start/poll) types.ts(EngineAdapter接口)
@@ -54,6 +57,7 @@ resources/engines/ sidecar 按 <platform> 目录；构建经 extraResources
 - ✅ M4 打磨 13/17 + 🔶3 + ⏭1（可选悬浮窗）：回收站/统计页/快捷键+帮助/设置页（模板·调度·Tracker）/工具箱八件套/向导/诊断/完整性探测；🔶 Inspector layoutId、electron-updater 真机通道、三平台出包
 - ✅ 产品化批次（R1–R7/T1–T6，0.5.x–0.6.0）+ R7 续/R4 续批次（0.7.0，backlog #4/#8/#11/#16–#22）：N_m3u8DL-RE 引擎 + 直播录制、订阅追更中心（DB v2）、双档案去重、SponsorBlock、短视频解析服务 sidecar、JS 运行时探测（jsruntime.ts）、迷你悬浮窗（?view=mini）、预设导入导出/命名模板、BT 树虚拟化、sanitize 平台差异化；typecheck + 93/93 单测（2026-10-02）
 - ✅ 一期「发布就绪」代码侧（0.8.0，2026-10-04，roadmap 一期）：Windows CI 签名开启 + EV 可选通道；release job tag 推送自动建 Release（安装包 + latest.yml/blockmap + 引擎资产 manifest.json 扁平化）；engine-fetch 目录式 404 回退扁平口径；SponsorBlock 跳过段（仅 YouTube 显示）；EJS 零包体 shim（ELECTRON_RUN_AS_NODE）；typecheck + 125/125 单测。关账余外部/人工项（macOS 证书、五平台真机回归、EJS 代理复测）
+- ✅ 三期「视频纵深」代码侧（0.10.0，2026-10-04，roadmap 三期四项）：直播间直录 #25（sniffer 分型 + live/resolve yt-dlp -J/B站公开 API 取流清单喂 RE + 平台 Referer 头 + 不入去重档案）；弹幕 #23（danmaku/convert xml→ass 纯函数 + 工具箱工具 + B站任务可选压制）；订阅升级 #18（DB v4 + RSS 源 + 每源目录/预设/模板 + 时长/关键词过滤 + 编辑模式）；视频媒体库 MVP（DB v4 videos 表 + ffmpeg 抽帧封面 + VideoLibrary 封面墙视图）；typecheck + 151/151 单测。遗留：直播间/弹幕真机回归、合集产物不入库
 - ⬜ 收口演示（全部人工项）：磁力 `dc9e7581…` GUI、10k 60fps、mac/Linux 清单、五平台各一次成功、B 站 1080P+cookie / YouTube 4K / 抖音快手短链、light 走查、三态走查、NSIS 出包
 
 ## 5. 关键决策与约定（不可随意更改）
@@ -68,6 +72,7 @@ resources/engines/ sidecar 按 <platform> 目录；构建经 extraResources
 8. **信任模型 TOFU**：sidecar 首启记录 SHA256 指纹（userData/fingerprints.json），之后不符即拒绝。
 9. **合规红线**（§9）：不做资源站聚合；去水印仅取平台已有原始资源；音乐降级必须告警。
 10. **安全基线**：contextIsolation+sandbox+nodeIntegration:false；aria2 RPC 仅绑 127.0.0.1；CSP 在 `src/renderer/index.html`。
+11. **三期口径（0.10.0）**：直播间任务的 `task.source` 在 parse 后被改写为流清单直链（原直播间页 URL 存 `params.roomUrl`，live/resolve 的 `liveHeaderArgs` 据此注入平台 Referer 头）——重启恢复的直播任务凭过期清单失败属预期；直播 URL 不入去重档案；弹幕/直播取数只走 B站公开 API（`web-interface/view`/`dm/listsoa`/`room_playing`），不自研签名；视频库登记唯一入口 manager.persistCliProduct → `registerVideo`（同路径复用行保留封面，封面抽帧 fire-and-forget 落 `userData/covers/`）。
 
 ## 6. 环境（Windows 11，PowerShell；本机无 MSVC）
 

@@ -33,6 +33,23 @@ test('HLS/DASH 清单链接 → video/hls（backlog #17：走 yt-dlp 而非 aria
   assert.equal(sniff('https://example.com/m3u8-player')?.platform, 'http')
 })
 
+test('三期（backlog #25）：直播间页 URL 分型', () => {
+  // B站直播间：先于 VIDEO_DOMAINS 命中（普通视频域不再抢占）
+  const bili = sniff('https://live.bilibili.com/21452505')
+  assert.equal(bili?.type, 'video')
+  assert.equal(bili?.platform, 'bilibili')
+  assert.equal(bili?.liveRoom, true)
+  // 虎牙/斗鱼：此前落 http 类型必然失败
+  assert.equal(sniff('https://www.huya.com/660132')?.liveRoom, true)
+  assert.equal(sniff('https://www.douyu.com/999911')?.platform, 'douyu')
+  // 抖音直播间（live.douyin.com 子域）
+  assert.equal(sniff('https://live.douyin.com/745961234')?.liveRoom, true)
+  // 非直播间 URL 不受影响
+  assert.equal(sniff('https://live.bilibili.com/')?.liveRoom, undefined)
+  assert.equal(sniff('https://www.douyu.com/topic/riyao')?.liveRoom, undefined)
+  assert.equal(sniff('https://www.bilibili.com/video/BV1xx')?.liveRoom, undefined)
+})
+
 test('30s 去重窗口：同 key 首次 true、窗口内 false、过期后 true', () => {
   const w = new DedupeWindow(50)
   assert.equal(w.check('magnet:dc9e'), true)
