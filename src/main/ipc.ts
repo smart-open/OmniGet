@@ -205,6 +205,47 @@ export function registerIpcHandlers(): void {
     return taskManager.createMusicTask(input)
   })
 
+  // 二期（0.9.x 歌单/专辑批量）：URL 解析（网易云公开 API，合规红线：不自研签名）
+  ipcMain.handle(IPC_CHANNELS.musicPlaylist, async (_e, url: string) => {
+    const u = typeof url === 'string' ? url.trim() : ''
+    if (!u) throw new Error('请粘贴网易云歌单/专辑页链接')
+    if (u.length > 500) throw new Error('链接过长，请粘贴完整的歌单/专辑页 URL')
+    const { fetchMusicPlaylist, parseMusicPlaylistUrl } = await import('./music/playlist')
+    const parsed = parseMusicPlaylistUrl(u)
+    if (!parsed) throw new Error('暂仅支持网易云歌单/专辑页链接（music.163.com/playlist 或 /album）')
+    return fetchMusicPlaylist(parsed.kind, parsed.id)
+  })
+  // 二期（0.9.x 音乐库）：已完成曲目登记视图
+  ipcMain.handle(IPC_CHANNELS.musicLibrary, async () => {
+    const { listTracks } = await import('./music/library')
+    return listTracks().map((r) => ({
+      id: r.id,
+      taskId: r.task_id,
+      path: r.path,
+      lrcPath: r.lrc_path,
+      title: r.title,
+      artist: r.artist,
+      album: r.album,
+      quality: r.quality,
+      source: r.source,
+      size: r.size,
+      createdAt: r.created_at
+    }))
+  })
+  ipcMain.handle(IPC_CHANNELS.musicLibraryRemove, async (_e, trackId: string) => {
+    const { removeTrack } = await import('./music/library')
+    const id = typeof trackId === 'string' ? trackId.trim() : ''
+    if (!id) throw new Error('缺少曲目 ID')
+    const removed = removeTrack(id)
+    if (!removed) throw new Error('曲目不存在或已被移除')
+  })
+  ipcMain.handle(IPC_CHANNELS.musicLibraryRetag, async (_e, trackId: string) => {
+    const { retagTrack } = await import('./music/library')
+    const id = typeof trackId === 'string' ? trackId.trim() : ''
+    if (!id) throw new Error('缺少曲目 ID')
+    return retagTrack(id)
+  })
+
   // engine（M3-9：yt-dlp 热更器）
   ipcMain.handle(IPC_CHANNELS.engineUpdate, async (_e, engine: 'ytdlp') => {
     if (engine !== 'ytdlp') throw new Error('仅支持 yt-dlp 引擎更新')

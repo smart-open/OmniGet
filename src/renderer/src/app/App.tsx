@@ -31,6 +31,7 @@ import { initLocale, useI18n } from '../i18n'
 import { TaskList } from '../features/tasks/TaskList'
 import { NewTaskDialog } from '../features/new-task/NewTaskDialog'
 import { MusicWorkbench } from '../features/music/MusicWorkbench'
+import { MusicLibrary } from '../features/library/MusicLibrary'
 import { SettingsPage } from '../features/settings/SettingsPage'
 import { StatsPage } from '../features/stats/StatsPage'
 import { ToolboxPage } from '../features/toolbox/ToolboxPage'
@@ -79,7 +80,10 @@ const NAV_GROUPS: { title?: string; items: NavItem[] }[] = [
   },
   {
     title: '库',
-    items: [{ id: 'trash', label: '回收站', icon: Trash, badge: 'trash' }]
+    items: [
+      { id: 'library', label: '音乐库', icon: MusicNote },
+      { id: 'trash', label: '回收站', icon: Trash, badge: 'trash' }
+    ]
   }
 ]
 
@@ -601,6 +605,8 @@ export default function App() {
           <div className="min-w-0 flex-1 overflow-hidden">
             {active === 'music' ? (
               <MusicWorkbench onOpenTasks={() => setActive('all')} />
+            ) : active === 'library' ? (
+              <MusicLibrary />
             ) : active === 'health' ? (
               <HealthPage />
             ) : active === 'settings' ? (
@@ -613,7 +619,7 @@ export default function App() {
               <TaskList active={active} onNewTask={openDialog} query={query} />
             )}
           </div>
-          {active !== 'music' && active !== 'settings' && (
+          {active !== 'music' && active !== 'library' && active !== 'settings' && (
             <Inspector
               task={selectedTask}
               onClose={() => select(null)}

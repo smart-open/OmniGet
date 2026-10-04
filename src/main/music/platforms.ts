@@ -5,9 +5,10 @@
 
 import { join } from 'path'
 import { randomUUID } from 'crypto'
-import { mkdir, rename, stat, unlink, writeFile } from 'fs/promises'
+import { mkdir, open, rename, stat, unlink, writeFile } from 'fs/promises'
 import { getJson, postForm, postJson, getText, fetchToFile, downloadFile, hostOf, isTrustedAudioHost } from './http'
 import { HostGate } from './gate'
+import { mergeBilingualLrc, getLyricsMode } from './lyrics'
 import { createLogger } from '../logger'
 
 const log = createLogger('music.platforms')
@@ -70,6 +71,8 @@ export interface PlatformResult {
   message: string
   mp3Path: string
   lrcPath: string
+  /** 二期：专辑名（平台有值才带）——媒体服务器归档模板 {{album}} 数据源 */
+  album?: string
   /** R4-P2：产物为既有文件（skip_existing 命中）——取消清理不得误删 */
   cached?: boolean
 }
@@ -125,6 +128,60 @@ async function ensureDir(dir: string): Promise<void> {
   await mkdir(dir, { recursive: true })
 }
 
+// 二期（0.9.x 无损档）：音频容器扩展名全集（skip_existing 多扩展名判定用）
+const AUDIO_EXTS = ['.mp3', '.flac', '.m4a', '.ogg', '.wav', '.opus'] as const
+
+/**
+ * 音频文件头嗅探 → 真实容器扩展名（纯读前 12 字节，离线可靠）。
+ * 此前产物统一硬编码 `.mp3`——镜像在无损档返回 flac/m4a 时扩展名与容器不符，
+ * 部分播放器/媒体服务器（Navidrome 扫描）会拒收。
+ */
+export async function detectAudioExt(filePath: string): Promise<string | null> {
+  try {
+    const fh = await open(filePath, 'r')
+    try {
+      const buf = Buffer.alloc(12)
+      const { bytesRead } = await fh.read(buf, 0, 12, 0)
+      if (bytesRead < 4) return null
+      const magic = (from: number, len: number): string => buf.subarray(from, from + len).toString('latin1')
+      if (magic(0, 4) === 'fLaC') return '.flac'
+      if (magic(4, 4) === 'ftyp') return '.m4a'
+      if (magic(0, 4) === 'OggS') return '.ogg'
+      if (magic(0, 4) === 'RIFF') return '.wav'
+      if (magic(0, 3) === 'ID3') return '.mp3'
+      // 裸 MPEG 帧头：0xFFEx 同步字
+      if (buf[0] === 0xff && (buf[1]! & 0xe0) === 0xe0) return '.mp3'
+      return null
+    } finally {
+      await fh.close()
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 下载产物扩展名对齐：文件头与后缀不符时改名到真实容器扩展名（lrc 主名不变）。
+ * 失败（目标已存在/占用）原样返回 .mp3 路径，不影响成功语义。
+ */
+export async function alignAudioExt(audioPath: string): Promise<string> {
+  const m = /\.\w+$/.exec(audioPath)
+  const ext = m?.[0]?.toLowerCase() ?? ''
+  if (!AUDIO_EXTS.includes(ext as (typeof AUDIO_EXTS)[number])) return audioPath
+  const real = await detectAudioExt(audioPath)
+  if (!real || real === ext) return audioPath
+  const base = audioPath.slice(0, audioPath.length - ext.length)
+  const target = base + real
+  if (target === audioPath) return audioPath
+  try {
+    await rename(audioPath, target)
+    log.info(`音频扩展名对齐: ${audioPath} → ${target}（文件头嗅探）`)
+    return target
+  } catch {
+    return audioPath
+  }
+}
+
 async function writeLrc(lrcPath: string, content: string): Promise<void> {
   try {
     await writeFile(lrcPath, content || EMPTY_LRC, 'utf8')
@@ -144,6 +201,9 @@ export class PlatformEngine {
    * mp3 可能是并发同歌任务刚产出的文件（本任务未写入任何字节）。tryAllPlatforms
    * 据此把结果标为 cached，取消清理时不得误删他人产物 */
   lastProductForeign = false
+
+  /** 二期：本次下载命中的平台专辑名（{{album}} 归档模板数据源） */
+  lastAlbum = ''
 
   private async gate(url: string): Promise<void> {
     const h = hostOf(url)
@@ -315,15 +375,21 @@ export class PlatformEngine {
     try {
       const url = 'https://music.163.com/api/song/lyric'
       await this.gate(url)
-      const data = await postForm<{ lrc?: { lyric?: string } }>(
+      // 二期（0.9.x 双语歌词）：tv=1 取翻译轨（tlyric），原文轨仍走 lrc
+      const data = await postForm<{ lrc?: { lyric?: string }; tlyric?: { lyric?: string } }>(
         url,
-        { id: sid, lv: 1, kv: 1, tv: -1 },
+        { id: sid, lv: 1, kv: 1, tv: 1 },
         NETEASE_HEADERS,
         { signal: this.cb.signal, timeoutMs: 15_000 }
       )
       const lyric = data.lrc?.lyric ?? ''
       if (hasTimestamps(lyric)) {
-        await writeLrc(lrcPath, lyric)
+        const trans = data.tlyric?.lyric ?? ''
+        if (getLyricsMode() === 'bilingual' && hasTimestamps(trans)) {
+          await writeLrc(lrcPath, mergeBilingualLrc(lyric, trans))
+        } else {
+          await writeLrc(lrcPath, lyric)
+        }
         return true
       }
     } catch (err) {
@@ -372,6 +438,7 @@ export class PlatformEngine {
 
   async tryNeteaseRobust(singer: string, songName: string, mp3Path: string, lrcPath: string, quality: Quality): Promise<boolean> {
     this.lastProductForeign = false // 每次尝试前重置归属标记
+    this.lastAlbum = ''
     const candidates = await this.searchNetease(`${singer} ${songName}`.trim(), 10)
     if (!candidates.length) return false
     const enriched = []
@@ -395,6 +462,7 @@ export class PlatformEngine {
     for (const c of attempts) {
       if (await this.downloadNeteaseAudio(c.id, mp3Path, quality)) {
         await this.neteaseLyricBest(c.id, allIds, lrcPath)
+        this.lastAlbum = c.album ?? ''
         this.cb.log?.(`网易云命中: ${c.name} / ${c.artist}`)
         return true
       }
@@ -402,8 +470,10 @@ export class PlatformEngine {
     return false
   }
 
-  /** F1：按网易云 ID 精确下载（搜索降级时的可靠通道） */
+  /** F1：按网易云 ID 精确下载（搜索降级时的可靠通道）。专辑名由调用方
+   *  （engine.downloadById 的 detail）回填 engine.lastAlbum */
   async downloadNeteaseById(neteaseId: string, mp3Path: string, lrcPath: string, quality: Quality): Promise<boolean> {
+    this.lastAlbum = ''
     if (!(await this.downloadNeteaseAudio(neteaseId, mp3Path, quality))) return false
     await this.neteaseLyricBest(neteaseId, [neteaseId], lrcPath)
     return true
@@ -568,10 +638,12 @@ export class PlatformEngine {
   }
 
   async tryKugou(fileHash: string, mp3Path: string, lrcPath: string, quality: Quality): Promise<boolean> {
-    void quality
+    // 二期（0.9.x 无损档）：quality 接线（此前 void quality 忽略音质，恒从 br=6 起试）。
+    // 317ak br 值越大音质越高（1-6）；haitangw level：hires > lossless > exhigh > standard
     const h = { 'user-agent': 'Mozilla/5.0' }
+    const brChain = quality === 'lossless' ? ['6', '5', '4', '3', '2', '1'] : quality === 'high' ? ['5', '4', '3', '2', '1'] : ['3', '2', '1']
     try {
-      for (const q2 of ['6', '5', '4', '3', '2', '1']) {
+      for (const q2 of brChain) {
         const url = `https://api.317ak.com/api/yinyue/kugou?ckey=UE9WTUhLSklYOEE3SUdIMkZNMVA=&i=${fileHash}&br=${q2}&type=json&lrc=1`
         await this.gate(url)
         const data = await getJson<{ url?: string; lyric?: string }>(url, h, { signal: this.cb.signal, timeoutMs: 10_000 })
@@ -585,7 +657,8 @@ export class PlatformEngine {
       if (!this.cb.signal?.aborted) this.cb.log?.(`酷狗 317ak 直链失败 hash=${fileHash}：${err instanceof Error ? err.message : String(err)}`)
     }
     try {
-      for (const q2 of ['hires', 'lossless', 'exhigh']) {
+      const levelChain = quality === 'lossless' ? ['hires', 'lossless'] : quality === 'high' ? ['exhigh'] : ['standard', 'exhigh']
+      for (const q2 of levelChain) {
         const url = `https://musicapi.haitangw.net/kgqq/kg.php?type=json&id=${fileHash}&level=${q2}`
         await this.gate(url)
         const r = await getJson<{ data?: { url?: string } }>(url, h, { signal: this.cb.signal, timeoutMs: 10_000 })
@@ -641,6 +714,7 @@ export class PlatformEngine {
   }
 
   async tryMigu(song: PlatformSong, mp3Path: string, lrcPath: string, quality: Quality): Promise<boolean> {
+    this.lastAlbum = song.album ?? ''
     const contentId = song.id
     const copyrightId = song.copyrightId ?? ''
     const q = QUALITY_MAP.migu![quality]
@@ -755,6 +829,7 @@ export class PlatformEngine {
   }
 
   async trySoda(song: PlatformSong, mp3Path: string, lrcPath: string): Promise<boolean> {
+    this.lastAlbum = song.album ?? ''
     const songId = song.id
     try {
       // 2026-09-30 实测：https 证书有效（Python 原版 http 为历史遗留），切换防中间人篡改
@@ -849,16 +924,26 @@ export async function tryAllPlatforms(
   const aborted = (): boolean => signal?.aborted === true
   if (aborted()) return { success: false, source: '', message: '任务已取消', mp3Path: '', lrcPath: '' }
 
+  // 二期（无损档）：成功后按文件头对齐产物扩展名（.mp3 → .flac/.m4a/…），
+  // 并把真实路径/专辑名带进结果
+  const finish = async (source: string, message: string): Promise<PlatformResult> => ({
+    success: true,
+    source,
+    message,
+    mp3Path: await alignAudioExt(mp3Path),
+    lrcPath,
+    album: engine.lastAlbum || undefined
+  })
+
   // 1. 网易云（原唱校验）
   if (onEvent) onEvent({ type: 'progress', platform: 'netease', message: '尝试 网易云…' })
   if (await engine.tryNeteaseRobust(singer, songName, mp3Path, lrcPath, quality)) {
     onEvent?.({ type: 'platform-ok', platform: 'netease', message: '网易云 下载成功' })
     // 第七轮审查 P2：exists 兜底命中的产物非本任务落盘（lastProductForeign）——
     // 按 cached 语义返回，engine 取消清理/改名跳过，防误删并发同歌任务的产物
-    if (engine.lastProductForeign) {
-      return { success: true, source: '网易云', message: `网易云: ${songName}`, mp3Path, lrcPath, cached: true }
-    }
-    return { success: true, source: '网易云', message: `网易云: ${songName}`, mp3Path, lrcPath }
+    const r = await finish('网易云', `网易云: ${songName}`)
+    if (engine.lastProductForeign) return { ...r, cached: true }
+    return r
   }
   onEvent?.({ type: 'progress', platform: 'netease', message: '网易云 未命中' })
 
@@ -866,9 +951,10 @@ export async function tryAllPlatforms(
   if (aborted()) return { success: false, source: '', message: '任务已取消', mp3Path: '', lrcPath: '' }
   if (onEvent) onEvent({ type: 'progress', platform: 'qq', message: '尝试 QQ 音乐…' })
   for (const song of await engine.searchQq(keyword)) {
+    engine.lastAlbum = song.album ?? ''
     if (await engine.tryQq(song.id, mp3Path, lrcPath, quality)) {
       onEvent?.({ type: 'platform-ok', platform: 'qq', message: 'QQ 音乐 下载成功' })
-      return { success: true, source: 'QQ 音乐', message: `QQ 音乐: ${song.name}`, mp3Path, lrcPath }
+      return await finish('QQ 音乐', `QQ 音乐: ${song.name}`)
     }
   }
   onEvent?.({ type: 'progress', platform: 'qq', message: 'QQ 音乐 未命中' })
@@ -877,9 +963,10 @@ export async function tryAllPlatforms(
   if (aborted()) return { success: false, source: '', message: '任务已取消', mp3Path: '', lrcPath: '' }
   if (onEvent) onEvent({ type: 'progress', platform: 'kugou', message: '尝试 酷狗…' })
   for (const song of await engine.searchKugou(keyword)) {
+    engine.lastAlbum = song.album ?? ''
     if (await engine.tryKugou(song.id, mp3Path, lrcPath, quality)) {
       onEvent?.({ type: 'platform-ok', platform: 'kugou', message: '酷狗 下载成功' })
-      return { success: true, source: '酷狗', message: `酷狗: ${song.name}`, mp3Path, lrcPath }
+      return await finish('酷狗', `酷狗: ${song.name}`)
     }
   }
   onEvent?.({ type: 'progress', platform: 'kugou', message: '酷狗 未命中' })
@@ -890,7 +977,7 @@ export async function tryAllPlatforms(
   for (const song of await engine.searchMigu(keyword)) {
     if (await engine.tryMigu(song, mp3Path, lrcPath, quality)) {
       onEvent?.({ type: 'platform-ok', platform: 'migu', message: '咪咕 下载成功' })
-      return { success: true, source: '咪咕', message: `咪咕: ${song.name}`, mp3Path, lrcPath }
+      return await finish('咪咕', `咪咕: ${song.name}`)
     }
   }
   onEvent?.({ type: 'progress', platform: 'migu', message: '咪咕 未命中' })
@@ -901,7 +988,7 @@ export async function tryAllPlatforms(
   for (const song of await engine.searchSoda(keyword)) {
     if (await engine.trySoda(song, mp3Path, lrcPath)) {
       onEvent?.({ type: 'platform-ok', platform: 'soda', message: '汽水 下载成功' })
-      return { success: true, source: '汽水', message: `汽水: ${song.name}`, mp3Path, lrcPath }
+      return await finish('汽水', `汽水: ${song.name}`)
     }
   }
   onEvent?.({ type: 'progress', platform: 'soda', message: '汽水 未命中' })
@@ -909,13 +996,22 @@ export async function tryAllPlatforms(
   return { success: false, source: '', message: `所有平台均无法下载: ${keyword}`, mp3Path: '', lrcPath: '' }
 }
 
-/** 已下载判定（等价 _already_downloaded） */
+/**
+ * 已下载判定（等价 _already_downloaded）：音频 >1KB 且 lrc 存在 → 跳过。
+ * 二期（无损档）：产物扩展名按文件头对齐后可能是 .flac/.m4a——对主名扫全部音频
+ * 扩展名，防止无损产物被重复下载覆盖。
+ */
 export async function alreadyDownloaded(mp3Path: string, lrcPath: string): Promise<boolean> {
-  try {
-    const s = await stat(mp3Path)
-    await stat(lrcPath)
-    return s.size > 1024
-  } catch {
-    return false
+  const m = /\.\w+$/.exec(mp3Path)
+  const base = m ? mp3Path.slice(0, mp3Path.length - m[0].length) : mp3Path
+  for (const ext of AUDIO_EXTS) {
+    try {
+      const s = await stat(base + ext)
+      await stat(lrcPath)
+      if (s.size > 1024) return true
+    } catch {
+      // 该扩展名不存在 → 试下一个
+    }
   }
+  return false
 }

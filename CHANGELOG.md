@@ -3,6 +3,20 @@
 > OmniGet 产品变更记录。版本号遵循 `0.x.y` 约定：**x（中间版本号）随功能里程碑递增**，y 为里程碑内的小修/加固版本。初始版本 0.1.0。
 > 格式参考 Keep a Changelog；日期为里程碑完成时间。里程碑与验收口径溯源至《OmniGet-产品技术设计文档》§10。
 
+## [0.9.0] - 2026-10-04
+
+### 二期「音乐纵深」（roadmap 二期五项全落地）
+
+- **无损音质档位**：产物扩展名不再硬编码 `.mp3`——下载完成按**文件头嗅探**（fLaC/ftyp/ID3/MPEG 同步字/OggS/RIFF）对齐真实容器扩展名（`.flac`/`.m4a` 等，lrc 主名不变）；酷狗 `tryKugou` 音质接线（此前 `void quality` 忽略音质参数，恒从最高 br 起试）——317ak br 链与 haitangw level 链均按档位收敛；`skip_existing` 扩展为多音频扩展名扫描（无损产物不被重复下载覆盖）
+- **歌单/专辑页批量下载**：新增 `music/playlist.ts`——网易云歌单/专辑页 URL 分型（含 `y.music.163.com`、`#/playlist` 等页面变体）→ 官方公开 API 抓曲目列表（单批上限 100，合规红线：只消费公开接口不自研签名）；音乐工作台新增「歌单」面板：解析 → 曲目勾选（全选/清空）→ 逐曲按 ID 精确入队，并发闸门复用任务队列（≤4）
+- **双语歌词（LRC 双轨）**：网易云歌词接口改取 `tlyric` 翻译轨（原 `tv:-1` 未消费），`mergeBilingualLrc` 纯函数按时间戳把译文行（无时间戳）合并进原文；工作台音质行新增「歌词」模式选择（原文/双语，`music.lyrics` 设置持久化，默认原文维持既有行为）
+- **媒体服务器友好归档**：`naming.ts` 新增 `{{album}}` 变量与 `renderNamingSegments` 目录段渲染（逐段 sanitizeFilename、`..`/空段收口、最多 8 段）；音乐命名模板独立键 `music.template`（非空优先于全局 `naming.template`——视频侧 `toYtDlpOutputTemplate` 会把 `/` 中和为 `_`，共用键会互相污染）；`engine.applyNaming` 升级为支持 `{{artist}}/{{album}}/{{title}}` 目录结构（子目录建失败保留原位不判失败）；平台命中专辑名经 `engine.lastAlbum` → `music.done` 事件贯通；设置 → 模板新增音乐模板输入 + Navidrome 归档预设按钮
+- **音乐库视图**：DB 迁移 v3 `music_tracks` 表；`music.done` 成功即登记（真实产物路径/lrc/标题/歌手/专辑/音质，同路径去重）；侧栏「库」组新增「音乐库」视图——按歌手/专辑分组浏览 + 检索 + 本地试听（`omniget-preview://local` 流式）+ MusicBrainz 一键补标签（复用 #29 查询纯函数 + ffmpeg `-c copy` 元数据回写原地替换 + 库行同步，TOFU 闸门同口径）+ 定位文件 + 移除条目（不删文件，二次确认）
+
+### 测试
+
+- 新增 4 组单测（lyrics 双轨合并 5 例 / playlist URL 分型 4 例 / 音频头嗅探与扩展名对齐 2 例 / 命名 album+目录段 3 例）；store 迁移测试升至 user_version=3；全量 139/139，typecheck 通过
+
 ## [0.8.0] - 2026-10-04
 
 ### 一期「发布就绪」（roadmap 1.1/1.3；backlog §一 #2/#3、#16、#21）

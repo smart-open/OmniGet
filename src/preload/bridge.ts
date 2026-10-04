@@ -30,6 +30,13 @@ const api: OmniGetBridge = {
     ipcRenderer.invoke(IPC_CHANNELS.musicDownload, input),
   musicPreview: (platform: string, id: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.musicPreview, platform, id),
+  // 二期（0.9.x）：歌单/专辑解析 + 音乐库
+  musicPlaylist: (url: string) => ipcRenderer.invoke(IPC_CHANNELS.musicPlaylist, url),
+  musicLibrary: () => ipcRenderer.invoke(IPC_CHANNELS.musicLibrary),
+  musicLibraryRemove: (trackId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.musicLibraryRemove, trackId),
+  musicLibraryRetag: (trackId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.musicLibraryRetag, trackId),
   diagBtPort: () => ipcRenderer.invoke(IPC_CHANNELS.diagBtPort),
   diagBtExternal: () => ipcRenderer.invoke(IPC_CHANNELS.diagBtExternal),
   checkAppUpdate: () => ipcRenderer.invoke(IPC_CHANNELS.appCheckUpdate),

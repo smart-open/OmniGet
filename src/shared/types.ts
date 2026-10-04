@@ -167,6 +167,46 @@ export interface MusicSearchResult {
   degraded: string[]
 }
 
+// ── 二期（0.9.x 音乐纵深）：歌单/专辑批量 + 音乐库 ────────────────────
+
+/** 歌单/专辑曲目（网易云公开 API 解析） */
+export interface MusicPlaylistTrack {
+  id: string
+  name: string
+  artist: string
+  album: string
+}
+
+export interface MusicPlaylistInfo {
+  kind: 'playlist' | 'album'
+  id: string
+  name: string
+  tracks: MusicPlaylistTrack[]
+}
+
+/** 音乐库曲目（music.done 完成即登记） */
+export interface MusicLibraryTrack {
+  id: string
+  taskId: string | null
+  path: string
+  lrcPath: string | null
+  title: string
+  artist: string | null
+  album: string | null
+  quality: string | null
+  source: string | null
+  size: number
+  createdAt: number
+}
+
+/** MusicBrainz 一键补标签结果 */
+export interface MusicRetagResult {
+  title: string
+  artist?: string
+  album?: string
+  date?: string
+}
+
 /** 音乐引擎事件（§6.3；内嵌引擎直发，形状与原 omni-service WS 一致） */
 export interface ServiceEvent {
   type: 'music.progress' | 'music.done' | 'music.warning'
@@ -180,6 +220,8 @@ export interface ServiceEvent {
   source?: string
   mp3Path?: string
   lrcPath?: string
+  /** 二期：专辑名（平台有值才带）——音乐库登记与 {{album}} 归档模板数据源 */
+  album?: string
   bytes?: number
 }
 
@@ -440,6 +482,14 @@ export interface OmniGetBridge {
   musicDownload(input: MusicDownloadInput): Promise<{ taskId: string }>
   /** F1 试听：返回主进程代理的预览流 URL（omniget-preview:// 协议，<audio> 播放） */
   musicPreview(platform: string, id: string): Promise<string>
+  /** 二期：歌单/专辑 URL → 曲目列表（网易云公开 API；批量勾选入队用） */
+  musicPlaylist(url: string): Promise<MusicPlaylistInfo>
+  /** 二期：音乐库（已完成曲目） */
+  musicLibrary(): Promise<MusicLibraryTrack[]>
+  /** 二期：从音乐库移除条目（不删文件） */
+  musicLibraryRemove(trackId: string): Promise<void>
+  /** 二期：MusicBrainz 一键补标签（原地回写 + 库行同步） */
+  musicLibraryRetag(trackId: string): Promise<MusicRetagResult>
   /** BT 端口自检：检测 aria2 listen-port 本地是否在监听（外网可达性需用户自行放行防火墙） */
   diagBtPort(): Promise<{
     listening: boolean
@@ -551,6 +601,12 @@ export const IPC_CHANNELS = {
   musicSearch: 'music:search',
   musicDownload: 'music:download',
   musicPreview: 'music:preview',
+  /** 二期：歌单/专辑 URL 解析（网易云公开 API） */
+  musicPlaylist: 'music:playlist',
+  /** 二期：音乐库（已完成曲目登记视图） */
+  musicLibrary: 'music:library',
+  musicLibraryRemove: 'music:library:remove',
+  musicLibraryRetag: 'music:library:retag',
   diagBtPort: 'diag:btPort',
   diagBtExternal: 'diag:btExternal',
   appCheckUpdate: 'app:checkUpdate',

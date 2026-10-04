@@ -2,6 +2,7 @@
 // 三类引擎统一接入（yt-dlp -o 模板 / 音乐完成重命名 / aria2 目录口径）。
 
 import { getSettingParsed } from './db'
+import { sanitizeFilename } from '@shared/sanitize'
 
 export const DEFAULT_TEMPLATE = '{{title}}'
 
@@ -10,11 +11,25 @@ export function getNamingTemplate(): string {
   return typeof v === 'string' ? v : DEFAULT_TEMPLATE
 }
 
+/**
+ * 二期（0.9.x）：音乐命名模板独立键。music.template 非空时优先于全局
+ * naming.template——媒体服务器归档（Navidrome/Jellyfin 的 artist/album 目录约定）
+ * 需要 `/` 目录分隔，而视频侧 toYtDlpOutputTemplate 会把 `/` 中和为 `_`，
+ * 共用同一键会互相污染，故拆分。
+ */
+export function getMusicNamingTemplate(): string {
+  const v = getSettingParsed<string>('music.template')
+  if (typeof v === 'string' && v.trim()) return v
+  return getNamingTemplate()
+}
+
 export interface NamingVars {
   title?: string
   uploader?: string
   /** 音乐任务：歌手（与 uploader 语义并存，模板按场景使用） */
   artist?: string
+  /** 二期：专辑名（音乐任务；MusicBrainz/平台元数据有值才带） */
+  album?: string
   /** 1-based 序号（合集/批量场景） */
   index?: number
 }
@@ -30,6 +45,8 @@ export function renderNamingTemplate(template: string, vars: NamingVars): string
         return vars.uploader ?? 'unknown'
       case 'artist':
         return vars.artist ?? vars.uploader ?? 'unknown'
+      case 'album':
+        return vars.album ?? 'Unknown Album'
       case 'date':
         return date
       case 'index':
@@ -38,6 +55,23 @@ export function renderNamingTemplate(template: string, vars: NamingVars): string
         return _m
     }
   })
+}
+
+/**
+ * 二期（0.9.x 媒体服务器归档）：把渲染后的模板拆成安全相对路径段。
+ * 支持 `/`（与 `\`）目录分隔（Navidrome `{{artist}}/{{album}}/{{title}}` 约定）；
+ * 逐段 sanitizeName 中和非法字符，`..`/空段/绝对路径前缀全部收口：
+ * 返回的段拼接后保证落在目标目录内（调用方直接 join）。
+ */
+export function renderNamingSegments(template: string, vars: NamingVars): string[] {
+  const rendered = renderNamingTemplate(template, vars).replace(/\.{2,}/g, '.')
+  const raw = rendered
+    .split(/[\\/]+/)
+    .map((seg) => seg.trim())
+    .filter(Boolean)
+    .map((seg) => sanitizeFilename(seg.replace(/[\\/]/g, '_')))
+    .filter((seg) => seg && seg !== '.' && seg !== '..')
+  return raw.length > 0 ? raw.slice(0, 8) : ['untitled']
 }
 
 /** yt-dlp 输出模板转换：变量映射为 yt-dlp 字段（date 落为字面当日） */

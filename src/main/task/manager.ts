@@ -25,6 +25,7 @@ import { parseParamsJson, readTaskOriginUrl, readTaskSpeedLimit } from '../task/
 import type { Aria2Adapter } from '../adapters/aria2'
 import { cleanupStaleMetadataDirs } from '../adapters/aria2'
 import type { MusicAdapter } from '../music/adapter'
+import { registerTrack } from '../music/library'
 import type { YtDlpAdapter } from '../adapters/ytdlp'
 import { Nm3u8Adapter } from '../adapters/nm3u8'
 import { isBinaryPresent } from '../orchestrator/binaries'
@@ -2021,7 +2022,8 @@ export class TaskManager {
       // F3：用真实文件名回填展示名
       let name = task.name
       if (ev.mp3Path) {
-        name = basename(ev.mp3Path).replace(/\.(mp3|flac|m4a)$/i, '')
+        // 二期无损档：对齐后扩展名可能是 ogg/wav/opus——通用剥后缀（原正则仅 mp3/flac/m4a 会漏）
+        name = basename(ev.mp3Path).replace(/\.\w+$/, '')
       }
       updateTaskFields(task.id, {
         downloaded: bytes,
@@ -2041,6 +2043,27 @@ export class TaskManager {
         productFiles.push({ path: basename(ev.lrcPath), size: 0, selected: true, downloaded: 0 })
       }
       if (productFiles.length > 0) saveTaskFiles(task.id, productFiles)
+      // 二期（0.9.x 音乐库）：完成即登记曲目（音乐库视图数据源）。
+      // title 用真实产物名回填后的 name；artist 从 params 取持久化真值
+      if (ev.mp3Path) {
+        // 库登记失败不得吞掉 completed 事件（pushEvent 在其后）——SQLite 故障时降级跳过
+        try {
+          const p = parseParamsJson(task.params)
+          registerTrack({
+            taskId: task.id,
+            path: ev.mp3Path,
+            lrcPath: ev.lrcPath || undefined,
+            title: name,
+            artist: typeof p.musicArtist === 'string' && p.musicArtist ? p.musicArtist : undefined,
+            album: ev.album || undefined,
+            quality: task.quality ?? undefined,
+            source: ev.source || undefined,
+            size: bytes
+          })
+        } catch (err) {
+          log.warn('音乐库登记失败（不影响任务完成）', { error: err instanceof Error ? err.message : String(err) })
+        }
+      }
       this.pushEvent({
         taskId: task.id,
         status: 'completed',

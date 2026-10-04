@@ -11,9 +11,10 @@ import {
   MagnifyingGlass,
   Play,
   Pause,
+  Playlist,
   Warning
 } from '@phosphor-icons/react'
-import type { MusicCandidate, MusicSearchResult } from '@shared/types'
+import type { MusicCandidate, MusicPlaylistInfo, MusicSearchResult } from '@shared/types'
 import { Button, Input } from '../../components/ui'
 import { toast, toastError } from '../../lib/feedback'
 
@@ -57,6 +58,15 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
   const [idValue, setIdValue] = useState('')
   const [idArtist, setIdArtist] = useState('')
   const [idSong, setIdSong] = useState('')
+  /** 二期：歌词落盘模式（music.lyrics 设置持久化；网易云翻译轨合并双轨） */
+  const [lyricsMode, setLyricsMode] = useState<'original' | 'bilingual'>('original')
+  /** 二期：歌单/专辑批量（网易云 URL → 曲目勾选 → 逐曲 ID 精确入队） */
+  const [plOpen, setPlOpen] = useState(false)
+  const [plUrl, setPlUrl] = useState('')
+  const [plInfo, setPlInfo] = useState<MusicPlaylistInfo | null>(null)
+  const [plBusy, setPlBusy] = useState(false)
+  const [plSelected, setPlSelected] = useState<Set<string>>(new Set())
+  const [plProgress, setPlProgress] = useState('')
   const audioRef = useRef<HTMLAudioElement | null>(null)
   /** P2 修复：试听竞态守卫——await 期间再点别处时，过期回调用序号自弃 */
   const previewSeq = useRef(0)
@@ -255,6 +265,66 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
 
   const degradedSearch = result?.degraded.length ?? 0
 
+  // 二期：歌词模式恢复（music.lyrics；主进程写 LRC 时读取同一键）
+  useEffect(() => {
+    window.omniget.settingsGet('music.lyrics')
+      .then((v) => {
+        if (v === 'bilingual') setLyricsMode('bilingual')
+      })
+      .catch(() => {})
+  }, [])
+
+  function changeLyricsMode(m: 'original' | 'bilingual'): void {
+    setLyricsMode(m)
+    void window.omniget.settingsSet('music.lyrics', m).catch(() => {})
+  }
+
+  /** 二期：歌单/专辑 URL → 曲目列表（主进程解析网易云公开 API） */
+  async function parsePlaylist(): Promise<void> {
+    if (!plUrl.trim() || plBusy) return
+    setPlBusy(true)
+    try {
+      const info = await window.omniget.musicPlaylist(plUrl.trim())
+      setPlInfo(info)
+      setPlSelected(new Set(info.tracks.map((t) => t.id)))
+    } catch (err) {
+      setPlInfo(null)
+      toastError('歌单解析失败', err)
+    } finally {
+      setPlBusy(false)
+    }
+  }
+
+  /** 二期：勾选曲目逐曲按 ID 精确入队（并发闸门由任务队列统一管，≤4） */
+  async function enqueuePlaylist(): Promise<void> {
+    if (!plInfo || plBusy) return
+    const picked = plInfo.tracks.filter((t) => plSelected.has(t.id))
+    if (!picked.length) return
+    setPlBusy(true)
+    const saveDir = await window.omniget.defaultSaveDir().catch(() => undefined)
+    let failed = 0
+    for (const [i, t] of picked.entries()) {
+      if (!batchAlive.current) return // R4-P3 同口径：离开页面终止循环
+      try {
+        await window.omniget.musicDownload({
+          neteaseId: t.id,
+          artist: t.artist || undefined,
+          song: t.name,
+          quality,
+          saveDir
+        })
+      } catch {
+        failed++ // 单曲失败不阻断批量
+      }
+      setPlProgress(`入队中 ${i + 1}/${picked.length}`)
+    }
+    if (!batchAlive.current) return
+    setPlBusy(false)
+    setPlProgress('')
+    if (failed > 0) toast(`歌单入队：成功 ${picked.length - failed} 首，失败 ${failed} 首`, 'warning')
+    else toast(`已入队 ${picked.length} 首歌曲`, 'success')
+  }
+
   return (
     <main className="h-full overflow-y-auto">
       <div className="mx-auto max-w-[860px] px-6 py-6">
@@ -282,6 +352,14 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
             title="批量导入"
           >
             批量
+          </Button>
+          <Button
+            variant="outline"
+            icon={<Playlist size={14} />}
+            onClick={() => setPlOpen((v) => !v)}
+            title="歌单/专辑批量下载（网易云）"
+          >
+            歌单
           </Button>
         </div>
         <p className="mt-1.5 text-[11px] text-text-3">
@@ -327,6 +405,90 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
           </div>
         )}
 
+        {/* ── 歌单/专辑批量（二期）────────────────────────────────── */}
+        {plOpen && (
+          <div className="mt-4 rounded-panel border border-border p-4">
+            <p className="mb-2 text-xs text-text-2">
+              粘贴网易云歌单/专辑页链接（music.163.com/playlist 或 /album），勾选曲目后按 ID
+              精确入队；单批最多 100 首，进度在任务列表观察
+            </p>
+            <div className="flex gap-2">
+              <Input
+                value={plUrl}
+                onChange={(e) => setPlUrl(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !plBusy && plUrl.trim()) void parsePlaylist()
+                }}
+                placeholder="https://music.163.com/playlist?id=..."
+                className="flex-1"
+              />
+              <Button size="sm" disabled={plBusy || !plUrl.trim()} onClick={() => void parsePlaylist()}>
+                {plBusy && !plInfo ? '解析中…' : '解析'}
+              </Button>
+            </div>
+            {plInfo && (
+              <>
+                <div className="mt-3 flex items-center justify-between text-xs text-text-2">
+                  <span>
+                    {plInfo.kind === 'playlist' ? '歌单' : '专辑'}「{plInfo.name}」· {plInfo.tracks.length} 首
+                  </span>
+                  <span className="flex items-center gap-2">
+                    <button
+                      className="text-accent hover:underline"
+                      onClick={() => setPlSelected(new Set(plInfo.tracks.map((t) => t.id)))}
+                    >
+                      全选
+                    </button>
+                    <button className="text-text-3 hover:underline" onClick={() => setPlSelected(new Set())}>
+                      清空
+                    </button>
+                  </span>
+                </div>
+                <div className="mt-2 max-h-[260px] overflow-y-auto rounded-ctl border border-border">
+                  {plInfo.tracks.map((t, i) => (
+                    <label
+                      key={t.id}
+                      className="flex cursor-pointer items-center gap-2.5 border-b border-border/60 px-3 py-1.5 text-xs last:border-b-0 hover:bg-surface-2"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={plSelected.has(t.id)}
+                        onChange={(e) => {
+                          setPlSelected((prev) => {
+                            const next = new Set(prev)
+                            if (e.target.checked) next.add(t.id)
+                            else next.delete(t.id)
+                            return next
+                          })
+                        }}
+                      />
+                      <span className="num w-6 shrink-0 text-right text-text-3">{i + 1}</span>
+                      <span className="min-w-0 flex-1 truncate text-text-1">{t.name}</span>
+                      <span className="min-w-0 flex-1 truncate text-text-3">{t.artist}</span>
+                      <span className="hidden min-w-0 max-w-[160px] flex-1 truncate text-text-3 sm:block">
+                        {t.album}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+                <div className="mt-2 flex items-center justify-between">
+                  <span className="num text-[11px] text-text-3">
+                    {plProgress || `已选 ${plSelected.size} 首`}
+                  </span>
+                  <Button
+                    size="sm"
+                    icon={<DownloadSimple size={13} />}
+                    disabled={plBusy || plSelected.size === 0}
+                    onClick={() => void enqueuePlaylist()}
+                  >
+                    {plBusy ? '入队中…' : `入队 ${plSelected.size} 首`}
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
         {/* ── 音质单选 + ID 精确下载入口（§7.6）───────────────────── */}
         <div className="mt-4 border-b border-border pb-3">
           <div className="flex items-center gap-4">
@@ -344,6 +506,17 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
                 </span>
               </label>
             ))}
+            {/* 二期：歌词落盘模式（双语 = 原文 + 网易云翻译轨合并，仅网易云歌词源生效） */}
+            <span className="ml-2 text-xs text-text-2">歌词</span>
+            <select
+              value={lyricsMode}
+              onChange={(e) => changeLyricsMode(e.target.value as 'original' | 'bilingual')}
+              title="歌词落盘模式"
+              className="h-6 cursor-pointer rounded-ctl border border-border bg-surface-2 px-1 text-[10px] text-text-2 outline-none focus:border-accent"
+            >
+              <option value="original">原文</option>
+              <option value="bilingual">双语（原文+翻译）</option>
+            </select>
             <button
               className="press ml-auto text-[11px] text-text-3 transition-colors hover:text-text-1"
               onClick={() => setIdOpen((v) => !v)}

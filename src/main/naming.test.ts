@@ -1,7 +1,12 @@
 // 智能命名模板回归：yt-dlp -o 输出模板防穿越（遗留 #35）与占位符渲染
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { renderNamingTemplate, toYtDlpOutputTemplate, DEFAULT_TEMPLATE } from './naming'
+import {
+  renderNamingTemplate,
+  renderNamingSegments,
+  toYtDlpOutputTemplate,
+  DEFAULT_TEMPLATE
+} from './naming'
 
 test('占位符渲染：title/uploader/artist 回退链', () => {
   assert.equal(renderNamingTemplate('{{title}}', { title: 'T' }), 'T')
@@ -35,4 +40,27 @@ test('yt-dlp 变量映射与 ext 后缀', () => {
 test('空模板回退默认', () => {
   assert.ok(toYtDlpOutputTemplate('').endsWith('.%(ext)s'))
   assert.equal(DEFAULT_TEMPLATE, '{{title}}')
+})
+
+// ── 二期（0.9.x）：album 变量 + 目录段渲染（媒体服务器归档） ──────────
+
+test('album 变量：缺省回退 Unknown Album', () => {
+  assert.equal(renderNamingTemplate('{{album}}/{{title}}', { title: 'T', album: 'AL' }), 'AL/T')
+  assert.equal(renderNamingTemplate('{{album}}', {}), 'Unknown Album')
+})
+
+test('renderNamingSegments：目录结构拆分与逐段清洗', () => {
+  assert.deepEqual(renderNamingSegments('{{artist}}/{{album}}/{{title}}', { artist: 'A', album: 'B', title: 'T' }), ['A', 'B', 'T'])
+  assert.deepEqual(renderNamingSegments('/{{artist}}//{{title}}/', { artist: 'A', title: 'T' }), ['A', 'T'])
+  assert.deepEqual(renderNamingSegments('{{artist}}\\{{title}}', { artist: 'A', title: 'T' }), ['A', 'T'])
+})
+
+test('renderNamingSegments：防穿越与非法段收口', () => {
+  const segs = renderNamingSegments('{{title}}/../evil', { title: 'T' })
+  assert.ok(!segs.includes('..'), `不得包含 .. 段：${JSON.stringify(segs)}`)
+  // 全段非法（'..'）时收口为单段且无穿越
+  const only = renderNamingSegments('..', {})
+  assert.equal(only.length, 1)
+  assert.ok(!only[0]!.includes('..'))
+  assert.ok(!renderNamingSegments('../../{{title}}', { title: 'T' }).includes('..'))
 })

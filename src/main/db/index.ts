@@ -87,6 +87,32 @@ const MIGRATIONS: Migration[] = [
         CREATE INDEX idx_subscriptions_due ON subscriptions(last_checked_at);
       `)
     }
+  },
+  {
+    version: 3,
+    name: 'music-tracks',
+    up: (db) => {
+      // 二期（0.9.x 音乐库）：已下载曲目登记（music.done 完成即落一行，
+      // 音乐库视图按歌手/专辑分组浏览）。路径冗余存 task_files 之外，因
+      // 归档模板可把产物迁到 saveDir 子目录且跨任务聚合需要元数据列。
+      db.exec(`
+        CREATE TABLE music_tracks (
+          id         TEXT PRIMARY KEY,
+          task_id    TEXT,
+          path       TEXT NOT NULL,
+          lrc_path   TEXT,
+          title      TEXT NOT NULL,
+          artist     TEXT,
+          album      TEXT,
+          quality    TEXT,
+          source     TEXT,
+          size       INTEGER DEFAULT 0,
+          created_at INTEGER NOT NULL
+        );
+        CREATE INDEX idx_music_tracks_artist ON music_tracks(artist);
+        CREATE INDEX idx_music_tracks_task ON music_tracks(task_id);
+      `)
+    }
   }
 ]
 

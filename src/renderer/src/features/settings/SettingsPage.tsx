@@ -369,6 +369,8 @@ function TextRow({
 export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
   const [tab, setTab] = useState<Tab>('appearance') // 默认打开外观
   const [template, setTemplate] = useState('')
+  // 二期（0.9.x）：音乐命名模板（支持 artist/album 目录结构，媒体服务器归档）
+  const [musicTemplate, setMusicTemplate] = useState('')
   const [cookieFile, setCookieFile] = useState('')
   // R7 续（backlog #11）：短视频解析服务 sidecar 兜底
   const [sidecarUrl, setSidecarUrl] = useState('')
@@ -472,11 +474,12 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
       else rulesLoadFailedRef.current = true
       if (subsRes.ok) setSubs(subsRes.v)
       const [
-        template, cookieFile, sidecarUrl, netdiskUrl, netdiskSaveDir, saveDir,
+        template, musicTemplate, cookieFile, sidecarUrl, netdiskUrl, netdiskSaveDir, saveDir,
         maxConcurrent, autoArchive, dedupe, ytdlpAria2c, upnp, btEncrypt,
         trackers, scripts, bridge, engineList, engineMirrorVal
       ] = await Promise.all([
         window.omniget.settingsGet('naming.template'),
+        window.omniget.settingsGet('music.template'),
         window.omniget.settingsGet('ytdlp.cookieFile'),
         window.omniget.settingsGet('sidecar.videoApiUrl'),
         window.omniget.settingsGet('netdisk.endpoint'),
@@ -495,6 +498,7 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
         window.omniget.settingsGet('engines.mirror'),
       ])
       setTemplate(String(template ?? '{{title}}'))
+      setMusicTemplate(String(musicTemplate ?? ''))
       setCookieFile(String(cookieFile ?? ''))
       setSidecarUrl(String(sidecarUrl ?? ''))
       setNetdiskUrl(String(netdiskUrl ?? ''))
@@ -724,6 +728,47 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
             >
               保存
             </Button>
+            {/* 二期（0.9.x）：音乐独立命名模板（媒体服务器归档） */}
+            <div className="mt-5 border-t border-border pt-4">
+              <TextRow
+                label="音乐命名模板（可选，留空跟随上方全局模板）"
+                value={musicTemplate}
+                onChange={setMusicTemplate}
+                hint="支持目录结构：{{artist}}/{{album}}/{{title}} 即 Navidrome/Jellyfin 归档约定（歌手/专辑/曲名三级目录）。变量额外含 {{album}} 专辑。"
+              />
+              <div className="num mb-3 rounded-ctl bg-surface-2 px-3 py-2 text-[11px] text-text-2">
+                预览：{musicTemplate.trim()
+                  ? musicTemplate
+                      .replace(/\{\{\s*artist\s*\}\}/g, '示例歌手')
+                      .replace(/\{\{\s*album\s*\}\}/g, '示例专辑')
+                      .replace(/\{\{\s*title\s*\}\}/g, '示例曲名')
+                      .replace(/\{\{\s*date\s*\}\}/g, '2026-10-01')
+                      .replace(/\{\{\s*index(:\d+)?\s*\}\}/g, (_m, pad: string | undefined) =>
+                        String(1).padStart(Number(pad?.slice(1) ?? 1) || 1, '0')
+                      )
+                  : '（空，跟随全局模板）'}
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    window.omniget
+                      .settingsSet('music.template', musicTemplate)
+                      .then(() => flash('音乐命名模板已保存'))
+                      .catch((err) => toastError('保存音乐命名模板', err))
+                  }}
+                >
+                  保存
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setMusicTemplate('{{artist}}/{{album}}/{{title}}')}
+                >
+                  Navidrome 归档预设
+                </Button>
+              </div>
+            </div>
           </Section>
         )}
 

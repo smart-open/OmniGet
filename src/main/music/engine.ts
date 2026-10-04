@@ -4,12 +4,13 @@
 // - 试听：网易云镜像直链（经 omniget-preview:// 协议流式代理）
 
 import { dirname, extname, join } from 'path'
-import { rename, stat, unlink } from 'fs/promises'
+import { mkdir, rename, stat, unlink } from 'fs/promises'
 import type { MusicSearchResult, ServiceEvent } from '@shared/types'
 import { createLogger } from '../logger'
 import { HostGate } from './gate'
 import { isTrustedAudioHost } from './http'
-import { DEFAULT_TEMPLATE, getNamingTemplate, renderNamingTemplate } from '../naming'
+import { DEFAULT_TEMPLATE, getMusicNamingTemplate, renderNamingSegments } from '../naming'
+import { alignAudioExt } from './platforms'
 import {
   PlatformEngine,
   PLATFORM_LABELS,
@@ -53,6 +54,8 @@ export interface MusicDownloadResult {
   message: string
   mp3Path: string
   lrcPath: string
+  /** 二期：专辑名（平台有值才带）——音乐库登记与 {{album}} 归档模板数据源 */
+  album?: string
   bytes?: number
 }
 
@@ -215,13 +218,20 @@ export class MusicEngine {
         source: result.source,
         message: result.message,
         mp3Path: result.mp3Path,
-        lrcPath: result.lrcPath
+        lrcPath: result.lrcPath,
+        album: result.album
       }
       if (out.success && out.mp3Path) {
         // 第七轮审查 P2：cached 产物（既有文件，可能属于并发同歌任务/用户早前
         // 下载）不得改名——改名会让引用旧路径的记录/并发任务悬空
         if (!result.cached) {
-          const renamed = await this.applyNaming(out.mp3Path, out.lrcPath ?? '', artist ?? '', song ?? '')
+          const renamed = await this.applyNaming(
+            out.mp3Path,
+            out.lrcPath ?? '',
+            artist ?? '',
+            song ?? '',
+            result.album ?? ''
+          )
           out.mp3Path = renamed.mp3
           out.lrcPath = renamed.lrc
         }
@@ -270,23 +280,35 @@ export class MusicEngine {
     }
   }
 
-  /** M4-11：音乐完成重命名（naming.template 非默认时生效；{{title}}=歌名 {{artist}}=歌手）。
-   *  返回最终 mp3 路径；lrc 同步改名；目标冲突时追加序号防覆盖。 */
+  /**
+   * M4-11：音乐完成重命名。二期（0.9.x 媒体服务器归档）升级：
+   * - 模板键 music.template（非空）优先于全局 naming.template；
+   * - 模板支持 `{{artist}}/{{album}}/{{title}}` 目录结构（renderNamingSegments
+   *   逐段清洗防穿越），落盘为 saveDir 下的相对子目录（Navidrome/Jellyfin 约定）；
+   * - 变量新增 {{album}}（平台命中专辑，缺省 Unknown Album）。
+   * 返回最终音频路径；lrc 同步改名/随迁；目标冲突时追加序号防覆盖。
+   */
   private async applyNaming(
     mp3Path: string,
     lrcPath: string,
     artist: string,
-    song: string
+    song: string,
+    album = ''
   ): Promise<{ mp3: string; lrc: string }> {
-    const tpl = getNamingTemplate().trim()
+    const tpl = getMusicNamingTemplate().trim()
     if (!tpl || tpl === DEFAULT_TEMPLATE || !mp3Path) return { mp3: mp3Path, lrc: lrcPath }
-    const base =
-      sanitizeName(renderNamingTemplate(tpl, { title: song, artist }).replace(/\.{2,}/g, '.')) ||
-      sanitizeName(song)
-    const dir = dirname(mp3Path)
+    const segments = renderNamingSegments(tpl, { title: song, artist, album })
+    const base = segments[segments.length - 1] || sanitizeName(song)
+    const rootDir = dirname(mp3Path)
+    // 目录段（除最后一段文件名外）在产物所在目录下展开
+    const dir = segments.length > 1 ? join(rootDir, ...segments.slice(0, -1)) : rootDir
     const ext = extname(mp3Path)
     const preferred = join(dir, base + ext)
     if (preferred === mp3Path) return { mp3: mp3Path, lrc: lrcPath }
+    const dirOk = await mkdir(dir, { recursive: true })
+      .then(() => true)
+      .catch(() => false)
+    if (!dirOk) return { mp3: mp3Path, lrc: lrcPath } // 子目录建不出来 → 保留原位，不判失败
     let final = preferred
     for (let n = 2; n < 50; n++) {
       const exists = await stat(final).then(() => true).catch(() => false)
@@ -342,11 +364,13 @@ export class MusicEngine {
       const detail = await engine.getNeteaseDetail(nid)
       const artist = (input.artist || detail.artist || '未知歌手').trim()
       const song = (input.song || detail.name || nid).trim()
+      const album = detail.album ?? ''
       const filename = sanitizeName(`${artist} - ${song}`)
       const mp3Path = join(input.saveDir, `${filename}.mp3`)
       const lrcPath = join(input.saveDir, `${filename}.lrc`)
       emit('progress', 'netease', '尝试 网易云（按 ID 精确下载）…')
       const ok = await engine.downloadNeteaseById(nid, mp3Path, lrcPath, quality)
+      if (ok) engine.lastAlbum = album // downloadNeteaseById 内部已重置，此处回填 detail 专辑
       // 回归审查 P2：exists 兜底命中的产物非本任务落盘（lastProductForeign，可能
       // 属于并发同歌任务/用户既有下载）——取消清理不得误删 mp3（lrc 为本任务写入可删）
       const foreign = engine.lastProductForeign
@@ -365,11 +389,13 @@ export class MusicEngine {
         }
       }
       log.info(`音乐按 ID 下载完成: 网易云:${nid} → ${mp3Path}`)
+      // 二期（无损档）：产物扩展名按文件头对齐（foreign 既有产物不动，cached 口径）
+      const audioPath = foreign ? mp3Path : await alignAudioExt(mp3Path)
       // foreign/cached 既有产物不改名（与 download 路径的 cached 口径一致——
       // 改名会让引用旧路径的记录/并发任务悬空）
       const final = foreign
         ? { mp3: mp3Path, lrc: lrcPath }
-        : await this.applyNaming(mp3Path, lrcPath, artist, song)
+        : await this.applyNaming(audioPath, lrcPath, artist, song, album)
       // R4-P3：与 download 的 M-5 口径对齐——rename 后再次复核取消，
       // 否则取消落在改名期间会留下孤儿产物（completed 态必须在复核后落位，
       // 否则 rename 期间 cancel() 会被拒、复核永假）
@@ -385,6 +411,7 @@ export class MusicEngine {
         message: `网易云: ${finalBase.replace(/\.\w+$/, '')}`,
         mp3Path: final.mp3,
         lrcPath: final.lrc,
+        album: album || undefined,
         bytes: await stat(final.mp3).then((s) => s.size).catch(() => 0)
       }
     } catch (err) {

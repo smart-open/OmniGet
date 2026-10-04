@@ -94,6 +94,7 @@ export class LocalMusicAdapter implements MusicAdapter {
       message: result.message,
       mp3Path: result.mp3Path,
       lrcPath: result.lrcPath,
+      album: result.album,
       bytes: result.bytes ?? 0
     })
   }
