@@ -58,6 +58,16 @@
 - **B 站专项**：BBDown（弹幕/章节/多轨）——yt-dlp 盲区，暂缓观察（backlog #23）
 - **三轮深挖（2026-10-02，工具与生态带，新增 10 项）**：lux（国内站点 Go 引擎）、streamlink（直播间插件化直录）、OpenList（AList 易主争议后的社区分叉，网盘聚合/WebDAV 出口）、LosslessCut（范式已被 OmniGet 工具箱无损族覆盖）、MKVToolNix、beets / MusicBrainz、subliminal / Bazarr、yt-dlp 插件目录、rclone、slskd。结论：真实增量缺口 = 直播间 URL 直录入口（#25）、网盘/WebDAV 下载源（#26，P1 候选）、yt-dlp `--embed-metadata`（#27）；其余判定见 backlog #28–#32
 
+### 11. 四轮深挖（2026-10-04，活跃度核验与新生态带）
+
+> 背景：六期路线图制定前的生态复核（GitHub 检索 + 社区动态），验证既有结论时效性并捕捉新生态带。
+
+- **Motrix-Next（精神续作，2026 全年活跃，v4.0.0-beta）**：Tauri 2 + Rust + Vue3 重写，包体缩减 75%（~20MB），下载引擎改用维护分叉 **Aria2 Next**（修复原 aria2 遗留问题 + **原生 ED2K 支持**）。启示：① Tauri 化趋势确认，但 OmniGet 多引擎 + 工具箱 + 渲染层复用（mini 窗/Web UI）与 Electron 深度耦合，重写成本不匹配——包体瘦身走引擎按需下载路线（#3）；② **aria2 上游停更风险被社区用分叉正面回应**，OmniGet 应将「引擎韧性」列为长期观察项；③ ED2K 是 OmniGet 协议面缺口（aria2 原生不支持），需求已被验证但依赖引擎选型结论。
+- **Media Downloader（Qt）**：yt-dlp / gallery-dl / lux / svtplay-dl 多 CLI 前端范式——「多引擎适配器路由」与 OmniGet manager 引擎路由同构，交叉印证架构正确。
+- **音乐聚合带 2026 仍活跃**：musicdl（2026-03 仍在加 Deezer 支持）、go-music-dl、Audiovault（自托管音乐库管理）、咪咕无损下载器话题热度——五平台聚合 + 原唱校验仍是独有能力，音乐纵深投入方向正确。
+- **「下载器 → 媒体服务器供给端」成型**：ytdl-sub（YAML 订阅 → Plex/Jellyfin/Emby/Kodi 媒体库形态）、jellyfetch、youtube-playlist-navidrome-sync（yt-dlp 音频 + 元数据内嵌 + download archive + Navidrome 同步）——下载器输出的目录结构/元数据与媒体服务器约定兼容成为明确趋势；OmniGet 命名模板 + 内嵌元数据（#27）+ MusicBrainz（#29）基建已备，增量仅为目录约定与 NFO 导出。
+- **结论**：三期规划的三大主题（发布就绪 / 音乐纵深 / 视频纵深）全部被验证，无新增 P0 缺口；新增两个低成本差异化方向（媒体服务器友好归档、NFO 导出）与一个长期观察项（aria2 引擎韧性），据此扩展为六期。
+
 ---
 
 ## 二、能力矩阵对照（OmniGet vs 主流）
