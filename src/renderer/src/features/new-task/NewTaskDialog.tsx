@@ -30,6 +30,7 @@ import {
 } from './fileTree'
 import { Button, Input } from '../../components/ui'
 import { confirmAction, toast, toastError } from '../../lib/feedback'
+import { useModalGate } from '../../lib/modalGate'
 
 interface Props {
   open: boolean
@@ -58,6 +59,9 @@ const PRESET_EXPORT_KIND = 'omniget-video-presets'
 type Phase = 'input' | 'parsing' | 'awaiting'
 
 export function NewTaskDialog({ open, initialSource, onClose }: Props) {
+  // 回归审查：本组件此前未注册 modalGate——Inspector 的 Esc 让位判断
+  // （isAnyModalOpen）依赖它，双开场景一键双关的修复因此未真正生效
+  useModalGate(open)
   const [source, setSource] = useState('')
   const [phase, setPhase] = useState<Phase>('input')
   const [submitting, setSubmitting] = useState(false)
@@ -173,14 +177,27 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
   }, [open, initialSource])
 
   // P3 修复：Esc 关闭对话框（桌面应用基本预期；此前只能鼠标点关闭）
+  // 第六轮审查（P2）：假取消——提交/解析在途时创建请求已在主进程进行，直接
+  // onClose 会让用户以为取消了而任务照常出现。统一经 requestClose 收口：
+  // submitting 期间拒绝关闭；parsing 期间明确告知任务仍会创建
+  function requestClose(): void {
+    if (submitting) return
+    if (phase === 'parsing') {
+      toast('解析仍在后台进行，任务可能稍后出现在任务列表', 'info')
+      onClose()
+      return
+    }
+    onClose()
+  }
   useEffect(() => {
     if (!open) return
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape') requestClose()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [open, onClose])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, onClose, submitting, phase])
 
   // 分类筛选（视频/音乐/图片/文档/其他）：过滤后重建文件树，全选/反选只作用于过滤集
   const [cat, setCat] = useState<'all' | 'video' | 'music' | 'image' | 'doc' | 'other'>('all')
@@ -385,7 +402,7 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
     // R4-P3：按当前视图过滤器重载（同 confirm——固定 'all' 会污染 loadedFilter）
     const cur = useTasks.getState().loadedFilter
     const target =
-      cur && ['all', 'downloading', 'completed', 'bt', 'video', 'music', 'trash'].includes(cur)
+      cur && ['all', 'downloading', 'completed', 'failed', 'bt', 'video', 'music', 'trash'].includes(cur)
         ? cur
         : 'all'
     void useTasks.getState().load(target)
@@ -613,7 +630,7 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
       // 在回收站视图打开对话框时触发数据源守卫双载 + 骨架闪烁
       const cur = useTasks.getState().loadedFilter
       const target =
-        cur && ['all', 'downloading', 'completed', 'bt', 'video', 'music', 'trash'].includes(cur)
+        cur && ['all', 'downloading', 'completed', 'failed', 'bt', 'video', 'music', 'trash'].includes(cur)
           ? cur
           : 'all'
       await useTasks.getState().load(target)
@@ -633,7 +650,7 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
       {open && (
         <motion.div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-          onClick={onClose}
+          onClick={requestClose}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
@@ -662,7 +679,7 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
               <h2 className="text-sm font-medium">新建任务</h2>
               <button
                 className="press flex h-6 w-6 items-center justify-center rounded text-text-3 transition-colors hover:bg-surface-2 hover:text-text-1"
-                onClick={onClose}
+                onClick={requestClose}
               >
                 <X size={14} />
               </button>
@@ -1282,7 +1299,7 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
 
             {/* ── 底部动作 ──────────────────────────────────────────── */}
             <div className="flex items-center justify-end gap-2 border-t border-border px-5 py-3.5">
-              <Button variant="ghost" onClick={onClose}>
+              <Button variant="ghost" onClick={requestClose} disabled={submitting}>
                 取消
               </Button>
               {phase === 'awaiting' && (
@@ -1360,7 +1377,7 @@ function TriStateBox({
           ? 'border-border text-transparent hover:border-accent'
           : 'border-accent bg-accent text-white'
       }`}
-      aria-checked={state === 'checked'}
+      aria-checked={state === 'indeterminate' ? 'mixed' : state === 'checked'}
       role="checkbox"
     >
       {state === 'indeterminate' ? '−' : '✓'}

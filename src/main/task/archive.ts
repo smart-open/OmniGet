@@ -115,3 +115,24 @@ export function removeArchiveKey(source: string): void {
     log.warn('download.archive 回滚失败', err)
   }
 }
+
+// ── 订阅失败熔断（第六轮审查）────────────────────────────────────────
+// 「失败即回滚档案键」对永久失败条目（下架/地区受限）构成每检查周期一次的
+// createTask→parse→failed→回滚无限循环：failed 行刷屏 + 通知反复打扰。
+// 会话内连续失败计数，达阈值的 URL 跳过订阅差集，成功一次即清零。
+
+const FAILURE_FUSE_THRESHOLD = 3
+const failureCounts = new Map<string, number>()
+
+export function noteArchiveFailure(source: string): void {
+  const key = archiveKey(source)
+  failureCounts.set(key, (failureCounts.get(key) ?? 0) + 1)
+}
+
+export function noteArchiveSuccess(source: string): void {
+  failureCounts.delete(archiveKey(source))
+}
+
+export function isArchiveFused(source: string): boolean {
+  return (failureCounts.get(archiveKey(source)) ?? 0) >= FAILURE_FUSE_THRESHOLD
+}

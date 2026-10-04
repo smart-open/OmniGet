@@ -222,8 +222,15 @@ export class Aria2Supervisor {
     try {
       await this.waitForRpc()
     } finally {
-      // M1：RPC 就绪后 secret 已被 aria2 读取，删除落盘残留（失败不阻断）
-      void unlink(secretFile).catch(() => {})
+      // M1：RPC 就绪后 secret 已被 aria2 读取，删除落盘残留（失败不阻断）。
+      // 日志审查（10-04）实证的竞态：WS 断开 → scheduleRestart 退避期间，旧一代
+      // spawnAndConnect 的 finally 迟到执行 unlink——此时新一代已 writeFile 并 spawn，
+      // 固定文件名被误删 → 新 aria2c 报 "Configuration file is not found" 直接退出，
+      // 白白多一轮重启（日志表现：failure #1 conf-not-found → #2 才 online）。
+      // 必须校验代际：仅当前进程仍是本代时才允许删除
+      if (this.proc === proc) {
+        void unlink(secretFile).catch(() => {})
+      }
     }
     await client.call('changeGlobalOption', {
       ...this.globalOptions,

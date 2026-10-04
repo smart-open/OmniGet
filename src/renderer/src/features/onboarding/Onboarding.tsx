@@ -5,12 +5,15 @@ import { ArrowRight, Check, FolderOpen } from '@phosphor-icons/react'
 import { Button } from '../../components/ui'
 import { toastError } from '../../lib/feedback'
 import { THEMES, applyTheme, type ThemeId } from '../../theme'
+import { useI18n } from '../../i18n'
 
 export function Onboarding({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [step, setStep] = useState(0)
   const [saveDir, setSaveDir] = useState('')
   const [theme, setTheme] = useState<ThemeId>('dark')
   const [clipboard, setClipboard] = useState(true)
+  // 第七轮：主题名走 i18n
+  const t = useI18n((s) => s.t)
 
   if (!open) return null
 
@@ -18,7 +21,9 @@ export function Onboarding({ open, onClose }: { open: boolean; onClose: () => vo
     // 剪贴板监听默认开（§8 向导第四步）；关闭则记录偏好
     const writes: Array<Promise<unknown>> = [
       window.omniget.settingsSet('ui.theme', theme),
-      window.omniget.settingsSet('ui.clipboardWatch', clipboard ? 'true' : 'false'),
+      // 第七轮审查 P2：必须写布尔值——settingsSet 会 JSON.stringify，写字符串
+      // 'false' 落库成带引号的 '"false"'，主进程裸文本比对失效（开关关不掉）
+      window.omniget.settingsSet('ui.clipboardWatch', clipboard),
       window.omniget.settingsSet('onboarded', true)
     ]
     if (saveDir) writes.push(window.omniget.settingsSet('download.saveDir', saveDir))
@@ -102,15 +107,15 @@ export function Onboarding({ open, onClose }: { open: boolean; onClose: () => vo
             <h2 className="mb-1 text-sm font-medium">选择外观</h2>
             {/* 全套七主题（与设置·外观一致）：实色圆（选中实心）+ 名称，点击即时预览 */}
             <div className="mt-3 grid grid-cols-2 gap-2">
-              {THEMES.map((t) => (
+              {THEMES.map((th) => (
                 <button
-                  key={t.id}
+                  key={th.id}
                   onClick={() => {
-                    setTheme(t.id)
-                    applyTheme(t.id)
+                    setTheme(th.id)
+                    applyTheme(th.id)
                   }}
                   className={`press flex items-center gap-2 rounded-panel border px-3 py-2.5 text-left transition-colors ${
-                    theme === t.id
+                    theme === th.id
                       ? 'border-accent bg-accent-soft text-accent'
                       : 'border-border text-text-2 hover:border-text-3 hover:text-text-1'
                   }`}
@@ -118,13 +123,13 @@ export function Onboarding({ open, onClose }: { open: boolean; onClose: () => vo
                   <span
                     className="inline-block h-4 w-4 shrink-0 rounded-full border-2"
                     style={
-                      theme === t.id
-                        ? { background: t.accent, borderColor: t.accent }
-                        : { background: 'transparent', borderColor: t.accent }
+                      theme === th.id
+                        ? { background: th.accent, borderColor: th.accent }
+                        : { background: 'transparent', borderColor: th.accent }
                     }
                   />
-                  <span className="flex-1 truncate text-xs">{t.label}</span>
-                  {theme === t.id && <Check size={12} weight="bold" className="shrink-0" />}
+                  <span className="flex-1 truncate text-xs">{t(`theme.${th.id}`)}</span>
+                  {theme === th.id && <Check size={12} weight="bold" className="shrink-0" />}
                 </button>
               ))}
             </div>

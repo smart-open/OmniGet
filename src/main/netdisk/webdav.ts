@@ -121,6 +121,24 @@ export function hrefToPath(base: string, href: string): string {
 
 // ── 目录列举 / 连接测试 ─────────────────────────────────────────────
 
+/** 第六轮审查：按累计字节截断读取响应体（超限即拒绝），防内存 DoS */
+async function readCappedText(res: Response, capBytes: number): Promise<string> {
+  if (!res.body) return ''
+  const decoder = new TextDecoder()
+  let total = 0
+  const parts: string[] = []
+  for await (const chunk of res.body as AsyncIterable<Uint8Array>) {
+    total += chunk.byteLength
+    if (total > capBytes) {
+      await res.body.cancel().catch(() => {})
+      throw new Error(`响应体超过 ${Math.round(capBytes / 1024 / 1024)}MB 上限，疑似异常端点`)
+    }
+    parts.push(decoder.decode(chunk, { stream: true }))
+  }
+  parts.push(decoder.decode())
+  return parts.join('')
+}
+
 /**
  * PROPFIND Depth:1 列目录。返回按目录优先 + 名称排序的条目（不含自身）。
  * 401/404/非 207 均抛带出口动作的中文错误。
@@ -145,9 +163,13 @@ export async function listWebdav(path: string): Promise<NetdiskEntry[]> {
     throw new Error('无法连接网盘/WebDAV 服务：网络不可达或超时')
   }
   if (res.status === 401) {
+    // 第六轮审查：401/404 提前 throw 不消费响应体 → socket 滞留（反复输错密码
+    // 持续累积），与非 207 分支的 body.cancel 口径对齐
+    await res.body?.cancel().catch(() => {})
     throw new Error('认证失败（401）：请检查设置中的用户名/密码')
   }
   if (res.status === 404) {
+    await res.body?.cancel().catch(() => {})
     throw new Error(`目录不存在（404）：${clean}`)
   }
   if (res.status !== 207) {
@@ -156,7 +178,9 @@ export async function listWebdav(path: string): Promise<NetdiskEntry[]> {
       `目录读取失败（HTTP ${res.status}）：请确认地址为 WebDAV 端点（OpenList 示例 http://host:5240/dav）`
     )
   }
-  const xml = await res.text()
+  // 第六轮审查：207 正文无上限——异常/被投毒端点可回超大 XML 撑内存（与音乐域
+  // 8MB JSON 上限同口径，PROPFIND 目录页远小于此）
+  const xml = await readCappedText(res, 8 * 1024 * 1024)
   const selfPath = clean.replace(/\/+$/, '') || '/'
   const entries: NetdiskEntry[] = []
   for (const raw of parsePropfind(xml)) {

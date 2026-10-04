@@ -14,16 +14,24 @@ const streams: StreamInfo[] = [
   { index: 5, codec_type: 'subtitle', codec_name: 'mov_text' }
 ]
 
-test('音轨全部提取：mka 多输出 + -map/输出交错', () => {
+test('音轨全部提取：mka 多输出 + -map/-c:a/输出交错', () => {
   const plan = planTrackExtraction(streams, 'audio', 'all', 0, 'in.mkv', '/out', 'base')
   assert.equal(plan.outputs.length, 2)
   assert.ok(plan.outputs[0]!.endsWith('base.audio0.mka'))
-  // 每个 -map 后紧跟其输出文件
-  const mapIdx = plan.args.indexOf('-map')
-  assert.equal(plan.args[mapIdx + 1], '0:a:0')
-  assert.equal(plan.args[mapIdx + 2], plan.outputs[0])
-  assert.ok(plan.args.includes('-c:a'))
-  assert.ok(plan.args.includes('copy'))
+  // 第六轮审查：输出选项只作用于其后最近的输出文件——每个 -map 后必须紧跟
+  // -c:a copy 与其输出文件（置于首输出之前只对第 1 条音轨生效）
+  const mapIdxs = plan.args.reduce<number[]>(
+    (acc, a, i) => (a === '-map' ? [...acc, i] : acc),
+    []
+  )
+  assert.equal(mapIdxs.length, 2)
+  for (let i = 0; i < mapIdxs.length; i++) {
+    const at = mapIdxs[i]!
+    const seg = plan.args.slice(at, at + 4)
+    assert.equal(seg[1], `0:a:${i}`)
+    assert.deepEqual(seg.slice(2), ['-c:a', 'copy'])
+    assert.equal(plan.args[at + 4], plan.outputs[i])
+  }
 })
 
 test('音轨指定序号：单输出流拷贝', () => {

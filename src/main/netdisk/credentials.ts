@@ -73,6 +73,11 @@ export function getWebdavCredentials(): WebdavCredentials | null {
       return null
     }
   }
+  if (typeof enc === 'string' && enc && !ss) {
+    // 第六轮审查：密文存在但 safeStorage 不可用（如 keytar/系统密钥环不可用）时
+    // 静默落空——用户只会看到「需要认证」，无从得知凭据已不可解密
+    log.warn('WebDAV 凭据为密文但 safeStorage 不可用，按未配置处理')
+  }
   return read(getSettingParsed<unknown>(KEY_PLAIN))
 }
 

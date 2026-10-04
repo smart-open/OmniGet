@@ -3,6 +3,7 @@
 import { app } from 'electron'
 import { basename, dirname, isAbsolute, join } from 'path'
 import { validateSaveDir } from '../save-dir'
+import { credentialDirs, hitsAny, normPath, realishPath, SYSTEM_DIRS } from '../sensitive-paths'
 import type {
   Task,
   TaskEvent,
@@ -22,6 +23,7 @@ import { sniff, type SniffResult } from '../sniffer'
 import { expandInputSource, extractHttpUrls, isVideoHostUrl } from '../shortlink'
 import { parseParamsJson, readTaskOriginUrl, readTaskSpeedLimit } from '../task/params'
 import type { Aria2Adapter } from '../adapters/aria2'
+import { cleanupStaleMetadataDirs } from '../adapters/aria2'
 import type { MusicAdapter } from '../music/adapter'
 import type { YtDlpAdapter } from '../adapters/ytdlp'
 import { Nm3u8Adapter } from '../adapters/nm3u8'
@@ -32,7 +34,7 @@ import { toolbox } from '../toolbox'
 import { samplePeakSpeed, recordCompletion, reverseCompletion } from '../stats'
 import { recordPlatformOk, recordPlatformDegraded, recordPlatformFailure } from '../health'
 import { getSettingParsed } from '../db'
-import { addArchiveKey, isArchived, removeArchiveKey } from './archive'
+import { addArchiveKey, isArchived, noteArchiveFailure, noteArchiveSuccess, removeArchiveKey } from './archive'
 import { sanitizeFilename } from '@shared/sanitize'
 import {
   getVideoSidecarBase,
@@ -145,6 +147,10 @@ export class TaskManager {
       const task = getTask(e.taskId) as TaskExt | null
       // P2 加固：回收站/已删除任务的事件不得复活广播（remove 后轮询仍会回一帧 removed→failed）
       if (!task || isTrashed(task.id)) continue
+      // 第六轮审查：轮询名单含 paused（托盘 forcePauseAll 直调 RPC 不经 manager，
+      // 依赖轮询回写 DB）——代价是每个暂停任务 4Hz 的无效落库+广播。暂停任务无
+      // 字节进度，同状态 paused 帧整体去重（running→paused 的首帧不受影响）
+      if (e.status === 'paused' && task.status === 'paused') continue
       let justCompleted = false
       if (e.status && e.status !== task.status) {
         try {
@@ -176,6 +182,7 @@ export class TaskManager {
           // 审查修复：sidecar 改道任务的 task.source 已换成时效直链——登记原分享
           // 链接（params.originUrl），否则与创建期预检键不一致、去重失效
           addArchiveKey(readTaskOriginUrl(task) ?? task.source)
+          noteArchiveSuccess(readTaskOriginUrl(task) ?? task.source)
         } else if (task.type === 'http') {
           const origin = readTaskOriginUrl(task)
           if (origin) addArchiveKey(origin)
@@ -183,9 +190,13 @@ export class TaskManager {
       }
       if (e.status === 'failed' && task.type === 'video' && !this.isPlaylistTask(task)) {
         // 审查修复：订阅侧「入队即登记档案」，下载失败必须回滚——否则失败条目被
-        // 永久拉黑（订阅追更从此跳过该视频，唯一解法是手删 download.archive）
-        removeArchiveKey(readTaskOriginUrl(task) ?? task.source)
+        // 永久拉黑（订阅追更从此跳过该视频，唯一解法是手删 download.archive）。
+        // 第六轮审查：回滚+下轮重建的循环对永久失败条目（下架/地区受限）是无限
+        // churn——连续失败计数熔断，防 failed 行刷屏与通知打扰
+        const origin = readTaskOriginUrl(task) ?? task.source
+        removeArchiveKey(origin)
         removeArchiveKey(task.source)
+        noteArchiveFailure(origin)
       }
       // 审查修复（P2-3 配套）：失败/暂停外的终态路径无人调用 persistCliProduct，
       // 适配器 outputFiles 登记需在此兜底注销（防 Map 无界增长；暂停保留供 resume）
@@ -337,9 +348,53 @@ export class TaskManager {
             if (fresh.status === 'paused') {
               // 在途暂停：对新 gid 补一发 pause——否则适配器 start 内部的
               // unpause 让引擎继续下载，paused 又被轮询 active→running
-              // 合法转移静默撤销
-              await this.aria2.pause({ ...fresh, engineGid: gid }).catch(() => {})
+              // 合法转移静默撤销。
+              // 第六轮审查：补偿必须检查 gid 终结语义——complete/error 走终态
+              // 事件流（补齐记账），removed 说明引擎条目已销毁，paused+死 gid
+              // 无 resume 出口，按 failed 给出口
+              const outcome = await this.aria2
+                .pause({ ...fresh, engineGid: gid })
+                .catch(() => null)
+              if (outcome === 'complete' || outcome === 'error') {
+                // 回归审查：complete 在 paused 态是空操作——paused→completed 非法
+                // 转移被 applyEngineEvents 静默跳过（记账/档案/产物全丢，任务卡
+                // paused 无出口）。先合法归位 running（paused→running 合法），再投
+                // completed 事件（running→completed 合法，记账闭环）
+                if (outcome === 'complete') {
+                  try {
+                    this.transition(fresh, 'running')
+                  } catch {
+                    return // 窗口内已被轮询推到终态，无需补发
+                  }
+                }
+                this.merger.push(
+                  outcome === 'complete'
+                    ? { taskId: fresh.id, status: 'completed' }
+                    : { taskId: fresh.id, status: 'failed', error: '引擎侧任务已失败（aria2 终止）。请点击重试。' }
+                )
+              } else if (outcome === 'removed') {
+                this.merger.push({
+                  taskId: fresh.id,
+                  status: 'failed',
+                  error: '引擎侧任务已被移除。请点击重试。'
+                })
+              }
               return
+            }
+          } else if (cur.engine === 'ytdlp' || cur.engine === 'nm3u8') {
+            // 第七轮审查 P2：ytdlp/nm3u8 启动在途窗口收口（与 aria2 对称）——
+            // start 内 ensureVerified/ffmpegAvailable 可达秒级，期间用户的暂停/
+            // 删除只写了 DB 状态；spawn 完成后 paused 会被 running 合法转移静默
+            // 撤销、已删任务会幽灵下载到完成。job 返回（spawn 已发生、running
+            // 事件仍在 250ms 合并窗内，DB 状态尚未被转移）时按 fresh 状态补杀进程
+            const fresh = getTask(taskId) as TaskExt | null
+            if (!fresh || isTrashed(taskId) || fresh.status === 'paused') {
+              const adapter = cur.engine === 'ytdlp' ? this.ytdlp : this.nm3u8
+              adapter?.pause(fresh ?? cur)
+              if (fresh && fresh.status === 'paused') {
+                this.merger.drop(fresh.id) // 丢弃窗口内陈旧 running 事件，防止暂停被回放撤销
+                this.pushEvent({ taskId: fresh.id, status: 'paused' })
+              }
             }
           }
         } catch (err) {
@@ -359,7 +414,9 @@ export class TaskManager {
           } catch {
             // 已是 failed
           }
-          updateTaskFields(taskId, { error: message })
+          // 第六轮审查：启动失败后旧 gid 无轮询无清理（磁力确认失败时指向 parse
+          // 期 paused gid）——随失败一并清空，重试走全新句柄
+          updateTaskFields(taskId, { error: message, engineGid: null })
           this.pushEvent({ taskId, status: 'failed', error: message })
         } finally {
           this.launching.delete(taskId)
@@ -476,10 +533,29 @@ export class TaskManager {
 
     // 磁力查重：infohash 已存在 → 秒开文件树（§4.2 Step4）；回收站任务已被排除（B7）
     if (s.type === 'magnet') {
-      const ih = /xt=urn:btih:([a-zA-Z0-9]+)/.exec(s.source)?.[1]
+      let ih = /xt=urn:btih:([a-zA-Z0-9]+)/.exec(s.source)?.[1]
+      if (ih) {
+        // 第七轮审查 P2：base32 形态的 infohash（野外最常见）必须先归一化为 hex
+        // 再查重——库中 infohash 恒为 40 位 hex（parse 后写入），base32 原文比对
+        // 永远 miss，同一磁力每次都重走 90s BEP-9 解析
+        try {
+          ih = normalizeInfohash(ih)
+        } catch {
+          ih = undefined
+        }
+      }
       if (ih) {
         const existing = findTaskByInfohash(ih)
         if (existing) {
+          // 回归审查（疑似-1）：命中排队/下载/暂停中的同种任务时，复用文件树会让
+          // 确认面板对非 awaiting/completed 任务抛 IllegalTransitionError——显式
+          // 给出可读出口（避免重复下载是查重的初衷，不能因此创建重复任务）
+          if (!['awaiting', 'completed', 'failed'].includes(existing.status)) {
+            return {
+              kind: 'failed',
+              error: `该磁力/种子已有任务在进行中（${existing.name}，当前状态：${existing.status}）。请在任务列表中操作原任务，或等其结束后再试`
+            }
+          }
           const files = getTaskFiles(existing.id)
           if (files.length > 0) {
             log.info(`infohash ${ih} dedup: reuse file tree of ${existing.id}`)
@@ -841,12 +917,17 @@ export class TaskManager {
       // L-3：撤销原完成记账，保持增量 daily_stats 与全量重算口径一致。
       // 审查修复：回撤延后到 re-add 真正启动成功——若在启动前回撤而启动失败
       // （同名冲突/aria2 拒绝），任务落 failed 后统计被永久吞掉（单向漂移）
-      const prevCompletedAt = getTaskCompletedAt(task.id)
+      // 第七轮修复（双重记账）：completedAt 此前在此清空——若任务在排队窗口被删除、
+      // 之后从回收站恢复再完成，旧完成记录未回撤而新完成照常入账 → daily_stats 双计。
+      // 改为保留旧 completedAt 作为「待回撤」锚点：重新起跑成功后由
+      // consumePendingCompletion 回撤；排队/重启/失败窗口期间记录保持不变
       updateTaskFields(task.id, {
         status: 'queued',
         threads: input.threads,
         error: null,
-        completedAt: null
+        // 回归审查 P3：清旧 gid——旧 gid 指向已完成/做种中的引擎条目，排队窗口
+        // 内轮询对它做无谓 tellStatus（对齐 retryTask 口径）
+        engineGid: null
       })
       this.pushEvent({ taskId: task.id, status: 'queued' })
       this.gateStart(
@@ -856,9 +937,9 @@ export class TaskManager {
             ...this.selectionFor(cur),
             allowOverwrite: true
           })
-          if (prevCompletedAt) {
-            reverseCompletion(prevCompletedAt, task.totalBytes ?? 0)
-          }
+          // 回归审查 P2：回撤收敛到 consumePendingCompletion——此前内联版
+          // reverse 抛错仍清锚点（统计双计且锚点丢失不可重试），两处语义不一致
+          this.consumePendingCompletion(cur.id, task.totalBytes ?? 0)
           updateTaskFields(cur.id, { engineGid: gid })
           return gid
         })
@@ -885,7 +966,14 @@ export class TaskManager {
     let gid: string | undefined
     if (task.engine === 'ytdlp') {
       // M3：格式选择 → spawn 下载（合集按 --playlist-items 回放）
-      if (input.video) this.ytdlp?.setVideoOptions(task.id, input.video)
+      if (input.video) {
+        this.ytdlp?.setVideoOptions(task.id, input.video)
+        // 第六轮审查：videoOpts 仅适配器内存态，failed 终态 cleanupTaskState 清空
+        // 后会话内 retry 丢失用户全部选择（音频提取/字幕嵌入/命名模板/delogo）——
+        // 随 params 持久化，retryTask 从中恢复
+        const prev = parseParamsJson(task.params)
+        updateTaskFields(task.id, { params: JSON.stringify({ ...prev, videoOptions: input.video }) })
+      }
       gid = await this.ytdlp!.start(
         task,
         this.isPlaylistTask(task) ? this.selectionFor(task) : undefined
@@ -895,26 +983,50 @@ export class TaskManager {
       // R7 续（backlog #17）：HLS 任务 → N_m3u8DL-RE spawn（formatId = 变体 URI）。
       // 审查修复：必须整对象透传 input.video——此前白名单只取 formatId，
       // liveRecordMinutes 被丢弃，用户设置的直播录制时长永不生效（RE 无限录制）
-      if (input.video) this.nm3u8?.setVideoOptions(task.id, input.video)
+      // 回归审查（videoOpts 覆盖面补全）：与 ytdlp 同型——随 params 持久化，
+      // 重试/重启恢复可回放（含 liveRecordMinutes）
+      if (input.video) {
+        this.nm3u8?.setVideoOptions(task.id, input.video)
+        const prev = parseParamsJson(task.params)
+        updateTaskFields(task.id, { params: JSON.stringify({ ...prev, videoOptions: input.video }) })
+      }
       gid = await this.nm3u8!.start(task)
       updateTaskFields(task.id, { engineGid: gid, threads: input.threads })
-    } else if (task.pendingGid) {
+    } else if (task.engineGid) {
       // 磁力暂停态：changeOption(select-file/dir/seed-ratio) + unpause（§4.2 Step3）
-      await this.aria2.confirmSelection(
-        task.pendingGid,
-        input.selectedPaths ?? [],
-        input.threads,
-        task.saveDir,
-        task.seedRatio ?? 0
-      )
-      // R7 P1：单任务限速（params.speedLimit；changeOption 合并语义不清除）
-      const speedLimit = readTaskSpeedLimit(task)
-      if (speedLimit) {
-        await this.aria2.changeOption(task.pendingGid, { 'max-download-limit': speedLimit })
+      // P1 修复（第六轮审查）：原判断 task.pendingGid 是死分支——pendingGid 只存在
+      // 于创建期内存对象，runWhenQueued 经 getTask 重读时 rowToTask 不映射该字段，
+      // 恒 undefined → 磁力确认永远走 else 重加（重新 BEP-9 取元数据最长 90s、
+      // 状态闪烁、旧 paused gid 与 metaDir 泄漏、.torrent 产物写进保存目录）。
+      // 磁力 parse 期已把 pendingGid 落库为 engine_gid（createTask:586），此处改用
+      // engineGid；.torrent 任务本地解析无 gid，仍走下方 addTorrent 分支
+      // 回归审查：快速通道对「引擎侧 gid 已销毁」的场景必失败——跨重启（aria2 会话
+      // 无持久化）与 awaiting 任务删除→恢复（control remove 已销毁引擎条目）。
+      // 此前改用 engineGid 后这两类场景由「慢但可用」变「确认必失败」，故失败时
+      // 回落 re-add（addUri 磁力，BEP-9/元数据缓存），恢复可用性
+      try {
+        const pendingGid = task.engineGid
+        await this.aria2.confirmSelection(
+          pendingGid,
+          input.selectedPaths ?? [],
+          input.threads,
+          task.saveDir,
+          task.seedRatio ?? 0
+        )
+        // R7 P1：单任务限速（params.speedLimit；changeOption 合并语义不清除）
+        const speedLimit = readTaskSpeedLimit(task)
+        if (speedLimit) {
+          await this.aria2.changeOption(pendingGid, { 'max-download-limit': speedLimit })
+        }
+        updateTaskFields(task.id, { engineGid: pendingGid, threads: input.threads })
+        await this.aria2.resume({ ...task, engineGid: pendingGid })
+        gid = pendingGid
+      } catch (err) {
+        if (err instanceof IllegalTransitionError) throw err
+        log.warn(`磁力快速通道失败，回落 re-add：${task.id}`, err instanceof Error ? err.message : String(err))
+        gid = await this.aria2.start(task, this.selectionFor(task))
+        updateTaskFields(task.id, { engineGid: gid, threads: input.threads })
       }
-      updateTaskFields(task.id, { engineGid: task.pendingGid, threads: input.threads })
-      await this.aria2.resume({ ...task, engineGid: task.pendingGid })
-      gid = task.pendingGid
     } else {
       // .torrent：addTorrent 注入 select-file（按 task_files 顺序映射索引）+ dir
       gid = await this.aria2.start(task, this.selectionFor(task))
@@ -938,10 +1050,17 @@ export class TaskManager {
         if (task.status === 'running' || task.status === 'queued') {
           if (task.engine === 'ytdlp') {
             // M3-1：yt-dlp pause = SIGTERM（.part 保留）
-            this.ytdlp?.pause(task)
+            // 第六轮审查：running 但 pause 返回 false = 启动在途窗口（spawn 未
+            // 登记进程表）——照常转 paused 会被随后的 running 合法转移静默撤销；
+            // queued 时 false 属正常（尚未起跑，直接落到下方通用收尾转 paused）
+            if (task.status === 'running' && !this.ytdlp?.pause(task)) {
+              throw new Error('任务正忙，无法立即暂停，请稍候重试')
+            }
           } else if (task.engine === 'nm3u8') {
             // R7 续（backlog #17）：N_m3u8DL-RE pause = SIGTERM（tmp 分片保留）
-            this.nm3u8?.pause(task)
+            if (task.status === 'running' && !this.nm3u8?.pause(task)) {
+              throw new Error('任务正忙，无法立即暂停，请稍候重试')
+            }
           } else if (task.engine === 'music') {
             // 音乐：真取消（AbortSignal 即刻中断，引擎产物已清理），槽位由后续 done(cancelled) 事件释放
             if (task.engineGid) void this.music?.cancel(task.engineGid)
@@ -956,19 +1075,33 @@ export class TaskManager {
               // 极端竞态：forcePause 仍被拒（如刚重启 aria2 会话丢失）→ 不转状态，抛友好提示
               throw new Error('任务正忙，无法立即暂停，请稍候重试')
             }
-            if (outcome === 'complete' || outcome === 'error') {
+            if (outcome === 'complete' || outcome === 'error' || outcome === 'removed') {
               // 审查修复：gid 终结语义修正——complete ≠ paused。此前会把刚下载完的
               // 任务标成「已暂停」。改走引擎事件流转移终态（补齐完成记账/去重登记/
-              // 产物落库；直接 transition 会绕过 applyEngineEvents 的全部收尾）
+              // 产物落库；直接 transition 会绕过 applyEngineEvents 的全部收尾）。
+              // 第六轮审查：'removed' 同样不得落通用收尾——引擎条目已销毁的任务被
+              // 标 paused 后 resume 永远失败（unpause 报 gid 不存在）且无 queued 出口
               const fresh = getTask(input.taskId) as TaskExt | null
               if (fresh && (fresh.status === 'running' || fresh.status === 'queued')) {
+                // 回归审查：queued→completed 非法转移会被静默跳过（同上）——先归位
+                // running 再投 completed 事件，记账/产物落库才真正闭环
+                if (outcome === 'complete' && fresh.status !== 'running') {
+                  try {
+                    this.transition(fresh, 'running')
+                  } catch {
+                    return // 窗口内已被轮询推到终态
+                  }
+                }
                 this.merger.push(
                   outcome === 'complete'
                     ? { taskId: fresh.id, status: 'completed' }
                     : {
                         taskId: fresh.id,
                         status: 'failed',
-                        error: '引擎侧任务已失败（aria2 终止）。请点击重试。'
+                        error:
+                          outcome === 'removed'
+                            ? '引擎侧任务已被移除。请点击重试。'
+                            : '引擎侧任务已失败（aria2 终止）。请点击重试。'
                       }
                 )
               }
@@ -986,6 +1119,14 @@ export class TaskManager {
           this.pushEvent({ taskId: fresh.id, status: 'paused' })
           // R2：暂停释放并发槽
           this.pumpStarts()
+        } else if (task.status === 'verifying' || task.status === 'seeding') {
+          // 第七轮审查 P3：verifying/seeding 点暂停此前静默无响应（连报错都没有）——
+          // 显式拒绝并给出路，与 tool 分支同口径
+          throw new Error(
+            task.status === 'verifying'
+              ? '任务正在做完整性校验，暂不能暂停，请稍候重试'
+              : '任务正在做种。如需停止，可在设置中调整做种比例，或直接移除任务。'
+          )
         }
         break
       case 'resume':
@@ -1021,13 +1162,31 @@ export class TaskManager {
               this.pushEvent({ taskId: task.id, status: 'queued' })
               this.gateStart(
                 this.runWhenQueued(task.id, async (cur) => {
-                  const gid = await this.aria2.start(cur)
+                  // 第七轮审查 P1：此分支必须带 selectionFor——部分勾选的 BT/磁力
+                  // 任务在排队窗口被暂停再恢复时，裸 start 会丢 select-file，
+                  // aria2 全量下载用户明确取消勾选的文件（对齐 recoverEngineTasks/
+                  // retryTask 口径）
+                  // 回归审查 P2：增量补下任务（completedAt 锚点在）二次起跑必须
+                  // 放行覆盖——saveDir 里有原完成文件，裸 start 必撞 File already
+                  // exists（对齐 confirmSelection 增量入口的 allowOverwrite: true）
+                  const pendingIncremental = getTaskCompletedAt(cur.id) != null
+                  const gid = await this.aria2.start(cur, {
+                    ...this.selectionFor(cur),
+                    ...(pendingIncremental ? { allowOverwrite: true } : {})
+                  })
+                  // 第七轮修复（双重记账）：排队暂停恢复路径同样回撤未消化的旧记账
+                  this.consumePendingCompletion(cur.id, cur.totalBytes ?? 0)
                   updateTaskFields(cur.id, { engineGid: gid })
+                  return gid
                 })
               )
               break
             }
-            await this.aria2.resume(task)
+            // 第七轮审查 P3：unpause 失败此前上抛 aria2 原始英文错误（如 gid 已
+            // 终结的 "cannot be unpaused now"）——归一为中文 + 出口动作
+            await this.aria2.resume(task).catch(() => {
+              throw new Error('引擎侧无法恢复该任务（引擎条目可能已失效）。请移除任务后重新提交。')
+            })
           }
           // P2 加固：同 pause——跨 await 后复核状态，防旧快照覆盖终态
           const fresh = getTask(input.taskId) as TaskExt | null
@@ -1125,6 +1284,15 @@ export class TaskManager {
     if (!task) return
     // 移入回收站时引擎侧任务已被移除：恢复后运行类状态归位 queued 并立即 re-add，
     // 避免「恢复后永远 running 但引擎里没有任务」的幽灵态
+    if (task.status === 'parsing') {
+      // 第六轮审查：解析中删除→恢复的僵尸——createTask 的 isAborted 探针命中后
+      // 直接 return（不做状态转移），归位名单此前不含 parsing → 恢复后永久
+      // 「解析中」，不可暂停/重试/再入队。归位 failed 与 recoverOnStartup 同口径，
+      // 给 retryTask 出口
+      updateTaskFields(taskId, { status: 'failed', error: '解析已中断（任务曾删除）。请点击重试' })
+      this.pushEvent({ taskId, status: 'failed', error: '解析已中断（任务曾删除）。请点击重试' })
+      return
+    }
     if (['running', 'queued', 'paused', 'verifying', 'seeding'].includes(task.status)) {
       // R4-P2：seeding 纳入归位（与 recoverOnStartup 口径一致）——移入回收站时
       // 引擎 gid 已销毁，漏掉会让任务永久显示「做种中」且无重试入口
@@ -1180,6 +1348,8 @@ export class TaskManager {
    * - awaiting：凭已存 task_files 恢复勾选面板
    */
   async recoverOnStartup(): Promise<void> {
+    // 第六轮审查：清扫放弃确认的磁力任务残留的 %TEMP%/omniget-metadata 陈旧目录
+    cleanupStaleMetadataDirs()
     // M-4：seeding 纳入恢复——重启后置回 queued 由引擎 re-add（BT 秒校验后继续做种），
     // 否则 seeding 任务重启后无人轮询，永久停在「做种中」
     const rows = listTasks({
@@ -1216,9 +1386,13 @@ export class TaskManager {
    * 引擎上线后 re-add 队列任务（§4.5：BT 凭 infohash/torrent re-add）。
    * B2：磁力任务走 BEP-9 + 勾选回放（带 pause），绝不裸 addUri。
    */
-  async recoverEngineTasks(): Promise<void> {
+  async recoverEngineTasks(opts?: { engines?: string[] }): Promise<void> {
     const queued = listTasks({ status: ['queued'] })
-    for (const t of queued) {
+    // 第七轮审查 P2：支持按引擎过滤——aria2 起不来时也要恢复 ytdlp/nm3u8 的
+    // 排队任务（它们不依赖 aria2；此前恢复泵绑死 aria2 onOnline，aria2 二进制
+    // 缺失/损坏时这些任务永久卡「排队中」，queued 又无 retry 入口，用户无出口）
+    const targets = opts?.engines ? queued.filter((t) => opts.engines!.includes(t.engine)) : queued
+    for (const t of targets) {
       // R2：过并发闸门（超出上限的排队任务停在 queued，槽位释放后由 pumpStarts 派发）
       this.gateStart(
         this.runWhenQueued(t.id, async (cur) => {
@@ -1226,15 +1400,37 @@ export class TaskManager {
           if (cur.engine === 'aria2') {
             // R7 续修复（backlog #11）：sidecar 兜底任务恢复前刷新时效直链
             const withFreshLink = await this.refreshSidecarLink(cur)
-            gid = await this.aria2.start(withFreshLink, this.selectionFor(cur))
+            // 回归审查 P2：增量补下任务重启恢复同理——锚点在即放行覆盖
+            const pendingIncremental = getTaskCompletedAt(cur.id) != null
+            gid = await this.aria2.start(withFreshLink, {
+              ...this.selectionFor(cur),
+              ...(pendingIncremental ? { allowOverwrite: true } : {})
+            })
+            // 第七轮修复（双重记账）：重启前遗留的「增量补下 queued 任务」（带旧
+            // completedAt 锚点）经恢复泵起跑成功后回撤旧记账
+            this.consumePendingCompletion(cur.id, cur.totalBytes ?? 0)
           } else if (cur.engine === 'ytdlp' && this.ytdlp) {
             // M3-1：resume = 同参数重 spawn（合集带 --playlist-items 回放）
+            // 回归审查（videoOpts 覆盖面补全）：重启后适配器内存为空，从 params 回放
+            const p = parseParamsJson(cur.params)
+            if (p.videoOptions && typeof p.videoOptions === 'object') {
+              this.ytdlp.setVideoOptions(cur.id, p.videoOptions as Parameters<
+                NonNullable<YtDlpAdapter['setVideoOptions']>
+              >[1])
+            }
             gid = await this.ytdlp.start(
               cur,
               this.isPlaylistTask(cur) ? this.selectionFor(cur) : undefined
             )
           } else if (cur.engine === 'nm3u8' && this.nm3u8) {
             // R7 续（backlog #17）：RE 重 spawn（凭 tmp 分片续传）
+            // 回归审查（videoOpts 覆盖面补全）：同上——从 params 回放格式选择/直播时长
+            const p = parseParamsJson(cur.params)
+            if (p.videoOptions && typeof p.videoOptions === 'object') {
+              this.nm3u8.setVideoOptions(cur.id, p.videoOptions as Parameters<
+                NonNullable<Nm3u8Adapter['setVideoOptions']>
+              >[1])
+            }
             gid = await this.nm3u8.start(cur)
           } else {
             return
@@ -1281,17 +1477,40 @@ export class TaskManager {
       this.runWhenQueued(taskId, async (cur) => {
         let gid: string
         if (cur.engine === 'ytdlp') {
+          // 第六轮审查：failed 终态已清适配器内存 videoOpts——从 params 恢复
+          // 用户确认时的选择，否则重试按默认格式重下
+          const p = parseParamsJson(cur.params)
+          if (p.videoOptions && typeof p.videoOptions === 'object') {
+            this.ytdlp?.setVideoOptions(cur.id, p.videoOptions as Parameters<
+              NonNullable<YtDlpAdapter['setVideoOptions']>
+            >[1])
+          }
           gid = await this.ytdlp!.start(
             cur,
             this.isPlaylistTask(cur) ? this.selectionFor(cur) : undefined
           )
         } else if (cur.engine === 'nm3u8' && this.nm3u8) {
           // R7 续（backlog #17）：RE 重 spawn
+          // 回归审查（videoOpts 覆盖面补全）：从 params 回放（含 liveRecordMinutes）
+          const p = parseParamsJson(cur.params)
+          if (p.videoOptions && typeof p.videoOptions === 'object') {
+            this.nm3u8?.setVideoOptions(cur.id, p.videoOptions as Parameters<
+              NonNullable<Nm3u8Adapter['setVideoOptions']>
+            >[1])
+          }
           gid = await this.nm3u8.start(cur)
         } else {
           // R7 续修复（backlog #11）：sidecar 兜底任务重试前刷新时效直链
           const fresh = await this.refreshSidecarLink(cur)
-          gid = await this.aria2.start(fresh, this.selectionFor(cur))
+          // 回归审查 P2：增量补下任务失败重试同理——锚点在即放行覆盖
+          const pendingIncremental = getTaskCompletedAt(cur.id) != null
+          gid = await this.aria2.start(fresh, {
+            ...this.selectionFor(cur),
+            ...(pendingIncremental ? { allowOverwrite: true } : {})
+          })
+          // 第七轮修复（双重记账）：失败任务若带未回撤的旧 completedAt（增量补下
+          // 启动失败落入 failed），重试起跑成功后回撤
+          this.consumePendingCompletion(cur.id, cur.totalBytes ?? 0)
         }
         updateTaskFields(cur.id, { engineGid: gid, error: null })
         if (cur.engine === 'aria2') return gid
@@ -1345,6 +1564,35 @@ export class TaskManager {
     if (sp.includes('\0')) throw new Error('源文件路径包含非法字符')
     if (!isAbsolute(sp)) throw new Error('源文件路径必须是绝对路径')
     if (/^\\\\/.test(sp)) throw new Error('不支持 UNC 网络路径作为源文件')
+    // 第六轮审查：读取侧此前只挡 UNC——与 taskParseFile/preview 口径对齐，套用
+    // 系统/凭据目录黑名单（防被攻破的渲染层借 checksum 等工具哈希凭据文件）。
+    // userData 豁免在先：工具箱产物（存 userData）可作为下一轮工具的输入
+    {
+      const norm = realishPath(sp).replace(/\\/g, '/').toLowerCase()
+      let userDataExempt = ''
+      try {
+        userDataExempt = app
+          .getPath('userData')
+          .replace(/\\/g, '/')
+          .toLowerCase()
+          .replace(/\/+$/, '')
+      } catch {
+        // app 未就绪（单测环境）
+      }
+      const home = normPath(app.getPath('home'))
+      const blockedDirs = [
+        ...SYSTEM_DIRS,
+        ...credentialDirs(),
+        ...(home ? [`${home}/appdata/roaming`, `${home}/appdata/local/temp`] : []),
+        process.env.TEMP ? normPath(process.env.TEMP) : ''
+      ]
+        .filter(Boolean)
+        .filter((d) => !(userDataExempt && (d === userDataExempt || d.startsWith(`${userDataExempt}/`))))
+      const inUserData = userDataExempt !== '' && (norm === userDataExempt || norm.startsWith(`${userDataExempt}/`))
+      if (!inUserData && hitsAny(norm, blockedDirs)) {
+        throw new Error('不允许使用系统或敏感目录中的文件作为工具输入')
+      }
+    }
     const effectiveSaveDir = input.saveDir || dirname(sp)
     const saveErr = validateSaveDir(effectiveSaveDir)
     if (saveErr) throw new Error(saveErr)
@@ -1452,6 +1700,22 @@ export class TaskManager {
    * （transition 时刻 totalBytes 往往还是旧值——音乐首发即完成时记 0，完成体积少记） */
   private recordCompletionBytes(bytes: number): void {
     recordCompletion(Date.now(), Math.max(0, bytes ?? 0))
+  }
+
+  /** 第七轮修复（双重记账）：增量补下 re-add 保留旧 completedAt 作「待回撤」锚点
+   * （排队/删除恢复/重启/失败重试窗口期间旧记录不丢）。任务经任何路径真正重新
+   * 起跑成功后调用本方法回撤旧记账并清锚点——此后完成照常入账，杜绝双计 */
+  private consumePendingCompletion(taskId: string, taskBytes: number): void {
+    const prev = getTaskCompletedAt(taskId)
+    if (prev == null) return
+    try {
+      reverseCompletion(prev, Math.max(0, taskBytes ?? 0))
+    } catch (err) {
+      // 回撤是纯记账——SQL 异常不得影响在跑任务，只留日志（锚点保留，下次再试）
+      log.warn(`consumePendingCompletion reverse failed for ${taskId}`, err)
+      return
+    }
+    updateTaskFields(taskId, { completedAt: null })
   }
 
   private pushEvent(e: TaskEvent): void {

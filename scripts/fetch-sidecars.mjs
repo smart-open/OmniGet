@@ -12,8 +12,9 @@
 //                 此前该平台 fetch 必失败（mac x64 dmg 出包链路走不通，P2 修复）
 // 全部经官方/高星发布源；aria2/ffmpeg 的镜像源失效时会明确报错而非静默出空包。
 
-import { mkdir, chmod, rename, unlink } from 'node:fs/promises'
-import { existsSync, readdirSync } from 'node:fs'
+import { mkdir, chmod, copyFile, rename, unlink } from 'node:fs/promises'
+import { existsSync, readdirSync, readFileSync, unlinkSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
@@ -42,11 +43,13 @@ const OUT =
 const GH = 'https://api.github.com'
 
 function ghLatest(repo) {
-  const r = spawnSync('curl', ['-sSL', '-H', 'Accept: application/vnd.github+json', `${GH}/repos/${repo}/releases/latest`], {
+  // 第六轮审查：加 --fail——403 限流时 curl 此前退出码为 0，JSON.parse 解析错误体
+  // 成功、rel.assets undefined → 报「缺少资产」而非「API 限流」，排障误导
+  const r = spawnSync('curl', ['-sSL', '--fail', '-H', 'Accept: application/vnd.github+json', `${GH}/repos/${repo}/releases/latest`], {
     encoding: 'utf8',
     timeout: 60_000
   })
-  if (r.status !== 0) throw new Error(`GitHub API unreachable: ${repo}`)
+  if (r.status !== 0) throw new Error(`GitHub API unreachable or rate-limited: ${repo}`)
   return JSON.parse(r.stdout)
 }
 
@@ -54,6 +57,41 @@ function ghLatest(repo) {
 function download(url, dest) {
   const r = spawnSync('curl', ['-sSL', '--fail', '--retry', '3', '-o', dest, url], { timeout: 600_000 })
   if (r.status !== 0) throw new Error(`download failed: ${url}`)
+}
+
+/** 下载侧 SHA256 预校验（第七轮）：官方发布源提供校验和资产（如 yt-dlp 的
+ * SHA2-256SUMS）时强制比对，不符即失败拒绝安装——堵「发布源资产被投毒/下载
+ * 中途损坏直接进包」的缺口（此前下载侧零校验，仅运行时 TOFU 兜底） */
+function sha256File(file) {
+  return createHash('sha256').update(readFileSync(file)).digest('hex')
+}
+
+function verifyChecksum(file, sumsUrl, entryName) {
+  const tmp = join(tmpdir(), `omniget-sums-${Date.now()}`)
+  try {
+    download(sumsUrl, tmp)
+    const text = readFileSync(tmp, 'utf8')
+    const line = text
+      .split(/\r?\n/)
+      .find((l) => l.trimEnd().endsWith(entryName))
+    if (!line) throw new Error(`校验和清单中无 ${entryName} 条目`)
+    const expected = line.trim().split(/\s+/)[0]?.toLowerCase()
+    const actual = sha256File(file)
+    if (!expected || expected !== actual) {
+      throw new Error(
+        `SHA256 预校验不符：${entryName}（期望 ${expected ?? '无'}，实际 ${actual}）——拒绝安装`
+      )
+    }
+    console.log('  ✓ SHA256 预校验通过')
+  } finally {
+    // 回归审查 P3：清理失败不得掩盖真实根因（download 失败时文件不存在 →
+    // unlinkSync ENOENT 会替换掉「download failed: url」原始错误）
+    try {
+      unlinkSync(tmp)
+    } catch {
+      // 残留临时文件无害
+    }
+  }
 }
 
 function unzip(zip, toDir) {
@@ -69,7 +107,11 @@ function unzip(zip, toDir) {
 }
 
 function untar(tgz, toDir) {
-  const r = spawnSync('tar', ['-xzf', tgz, '-C', toDir], { timeout: 300_000 })
+  // 第六轮审查（P1）：原硬编码 -xzf（gzip 滤镜）——aria2 的 darwin/linux 资产是
+  // .tar.bz2，GNU tar 必报 not in gzip format（Linux CI 出包链路断）；macOS bsdtar
+  // 读取时自动探测压缩格式故侥幸存活。改无压缩标志 -xf（GNU tar/bsdtar 均按
+  // 魔数自动探测，与下方 ffmpeg .tar.xz 的 -xf 口径一致）
+  const r = spawnSync('tar', ['-xf', tgz, '-C', toDir], { timeout: 300_000 })
   if (r.status !== 0) throw new Error(`untar failed: ${tgz}`)
 }
 
@@ -88,7 +130,18 @@ function findFile(dir, re) {
 
 async function place(src, name) {
   const dest = join(OUT, name)
-  await rename(src, dest)
+  try {
+    await rename(src, dest)
+  } catch (err) {
+    // 第六轮审查（P1）：tmpdir()（通常 C:）与仓库（如 D:）跨文件系统时 rename 抛
+    // EXDEV——本机直接跑脚本三项全挂（CI 同盘不暴露）。跨卷回退 copy+unlink
+    if (err && typeof err === 'object' && 'code' in err && err.code === 'EXDEV') {
+      await copyFile(src, dest)
+      await unlink(src).catch(() => {})
+    } else {
+      throw err
+    }
+  }
   if (plat !== 'win32') await chmod(dest, 0o755).catch(() => {})
   console.log(`  ✓ ${name}`)
 }
@@ -110,7 +163,7 @@ async function fetchYtDlp() {
       : plat === 'darwin'
         ? 'yt-dlp_macos'
         : arch === 'arm64'
-          ? 'yt-dlp_linux_arm64'
+          ? 'yt-dlp_linux_aarch64'
           : arch === 'arm'
             ? 'yt-dlp_linux_armv7l'
             : arch === 'ia32'
@@ -125,6 +178,10 @@ async function fetchYtDlp() {
   const tmp = join(tmpdir(), assetName)
   await unlink(tmp).catch(() => {})
   download(asset.browser_download_url, tmp)
+  // 第七轮：下载侧 SHA256 预校验（yt-dlp 官方随 release 提供 SHA2-256SUMS）
+  const sums = rel.assets?.find((a) => a.name === 'SHA2-256SUMS')
+  if (sums) verifyChecksum(tmp, sums.browser_download_url, assetName)
+  else console.log('  ! 该 release 未提供校验和资产，跳过预校验')
   await place(tmp, exe)
 }
 
@@ -184,7 +241,11 @@ async function fetchFfmpegDarwinX64() {
 async function fetchFfmpeg() {
   const exe = plat === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'
   if (plat === 'darwin' && arch === 'x64') return fetchFfmpegDarwinX64()
-  if (!(await need(exe))) return
+  // 第七轮审查 P3：逐工具判断缺失——此前 ffmpeg 在位即 early-return，
+  // ffprobe 缺失（手动清理/上次中断）时永远补不上，只能 --force 重下 ffmpeg
+  const needFfmpeg = await need(exe)
+  const needFfprobe = await need(plat === 'win32' ? 'ffprobe.exe' : 'ffprobe')
+  if (!needFfmpeg && !needFfprobe) return
   console.log('ffmpeg (BtbN/FFmpeg-Builds) …')
   const rel = ghLatest('BtbN/FFmpeg-Builds/releases/latest')
   const suffix =

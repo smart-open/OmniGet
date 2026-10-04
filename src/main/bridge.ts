@@ -147,7 +147,13 @@ async function handle(
       res.end('需要访问令牌：在 OmniGet 设置 → 远程/扩展 中查看 token，访问 /?token=<token>')
       return
     }
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+    // 第七轮审查 P3：补 CSP 纵深——页面内容含渲染层/任务名等攻击者可控文本
+    res.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Content-Security-Policy':
+        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      'Referrer-Policy': 'no-referrer'
+    })
     res.end(renderPage(port))
     return
   }
@@ -233,7 +239,9 @@ function esc(s) {
 }
 async function refresh() {
   try {
-    const r = await fetch('/api/tasks?token=' + encodeURIComponent(token), { headers: H })
+    // 第六轮审查：token 只走 header（M-3 口径自洽——query token 会进浏览器
+    // 历史/Referer，页面已 replaceState 剥离就不该再拼回去）
+    const r = await fetch('/api/tasks', { headers: H })
     const d = await r.json()
     document.getElementById('rows').innerHTML = (d.tasks || []).map(t =>
       '<tr><td>' + esc(t.name) + '</td>' +
@@ -247,7 +255,7 @@ document.getElementById('f').addEventListener('submit', async (e) => {
   const url = document.getElementById('url').value.trim()
   if (!url) return
   try {
-    const r = await fetch('/api/download?token=' + encodeURIComponent(token), { method: 'POST', headers: H, body: JSON.stringify({ url }) })
+    const r = await fetch('/api/download', { method: 'POST', headers: H, body: JSON.stringify({ url }) })
     const d = await r.json()
     document.getElementById('msg').textContent = d.ok ? '已提交到下载队列' : ('失败：' + (d.error || ''))
     if (d.ok) { document.getElementById('url').value = ''; refresh() }

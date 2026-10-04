@@ -1,6 +1,6 @@
 // yt-dlp 端到端（M3-1/2/3）：版本探测 → -J 解析 formats → 最低画质下载 → 校验落盘
 // 运行方式同 npm test（Electron-as-Node，better-sqlite3 ABI 匹配）
-import { mkdtempSync, existsSync, statSync, rmSync } from 'fs'
+import { mkdtempSync, statSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 

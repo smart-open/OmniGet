@@ -17,6 +17,7 @@ import type { Task, TaskFile } from '@shared/types'
 import { useEffect, useRef, useState } from 'react'
 import { FILE_CATEGORIES, fileCategory } from '@shared/file-category'
 import { confirmAction, toast, toastError } from '../../lib/feedback'
+import { isAnyModalOpen } from '../../lib/modalGate'
 import { formatBytes } from '../new-task/fileTree'
 
 const spring = { type: 'spring' as const, stiffness: 300, damping: 32 }
@@ -57,6 +58,9 @@ export function Inspector({
       setFiles([])
       return
     }
+    // 第七轮审查 P3：切换任务时先清旧清单——新详情返回前文件区块短暂显示上
+    // 一个任务的文件（seq 守卫只防错标不防错显）
+    setFiles([])
     const seq = ++detailSeq.current
     setDetailError(false)
     window.omniget
@@ -80,6 +84,9 @@ export function Inspector({
       // 确认框打开时让位（ConfirmDialog 在 capture 阶段消费 Esc）
       const tag = (e.target as HTMLElement)?.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+      // 第六轮审查：其他弹层（新建任务对话框/帮助浮层等，走 useModalGate）打开时
+      // 让位——原实现与 NewTaskDialog 的 Esc 监听同层级，一键双关（对话框+详情抽屉）
+      if (isAnyModalOpen()) return
       onClose()
     }
     window.addEventListener('keydown', onKey)

@@ -17,7 +17,7 @@ import {
   type SubscriptionAddInput,
   type ToolCreateInput
 } from '@shared/types'
-import { getSetting, getSettingParsed, setSetting } from './db'
+import { getDb, getSetting, getSettingParsed, setSetting } from './db'
 import { validateSaveDir } from './save-dir'
 import { SYSTEM_DIRS, credentialDirs, hitsAny, normPath, realishPath } from './sensitive-paths'
 import { createLogger } from './logger'
@@ -36,19 +36,15 @@ const log = createLogger('ipc')
 let taskManager: TaskManager | null = null
 let musicAdapter: MusicAdapter | null = null
 
-/** 发布仓库 slug（owner/name）：package.json repository 字段解析；未配置返回 null */
+// 第六轮审查：发布仓库 slug 改为构建期常量——原实现运行时 require('../../package.json')
+// 违反 AGENT.md「主进程禁用运行时相对 require」约定（Rollup 不重写，打包态依赖
+// 产物层级侥幸成立，层级变化即静默失效返回 null 且无报错痕迹）。仓库 slug 属
+// 静态发布配置，硬编码与 package.json repository 字段保持一致，改仓库时同步改此常量
+const RELEASE_REPO_SLUG = 'smart-open/OmniGet'
+
+/** 发布仓库 slug（owner/name） */
 function resolveRepoSlug(): string | null {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const pkg = require('../../package.json') as {
-      repository?: { url?: string } | string
-    }
-    const url = typeof pkg.repository === 'string' ? pkg.repository : pkg.repository?.url
-    const m = /github\.com[/:]([\w.-]+)\/([\w.-]+?)(\.git)?$/i.exec(url ?? '')
-    return m ? `${m[1]}/${m[2]}` : null
-  } catch {
-    return null
-  }
+  return RELEASE_REPO_SLUG
 }
 
 /** 语义化版本比较（x.y.z 逐段数值）：>0 表示 a 更新 */
@@ -278,6 +274,11 @@ export function registerIpcHandlers(): void {
       }))
     )
   })
+  // 回归审查：demucs TOFU 指纹重置的用户可执行出口——指纹键不进渲染层写白名单
+  // （防被攻破的渲染层轮换二进制），合法升级经此专用通道显式重置（UI 侧有二次确认）
+  ipcMain.handle(IPC_CHANNELS.toolDemucsReset, () => {
+    getDb().prepare('DELETE FROM settings WHERE key = ?').run('toolbox.demucs.fingerprint')
+  })
 
   // ── Backlog：平台适配健康面板 ────────────────────────────────────────
   ipcMain.handle(IPC_CHANNELS.healthGet, async () => {
@@ -401,6 +402,9 @@ export function registerIpcHandlers(): void {
     return reloadAdapterScripts()
   })
   ipcMain.handle(IPC_CHANNELS.scriptsToggle, async (_e, id: string, enabled: boolean) => {
+    // 第七轮审查 P3：强制布尔——字符串 "false" 落库后 raw.enabled !== false 判真，
+    // 用户显式禁用的脚本会静默保持启用
+    if (typeof enabled !== 'boolean') throw new Error('参数 enabled 必须为布尔值')
     const { setAdapterScriptEnabled } = await import('./adapters/scripts')
     setAdapterScriptEnabled(id, enabled)
   })
@@ -487,7 +491,8 @@ export function registerIpcHandlers(): void {
 
   // ── M4-7 应用自检更新 ────────────────────────────────────────────────
   // R4 清理：'app:update' 孤儿通道已删除——渲染层唯一更新入口是
-  // appCheckUpdate（bridge.checkAppUpdate）；checkForAppUpdateNow 仅由定时器使用
+  // appCheckUpdate（bridge.checkAppUpdate）；定时器走 app-updater 的
+  // checkForUpdatesAndNotify（checkForAppUpdateNow 死代码已随第六轮审查删除）
 
   // settings
   // 读取黑名单：与写白名单对称——渲染层被攻破时不得借 settingsGet 拖走敏感值
@@ -601,7 +606,14 @@ export function registerIpcHandlers(): void {
         }
       }
     }
-    setSetting(k, JSON.stringify(value ?? null))
+    // 第六轮审查：白名单键此前无值大小上限——ui.pinnedTasks 等可被塞入任意大小
+    // 字符串直落 SQLite（膨胀 DB / 拖慢每次设置读取）。256KB 足以覆盖键位映射/
+    // 置顶列表等全部合法值（预设导入另有 1MB 通道）
+    const encoded = JSON.stringify(value ?? null)
+    if (encoded.length > 256 * 1024) {
+      throw new Error('设置值过大（超过 256KB 上限）')
+    }
+    setSetting(k, encoded)
     // 审查修复：主题跨窗口热同步真正闭环——syncTheme 无渲染层调用方，ui:theme
     // 永不触发；设置页改主题走 settingsSet('ui.theme')，在此处广播到所有窗口
     //（含迷你悬浮窗）并同步窗口底色（frameless 圆角外壳外的一圈）
@@ -639,6 +651,7 @@ export function registerIpcHandlers(): void {
   })
 
   // 应用环境：默认保存目录 = 用户配置（download.saveDir）→ 系统 Downloads
+  ipcMain.handle('app:version', () => app.getVersion())
   ipcMain.handle('app:defaultSaveDir', () => {
     // P1 加固：设置值为 JSON 串，必须反序列化（否则路径带引号落盘损坏）
     const configured = getSettingParsed<string>('download.saveDir')
@@ -646,12 +659,15 @@ export function registerIpcHandlers(): void {
     return app.getPath('downloads')
   })
 
-  // 系统文件夹选择对话框（取消返回 null）
-  ipcMain.handle('app:pickFolder', async () => {
+  // 系统文件夹选择对话框（取消返回 null）。
+  // 第七轮审查 P3：挂 parent（对齐 app:exportFile）——主窗隐藏到托盘时无属主
+  // 对话框可能落到其他窗口后面，用户感知为「点了没反应」
+  ipcMain.handle('app:pickFolder', async (e) => {
     const { dialog } = await import('electron')
-    const result = await dialog.showOpenDialog({
-      properties: ['openDirectory', 'createDirectory']
-    })
+    const parent = BrowserWindow.fromWebContents(e.sender)
+    const result = await (parent
+      ? dialog.showOpenDialog(parent, { properties: ['openDirectory', 'createDirectory'] })
+      : dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] }))
     return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
   })
 
@@ -732,8 +748,18 @@ export function registerIpcHandlers(): void {
 
   // BT 外网可达性探测（#5 增强，opt-in）：经 check-host.net 免费节点对本机公网 IP:6881
   // 发起多节点 TCP 探测——只能验证「外部能否主动连入」，是 BT 连通性的黄金判据。
+  let lastBtExternalAt = 0
+  let btExternalInFlight = false
   ipcMain.handle(IPC_CHANNELS.diagBtExternal, async (): Promise<BtExternalResult> => {
     const fail = (error: string): BtExternalResult => ({ reachable: null, ok: 0, total: 0, error })
+    // 第七轮审查 P3：节流 + 单飞——该通道会把本机公网 IP 外送第三方（ipify/
+    // check-host）并对本机端口发起外部探测，被攻破渲染层反复触发等于持续泄露
+    const now = Date.now()
+    if (now - lastBtExternalAt < 30_000 || btExternalInFlight) {
+      throw new Error('BT 连通性检测刚执行过，请 30 秒后再试')
+    }
+    lastBtExternalAt = now
+    btExternalInFlight = true
     try {
       const { fetch: f } = await import('undici')
       const jsonHeaders = { Accept: 'application/json' } as Record<string, string>
@@ -809,6 +835,8 @@ export function registerIpcHandlers(): void {
     } catch (err) {
       log.warn('bt external probe failed:', String(err))
       return fail('探测失败：网络不可达或服务超时')
+    } finally {
+      btExternalInFlight = false
     }
   })
 

@@ -207,7 +207,35 @@ export function registerPreviewHandler(): void {
         const type = /^image\//i.test(upstream.contentType)
           ? upstream.contentType
           : 'image/jpeg'
-        return new Response(upstream.body as ReadableStream, {
+        // 第六轮审查：远程封面无大小上限——被投毒封面源可无限流灌内存/磁盘缓存
+        //（音乐分支语义为音频流不设限，图片分支封顶 20MB：封面图远小于此）
+        const IMAGE_CAP_BYTES = 20 * 1024 * 1024
+        const capped = new TransformStream<Uint8Array, Uint8Array>()
+        void (async () => {
+          const reader = (upstream.body as ReadableStream<Uint8Array>).getReader()
+          const writer = capped.writable.getWriter()
+          let sent = 0
+          try {
+            for (;;) {
+              const { done, value } = await reader.read()
+              if (done) break
+              sent += value.byteLength
+              if (sent > IMAGE_CAP_BYTES) {
+                await reader.cancel().catch(() => {})
+                await writer.abort(new Error('image too large')).catch(() => {})
+                return
+              }
+              await writer.write(value)
+            }
+            await writer.close()
+          } catch {
+            // 回归审查：渲染层取消加载（img 移除/导航）时 write 拒绝进入此分支——
+            // 只 abort writer 不 cancel reader 会让 undici 上游连接滞留累积
+            await reader.cancel().catch(() => {})
+            await writer.abort().catch(() => {})
+          }
+        })()
+        return new Response(capped.readable, {
           status: 200,
           headers: { 'Content-Type': type, 'Cache-Control': 'max-age=3600' }
         })

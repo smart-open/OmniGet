@@ -1,7 +1,7 @@
 // Backlog：平台适配状态面板（提取器健康度/失效平台公示）
 // 数据：主进程 health:get（失败归因 M4-17 + 音乐降级事件喂入）+ 引擎在线状态。
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ArrowClockwise, CheckCircle, Warning, XCircle } from '@phosphor-icons/react'
 import type { PlatformHealthEntry } from '@shared/types'
 import { useTasks } from '../../stores/tasks'
@@ -25,19 +25,28 @@ export function HealthPage() {
   const engines = useTasks((s) => s.engines)
   const [entries, setEntries] = useState<PlatformHealthEntry[]>([])
   const [loadError, setLoadError] = useState('')
+  // 第七轮审查 P3：首载失败/慢响应不得伪装成「暂无数据」空态；轮询加 seq 守卫
+  //（某次请求 hang 超 10s 时，旧响应后到会覆盖新数据）
+  const [loading, setLoading] = useState(true)
+  const seqRef = useRef(0)
 
   // 统一加载入口：manual=手动刷新（失败额外 toast）；轮询失败仅置内联错误横幅，
   // 不刷屏（每 10s 一次的定时探测失败不应打扰）
   const reload = (manual = false): void => {
+    const seq = ++seqRef.current
     window.omniget
       .getPlatformHealth()
       .then((r) => {
+        if (seq !== seqRef.current) return
         setEntries(r)
         setLoadError('')
+        setLoading(false)
       })
       .catch((err) => {
+        if (seq !== seqRef.current) return
         const msg = err instanceof Error ? err.message : String(err)
         setLoadError(msg)
+        setLoading(false)
         if (manual) toastError('刷新健康状态', err)
       })
   }
@@ -101,9 +110,15 @@ export function HealthPage() {
         {/* 平台适配状态表 */}
         <h3 className="mb-2 text-xs font-medium text-text-1">{t('health.table')}</h3>
         {entries.length === 0 ? (
-          <p className="rounded-panel border border-border px-3 py-6 text-center text-xs text-text-3">
-            {t('health.empty')}
-          </p>
+          loading ? (
+            <p className="rounded-panel border border-border px-3 py-6 text-center text-xs text-text-3">
+              健康状态加载中…
+            </p>
+          ) : (
+            <p className="rounded-panel border border-border px-3 py-6 text-center text-xs text-text-3">
+              {t('health.empty')}
+            </p>
+          )
         ) : (
           <div className="space-y-2">
             {entries.map((e) => {

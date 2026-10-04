@@ -75,11 +75,13 @@ function KeysSection({ onOpenHelp }: { onOpenHelp?: () => void }) {
       const next = { ...overrides, [recording]: k }
       setOverrides(next)
       setRecording(null)
-      // UX 硬性标准：持久化失败必须可见反馈（此前静默，重启后新键位丢失）
+      // UX 硬性标准：持久化失败必须可见反馈（此前静默，重启后新键位丢失）。
+      // 第七轮审查 P3：事件必须在落盘成功后广播——否则 App 立即回读可能拿到旧值
+      //（与 resetAll 的 P2 修复同口径，单键录制路径此前漏改）
       window.omniget
         .settingsSet('ui.keymap', next)
+        .then(() => window.dispatchEvent(new Event('keymap-changed')))
         .catch((err) => toastError('保存快捷键', err))
-      window.dispatchEvent(new Event('keymap-changed'))
     }
     window.addEventListener('keydown', onKey, { capture: true })
     return () => window.removeEventListener('keydown', onKey, { capture: true })
@@ -165,10 +167,24 @@ function KeysSection({ onOpenHelp }: { onOpenHelp?: () => void }) {
 }
 
 /** 外观：主题选择（色板卡 + 跟随系统） */
+/** 第六轮审查：「说明」页版本号此前硬编码 v0.1.0（实际已到 0.7.x）——改为运行时
+ * 读 app.getVersion（app:version 通道），随发版自动更新 */
+function AppVersionLabel() {
+  const [v, setV] = useState('')
+  useEffect(() => {
+    window.omniget
+      .appVersion()
+      .then(setV)
+      .catch(() => {})
+  }, [])
+  return <>{v || '…'}</>
+}
+
 function AppearanceSection() {
   const [theme, setTheme] = useState<ThemeId>('system')
   const locale = useI18n((s) => s.locale)
   const setLocale = useI18n((s) => s.setLocale)
+  const t = useI18n((s) => s.t)
   // 兼容模式（跨平台加固）：禁用 GPU 硬件加速
   const [disableGpu, setDisableGpu] = useState(false)
   // M11 同款防抖：存量值加载完成前禁用控件——初始 false 基准上的误翻转会把
@@ -211,12 +227,12 @@ function AppearanceSection() {
   return (
     <Section title="主题">
       <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
-        {THEMES.map((t) => (
+        {THEMES.map((th) => (
           <button
-            key={t.id}
-            onClick={() => change(t.id)}
+            key={th.id}
+            onClick={() => change(th.id)}
             className={`flex items-center gap-2.5 rounded-panel border px-3 py-2.5 text-left text-xs transition-colors ${
-              theme === t.id
+              theme === th.id
                 ? 'border-accent bg-accent-soft font-medium text-accent'
                 : 'border-border text-text-2 hover:border-text-3 hover:text-text-1'
             }`}
@@ -224,13 +240,14 @@ function AppearanceSection() {
             <span
               className="inline-block h-6 w-6 shrink-0 rounded-full border-2 transition-colors"
               style={
-                theme === t.id
-                  ? { background: t.accent, borderColor: t.accent }
-                  : { background: 'transparent', borderColor: t.accent }
+                theme === th.id
+                  ? { background: th.accent, borderColor: th.accent }
+                  : { background: 'transparent', borderColor: th.accent }
               }
             />
-            <span className="flex-1 truncate">{t.label}</span>
-            {theme === t.id && <CheckCircle size={14} weight="fill" className="text-accent" />}
+            {/* 第七轮：主题名走 i18n */}
+            <span className="flex-1 truncate">{t(`theme.${th.id}`)}</span>
+            {theme === th.id && <CheckCircle size={14} weight="fill" className="text-accent" />}
           </button>
         ))}
       </div>
@@ -396,7 +413,6 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
   const [trackers, setTrackers] = useState<TrackerEntry[]>([])
   const [newTracker, setNewTracker] = useState('')
   const [refreshing, setRefreshing] = useState(false)
-  const [saved, setSaved] = useState('')
   const [engineUpdating, setEngineUpdating] = useState(false)
   const [btDiag, setBtDiag] = useState<
     'checking' | 'listening' | 'not-listening' | 'error' | null
@@ -432,33 +448,76 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
   const [engineList, setEngineList] = useState<
     Array<{ name: string; file: string; installed: boolean; size?: number }>
   >([])
+  // 第七轮审查 P2：引擎清单加载失败此前渲染成「加载中…」永久空转（错误态缺失）
+  const [engineLoadFailed, setEngineLoadFailed] = useState(false)
   const [engineFetching, setEngineFetching] = useState(false)
   const [engineMirror, setEngineMirror] = useState('')
   /** M11：设置加载完成前不渲染表单——输入框显示默认值时点保存会把默认值当真值落盘 */
   const [settingsLoaded, setSettingsLoaded] = useState(false)
+  // 第六轮审查：计划规则加载失败标记——失败后 rules 是空数组，此时允许「保存计划」
+  // 会把空规则落盘清空全部调度计划（写前守卫）
+  const rulesLoadFailedRef = useRef(false)
   const t = useI18n((s) => s.t)
 
   useEffect(() => {
     void (async () => {
-      setTemplate(String((await window.omniget.settingsGet('naming.template')) ?? '{{title}}'))
-      setCookieFile(String((await window.omniget.settingsGet('ytdlp.cookieFile')) ?? ''))
-      setSidecarUrl(String((await window.omniget.settingsGet('sidecar.videoApiUrl')) ?? ''))
-      setNetdiskUrl(String((await window.omniget.settingsGet('netdisk.endpoint')) ?? ''))
-      setNetdiskSaveDir(await window.omniget.defaultSaveDir())
-      setSaveDir(String((await window.omniget.settingsGet('download.saveDir')) ?? ''))
-      setMaxConcurrent(String((await window.omniget.settingsGet('download.maxConcurrent')) ?? 0))
-      setAutoArchive((await window.omniget.settingsGet('download.autoArchive')) === true)
-      setDedupe((await window.omniget.settingsGet('download.dedupe')) !== false)
-      setYtdlpAria2c((await window.omniget.settingsGet('download.ytdlpAria2c')) === true)
-      setSubs(await window.omniget.subscribeList())
-      setUpnp((await window.omniget.settingsGet('bt.upnp')) !== false)
-      setBtEncrypt((await window.omniget.settingsGet('bt.forceEncryption')) !== false)
-      setRules((await window.omniget.getScheduleRules()) ?? [])
-      setTrackers(await window.omniget.listTrackers())
-      setScripts(await window.omniget.listAdapterScripts())
-      setBridgeInfo(await window.omniget.getBridgeInfo())
-      setEngineList(await window.omniget.getEngineStatus())
-      setEngineMirror(String((await window.omniget.settingsGet('engines.mirror')) ?? ''))
+      // 第六轮审查：17 个 IPC 此前逐个 await——页面感知延迟 = 各 IPC 往返之和；
+      // 改 Promise.all 并行。失败分区守卫：计划规则加载失败时禁写（防把空规则
+      // 落盘清空全部调度计划）
+      const [rulesRes, subsRes] = await Promise.all([
+        window.omniget.getScheduleRules().then((v) => ({ ok: true as const, v: v ?? [] })).catch((err) => ({ ok: false as const, err })),
+        window.omniget.subscribeList().then((v) => ({ ok: true as const, v })).catch((err) => ({ ok: false as const, err })),
+      ])
+      if (rulesRes.ok) setRules(rulesRes.v)
+      else rulesLoadFailedRef.current = true
+      if (subsRes.ok) setSubs(subsRes.v)
+      const [
+        template, cookieFile, sidecarUrl, netdiskUrl, netdiskSaveDir, saveDir,
+        maxConcurrent, autoArchive, dedupe, ytdlpAria2c, upnp, btEncrypt,
+        trackers, scripts, bridge, engineList, engineMirrorVal
+      ] = await Promise.all([
+        window.omniget.settingsGet('naming.template'),
+        window.omniget.settingsGet('ytdlp.cookieFile'),
+        window.omniget.settingsGet('sidecar.videoApiUrl'),
+        window.omniget.settingsGet('netdisk.endpoint'),
+        window.omniget.defaultSaveDir(),
+        window.omniget.settingsGet('download.saveDir'),
+        window.omniget.settingsGet('download.maxConcurrent'),
+        window.omniget.settingsGet('download.autoArchive'),
+        window.omniget.settingsGet('download.dedupe'),
+        window.omniget.settingsGet('download.ytdlpAria2c'),
+        window.omniget.settingsGet('bt.upnp'),
+        window.omniget.settingsGet('bt.forceEncryption'),
+        window.omniget.listTrackers().catch(() => []),
+        window.omniget.listAdapterScripts().catch(() => []),
+        window.omniget.getBridgeInfo().catch(() => undefined),
+        window.omniget.getEngineStatus().catch(() => 'ENGINE_LOAD_FAILED'),
+        window.omniget.settingsGet('engines.mirror'),
+      ])
+      setTemplate(String(template ?? '{{title}}'))
+      setCookieFile(String(cookieFile ?? ''))
+      setSidecarUrl(String(sidecarUrl ?? ''))
+      setNetdiskUrl(String(netdiskUrl ?? ''))
+      setNetdiskSaveDir(netdiskSaveDir)
+      setSaveDir(String(saveDir ?? ''))
+      setMaxConcurrent(String(maxConcurrent ?? 0))
+      setAutoArchive(autoArchive === true)
+      setDedupe(dedupe !== false)
+      setYtdlpAria2c(ytdlpAria2c === true)
+      setUpnp(upnp !== false)
+      setBtEncrypt(btEncrypt !== false)
+      setTrackers(trackers)
+      setScripts(scripts)
+      setBridgeInfo(bridge ?? null)
+      if (typeof engineList === 'string') {
+        // 加载失败哨兵值（见上方 getEngineStatus().catch）
+        setEngineLoadFailed(true)
+        setEngineList([])
+      } else {
+        setEngineLoadFailed(false)
+        setEngineList(engineList ?? [])
+      }
+      setEngineMirror(String(engineMirrorVal ?? ''))
       setSettingsLoaded(true)
     })().catch((err) => {
       // P2 修复：任一 await 失败不得静默中断后续初始化（页面停留默认值且无提示）
@@ -475,14 +534,22 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
       .then((r) => {
         window.omniget
           .getEngineStatus()
-          .then(setEngineList)
-          .catch(() => flash('引擎状态刷新失败（显示的可能为旧状态）'))
+          .then((list) => {
+            // 回归审查 P3：与初始化同口径维护 engineLoadFailed（失败不得伪装成加载中）
+            setEngineLoadFailed(false)
+            setEngineList(list ?? [])
+          })
+          .catch(() => {
+            setEngineLoadFailed(true)
+            flash('引擎状态刷新失败（显示的可能为旧状态）', 'warning')
+          })
         // 审查修复（P2-2）：部分成功部分失败此前只显示 installed 分支（else if），
         // 失败明细被静默吞掉、绿色横幅误导用户以为全部就绪
         if (r.failed.length > 0) {
           const okPart = r.installed.length > 0 ? `已安装：${r.installed.join('、')}；` : ''
           flash(
-            `${okPart}失败：${r.failed.map((f) => `${f.name}（${f.error}）`).join('；')}`.slice(0, 300)
+            `${okPart}失败：${r.failed.map((f) => `${f.name}（${f.error}）`).join('；')}`.slice(0, 300),
+            'warning'
           )
         } else if (r.installed.length > 0) {
           flash(`已安装：${r.installed.join('、')}`)
@@ -501,18 +568,12 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
       .catch((err) => toastError('保存分发源', err))
   }
 
-  function flash(msg: string): void {
-    setSaved(msg)
-    if (flashTimer.current) clearTimeout(flashTimer.current)
-    flashTimer.current = setTimeout(() => setSaved(''), 2500)
+  /** 第七轮 P2：顶部横幅反馈在深滚动位置不可见（订阅/调度等深分区操作后用户
+   * 完全无感知，会重复点击）——统一改全局 toast（右下角、3.5s、可点击关闭）。
+   * 默认成功态；失败/警示调用点显式传 'warning' */
+  function flash(msg: string, level: 'success' | 'warning' | 'info' = 'success'): void {
+    toast(msg, level)
   }
-  const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  useEffect(
-    () => () => {
-      if (flashTimer.current) clearTimeout(flashTimer.current)
-    },
-    []
-  )
 
   const reloadScripts = (): Promise<void> =>
     window.omniget
@@ -629,18 +690,6 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
             </button>
           ))}
         </div>
-
-        {saved && (
-          <div
-            className={
-              saved.startsWith('更新失败') || saved.startsWith('检查失败')
-                ? 'mb-4 rounded-ctl border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger'
-                : 'mb-4 rounded-ctl border border-success/40 bg-success/10 px-3 py-2 text-xs text-success'
-            }
-          >
-            {saved}
-          </div>
-        )}
 
         {/* ── 命名模板 ─────────────────────────────────────────────── */}
         {tab === 'appearance' && <AppearanceSection />}
@@ -1096,7 +1145,11 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                           setSubBusyId(s.id)
                           window.omniget
                             .subscribeCheckNow(s.id)
-                            .then((r) => flash(r.added > 0 ? `已新增 ${r.added} 个任务` : '暂无新内容'))
+                            // 第七轮审查 P2：成功反馈改全局 toast——flash 横幅渲染在
+                            // 页面顶部，订阅分区滚动位置深时用户完全无感知
+                            .then((r) =>
+                              toast(r.added > 0 ? `已新增 ${r.added} 个任务` : '暂无新内容', 'success')
+                            )
                             .catch((err) => toastError('检查订阅', err))
                             .finally(() => setSubBusyId(null))
                         }}
@@ -1230,6 +1283,12 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                   size="xs"
                   disabled={scheduleSaving}
                   onClick={() => {
+                    // 第六轮审查：规则加载失败时 rules 是空数组——落盘即清空全部
+                    // 调度计划，写前守卫阻断
+                    if (rulesLoadFailedRef.current) {
+                      toastError('保存调度计划', new Error('计划规则未能加载，保存会清空现有调度，请刷新页面后重试'))
+                      return
+                    }
                     // R4-P3：前端预校验时段格式（主进程 sanitize 会静默丢弃非法行，
                     // 用户无感知；此处显式提示）
                     const TIME_RE = /^([01]?\d|2[0-3]):([0-5]\d)$/
@@ -1605,9 +1664,9 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                         .checkAppUpdate()
                         .then((r) => {
                           setAppUpdate(r)
-                          if (r.error) flash(r.error)
+                          if (r.error) flash(r.error, 'warning')
                         })
-                        .catch(() => flash('检查失败：网络不可达'))
+                        .catch(() => flash('检查失败：网络不可达', 'warning'))
                         .finally(() => setAppUpdateChecking(false))
                     }}
                   >
@@ -1652,8 +1711,13 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
             <div className="mb-4 rounded-panel border border-border p-3">
               <p className="mb-2 text-xs font-medium text-text-1">引擎管理（按需下载）</p>
               <div className="mb-2 space-y-1">
-                {engineList.length === 0 && (
+                {engineList.length === 0 && !engineLoadFailed && (
                   <p className="text-[11px] text-text-3">引擎状态加载中…</p>
+                )}
+                {engineList.length === 0 && engineLoadFailed && (
+                  <p className="text-[11px] text-warning">
+                    引擎状态加载失败——可尝试「立即补齐」，反复出现请到「帮助 → 诊断」查看日志
+                  </p>
                 )}
                 {engineList.map((e) => (
                   <div key={e.name} className="flex items-center gap-2 text-[11px]">
@@ -1716,10 +1780,11 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                     flash(
                       r?.ok
                         ? `yt-dlp 已更新至 ${r.version ?? '最新版'}`
-                        : `更新失败：${r?.error ?? '未知错误'}`
+                        : `更新失败：${r?.error ?? '未知错误'}`,
+                      r?.ok ? 'success' : 'warning'
                     )
                   )
-                  .catch(() => flash('更新失败：无法连接更新服务，请检查网络'))
+                  .catch(() => flash('更新失败：无法连接更新服务，请检查网络', 'warning'))
                   .finally(() => setEngineUpdating(false))
               }}
             >
@@ -1751,8 +1816,8 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                 ：aria2 RPC 仅绑定 127.0.0.1 回环地址；引擎二进制经 TOFU 指纹校验，篡改即拒绝启动。
               </p>
               <p className="text-text-3">
-                <span className="num">v0.1.0</span> · Electron 33 · React 18 · aria2c 1.37 · yt-dlp
-                2026.08.19 · ffmpeg 9.0
+                <span className="num">v<AppVersionLabel /></span> · Electron 33 · React 18 · aria2c
+                1.37 · yt-dlp 2026.08.19 · ffmpeg 9.0
               </p>
             </div>
           </Section>

@@ -1,7 +1,7 @@
 {
   "name": "omniget",
   "productName": "OmniGet",
-  "version": "0.1.0",
+  "version": "0.7.3",
   "description": "一站式跨平台桌面下载器：BT/磁力、视频、音乐、HTTP 与本地工具箱",
   "main": "out/main/index.js",
   "author": "OmniGet",

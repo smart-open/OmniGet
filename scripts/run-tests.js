@@ -23,7 +23,11 @@ function collectTestFiles(dir) {
   return out
 }
 
-const testFiles = collectTestFiles(path.join(root, 'src', 'main'))
+const testFiles = [
+  ...collectTestFiles(path.join(root, 'src', 'main')),
+  ...collectTestFiles(path.join(root, 'src', 'shared')),
+  ...collectTestFiles(path.join(root, 'src', 'renderer', 'src'))
+]
 if (testFiles.length === 0) {
   console.error('未找到测试文件')
   process.exit(1)

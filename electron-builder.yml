@@ -6,15 +6,10 @@ directories:
   output: release
 files:
   - out/**
-extraResources:
-  # 公共资源（跨平台一致内容）；平台化二进制见下方各平台段
-  - from: resources/engines/common
-    to: engines
-    filter:
-      - '**/*'
-  # 统一应用图标（托盘运行时加载）
-  - from: resources/icon.png
-    to: icon.png
+# 回归审查：electron-builder 平台段的 extraResources 对顶层同名键是「整键覆盖」
+# 而非合并——顶层 icon.png 项在三个平台都会被覆盖丢弃（打包态托盘/悬浮窗/窗口
+# 图标全部失效）。因此 icon.png 必须并入每个平台的 extraResources；顶层不再保留
+# （第六轮审查同时移除了对不存在目录 engines/common 的引用）
 protocols:
   - name: magnet
     schemes:
@@ -26,6 +21,9 @@ win:
       to: engines
       filter:
         - '**/*'
+    # 统一应用图标（托盘运行时加载；平台段覆盖顶层，必须在此声明）
+    - from: resources/icon.png
+      to: icon.png
   # CI 产物重命名为：x64-setup.exe / x64_portable.zip / x64_zh-CN.msi（见 workflows/build.yml）
   target:
     - target: nsis
@@ -56,6 +54,9 @@ mac:
       to: engines
       filter:
         - '**/*'
+    # 统一应用图标（托盘运行时加载；平台段覆盖顶层，必须在此声明）
+    - from: resources/icon.png
+      to: icon.png
   # 两种 dmg：Intel(x64) / Apple Silicon(arm64)。universal 无法捆绑平台化 sidecar，不产出
   target:
     - target: dmg
@@ -82,6 +83,9 @@ linux:
       to: engines
       filter:
         - '**/*'
+    # 统一应用图标（托盘运行时加载；平台段覆盖顶层，必须在此声明）
+    - from: resources/icon.png
+      to: icon.png
   target:
     - AppImage
     - deb

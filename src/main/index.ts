@@ -197,7 +197,8 @@ async function bootstrap(): Promise<void> {
       }
     })
     .catch((err) => log.warn('引擎自动补齐链路异常', { error: String(err) }))
-  // ffprobe（可选工具，非 SidecarBinary）：缺失仅 warning——完整性探测会静默降级
+  // ffprobe（可选工具，已在 TOFU 名单内但缺失不阻塞启动）：缺失仅 warning——
+  // 完整性探测会静默降级（TOFU 闸门在各 spawn 点生效，首启此处只做在位提示）
   try {
     const { toolPath } = await import('./orchestrator/binaries')
     const { access, constants } = await import('fs/promises')
@@ -278,10 +279,15 @@ async function bootstrap(): Promise<void> {
   await manager.recoverOnStartup()
   manager.startPolling()
 
-  // aria2 缺席（T0 阶段允许）时仅告警，不阻塞应用启动
+  // aria2 缺席（T0 阶段允许）时仅告警，不阻塞应用启动。
+  // 第七轮审查 P2：aria2 起不来（二进制缺失/损坏）时恢复泵必须仍然恢复
+  // ytdlp/nm3u8 的排队任务——它们不依赖 aria2，此前绑死 onOnline 会永久卡排队
   void supervisor.start().catch((err) => {
     log.error(`aria2 supervisor start failed: ${String(err)}`)
     manager.broadcastHealth(false, 'aria2 引擎不可用')
+    void manager.recoverEngineTasks({ engines: ['ytdlp', 'nm3u8'] }).catch((e) =>
+      log.warn('non-aria2 task recovery failed', e)
+    )
   })
 
   // M3：yt-dlp 健康探测（--version）
@@ -331,18 +337,30 @@ async function bootstrap(): Promise<void> {
 
   // M1-12 系统集成：托盘 / 关窗最小化 / 剪贴板监听（按设置启停）
   setSpeedProvider(() => manager.getAggregateSpeeds())
+  // 回归审查 P3：托盘批量操作补 catch——aria2 离线窗口点击「全部暂停/继续」
+  // 此前会以 unhandledRejection 收场（「全部继续」恒可点后暴露面变大）
   setBulkControlHandlers(
-    () => adapter.pauseAll(),
-    () => adapter.resumeAll()
+    () => adapter.pauseAll().catch((err) => log.warn('tray pauseAll failed', err)),
+    () => adapter.resumeAll().catch((err) => log.warn('tray resumeAll failed', err))
   )
-  app.whenReady().then(() => {
-    const win = getMainWindow()
-    if (win) {
-      createTray()
-      interceptCloseToTray(win)
-      if (clipboardWatchEnabled()) startClipboardWatcher(() => {})
-    }
-  })
+  app
+    .whenReady()
+    .then(() => {
+      const win = getMainWindow()
+      if (win) {
+        // 第七轮审查 P2：createTray 与关窗拦截解耦——Linux 无 AppIndicator 扩展
+        // 的桌面环境 new Tray() 会 throw，此前同一回调内 interceptCloseToTray
+        // 未注册 → 关窗后无托盘无窗口无交互入口的僵尸进程
+        try {
+          createTray()
+        } catch (err) {
+          log.error('tray creation failed (关窗最小化将退化为直接关闭)', err)
+        }
+        interceptCloseToTray(win)
+        if (clipboardWatchEnabled()) startClipboardWatcher(() => {})
+      }
+    })
+    .catch((err) => log.error('whenReady handler failed', err))
 
   app.on('window-all-closed', () => {
     // 关窗已最小化到托盘（interceptCloseToTray），此处仅托盘退出时触发

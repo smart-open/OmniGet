@@ -92,7 +92,7 @@ function fmtSpeed(n: number): string {
 
 function buildTrayMenu(): Electron.Menu {
   const s = speedProvider()
-  const clipboardWatch = getSetting('ui.clipboardWatch') !== 'false'
+  const clipboardWatch = clipboardWatchEnabled()
   const loginItem = app.getLoginItemSettings?.().openAtLogin ?? false
   // 跨平台兼容（P2）：Linux AppIndicator 扩展无 click 事件（托盘左键失效），
   // 菜单是唯一交互面——「显示主界面」提升为首项，速度/任务统计作为禁用行跟随其后
@@ -150,7 +150,10 @@ function buildTrayMenu(): Electron.Menu {
     },
     {
       label: '全部继续',
-      enabled: s.queued > 0,
+      // 第七轮审查 P2：启用条件此前写反——resumeAll 语义对象是 paused 任务，
+      // 而聚合速度只统计 running/queued；全部暂停后（queued=0）按钮反而禁用，
+      // 用户无法一键恢复。改为恒可点（无 paused 任务时 unpauseAll 是无害 no-op）
+      enabled: true,
       click: () => void resumeAllHandler()
     },
     { type: 'separator' },
@@ -233,7 +236,13 @@ export function markQuitting(): void {
 // ── 剪贴板监听（§4.6：与协议唤起/拖拽共用 30s 去重窗口）──────────────
 
 export function clipboardWatchEnabled(): boolean {
-  return getSetting('ui.clipboardWatch') !== 'false' // 默认开（向导口径一致）
+  // 第七轮审查 P2：读取必须兼容两种落库形态——向导经 ipc settingsSet 写入的是
+  // JSON 编码串（'"false"' 带引号），托盘菜单经 setSetting 写裸文本（'false'）。
+  // 原样 !== 'false' 比对会把带引号的 '"false"' 当开 → 用户在向导里关不掉剪贴板监听
+  const raw = getSetting('ui.clipboardWatch')
+  if (raw === null) return true // 默认开（向导口径一致）
+  const v = raw === '"true"' ? 'true' : raw === '"false"' ? 'false' : raw
+  return v !== 'false'
 }
 
 export function startClipboardWatcher(onSource: (source: string) => void): void {

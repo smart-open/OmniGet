@@ -9,14 +9,18 @@ import { useTasks, wireTaskEvents } from '../stores/tasks'
 import { applyTheme, parseStoredTheme } from '../theme'
 import { SpeedSparkline } from '../components/ui'
 import { formatBytes } from '../features/new-task/fileTree'
+import { initLocale, useI18n } from '../i18n'
 
 export default function MiniWidget() {
   const speed = useTasks((s) => s.globalSpeedBps)
   const history = useTasks((s) => s.speedHistory)
   const counts = useTasks((s) => s.counts)
+  // 第七轮：mini 悬浮窗接入 i18n（此前完全未接，用户切 en 后悬浮窗仍中文）
+  const t = useI18n((s) => s.t)
 
   // 与主窗同源的事件流：速度曲线 / 计数 / 引擎健康
   useEffect(() => wireTaskEvents(), [])
+  useEffect(() => initLocale(), [])
 
   // 主题跟随全局设置（悬浮窗独立加载 bundle，经 IPC 桥接跟随主窗换肤）
   useEffect(() => {
@@ -47,7 +51,7 @@ export default function MiniWidget() {
           {formatBytes(speed)}/s
         </span>
         <span className="num text-[10px] text-text-3">
-          运行 {counts.running} · 排队 {counts.queued}
+          {t('status.running')} {counts.running} · {t('status.queued')} {counts.queued}
         </span>
       </div>
       {/* 迷你速度曲线（与主窗顶栏同数据源、同组件） */}
@@ -56,8 +60,8 @@ export default function MiniWidget() {
       </div>
       <button
         onClick={() => window.omniget.windowClose()}
-        aria-label="关闭悬浮窗"
-        title="关闭悬浮窗"
+        aria-label={t('common.close')}
+        title={t('common.close')}
         className="titlebar-no-drag press flex h-6 w-6 shrink-0 items-center justify-center rounded text-text-3 transition-colors hover:bg-surface-2 hover:text-text-1"
       >
         <X size={12} weight="bold" />

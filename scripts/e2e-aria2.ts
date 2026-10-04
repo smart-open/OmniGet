@@ -4,7 +4,6 @@
 // 3. 多连接下载 → 中途 pause → resume → completed
 // 4. 校验落盘文件体积与 HEAD content-length 一致
 
-import { spawn } from 'child_process'
 import { stat } from 'fs/promises'
 import { join } from 'path'
 import { Aria2Supervisor } from '../src/main/orchestrator/aria2'

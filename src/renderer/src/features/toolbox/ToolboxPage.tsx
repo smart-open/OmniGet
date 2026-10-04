@@ -8,7 +8,9 @@ import {
   ArrowsIn,
   ArrowsLeftRight,
   Camera,
+  DownloadSimple,
   Eye,
+  FileVideo,
   Fingerprint,
   FolderOpen,
   FilmStrip,
@@ -18,10 +20,12 @@ import {
   Image as ImageIcon,
   Magnet,
   Microphone,
+  MusicNotes,
   Rows,
   SpeakerHigh,
   SpeakerSlash,
   SplitHorizontal,
+  Stack,
   Subtitles,
   TagSimple,
   TextAa,
@@ -210,6 +214,10 @@ const TOOL_ICONS: Record<string, Icon> = {
   'torrent-create': Magnet,
   'torrent-magnet': Magnet,
   checksum: Fingerprint,
+  'track-extract': Stack,
+  'subtitle-mux': FileVideo,
+  'musicbrainz-tag': MusicNotes,
+  'subtitle-fetch': DownloadSimple,
   'stem-demucs': Microphone
 }
 
@@ -270,8 +278,8 @@ export function ToolboxPage() {
           }
         ]
       })
-      if (e.status === 'completed') toast('处理完成', 'success')
-      if (e.status === 'failed') toast(`处理失败：${e.message ?? ''}`, 'warning')
+      // 第六轮审查：completed/failed toast 上收 App 层全局监听——页级监听随卸载
+      // 解除，切页签后终态无感知（此处只维护本页任务列表）
     })
     return off
   }, [])
@@ -571,6 +579,34 @@ export function ToolboxPage() {
                   </>
                 )}
               </div>
+
+              {/* 回归审查：demucs TOFU 指纹重置出口——指纹键渲染层不可写（防被攻破
+                  的渲染层轮换二进制），合法升级经此显式重置（二次确认） */}
+              {def.id === 'stem-demucs' && (
+                <div className="mt-2 flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => {
+                      void confirmAction({
+                        title: '重置 demucs 二进制信任',
+                        message:
+                          '将删除首次使用时登记的指纹，下次执行会重新登记。仅在更换了合法的 demucs 二进制后使用——若非你本人操作，请勿重置。',
+                        confirmLabel: '重置信任'
+                      }).then((ok) => {
+                        if (!ok) return
+                        window.omniget
+                          .resetDemucsFingerprint()
+                          .then(() => toast('已重置 demucs 二进制信任（下次执行将重新登记指纹）', 'success'))
+                          .catch((err) => toastError('重置信任', err))
+                      })
+                    }}
+                  >
+                    重置二进制信任
+                  </Button>
+                  <span className="text-[10px] text-text-3">仅在更换了合法的 demucs 二进制后使用</span>
+                </div>
+              )}
 
               {/* T4：附加文件（字幕等） */}
               {def.extraFile && (

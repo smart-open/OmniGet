@@ -463,6 +463,8 @@ export interface OmniGetBridge {
   toolCreate(input: ToolCreateInput): Promise<{ taskId: string }>
   /** 工具产物定位：在系统文件管理器中高亮该文件（失败经全局通知反馈） */
   revealToolOutput(output: string): Promise<void>
+  /** 回归审查：demucs 二进制合法升级后重置 TOFU 指纹（渲染层无法直写该设置键） */
+  resetDemucsFingerprint(): Promise<void>
   // settings
   settingsGet(key: string): Promise<unknown>
   settingsSet(key: string, value: unknown): Promise<void>
@@ -503,6 +505,8 @@ export interface OmniGetBridge {
   filePath(file: File): string
   /** 用户默认下载目录（设置 download.saveDir 优先，回退系统 Downloads） */
   defaultSaveDir(): Promise<string>
+  /** 应用版本号（package.json version，主进程 app.getVersion）——「说明」页展示用 */
+  appVersion(): Promise<string>
   /** 系统文件夹选择对话框（取消返回 null） */
   pickFolder(): Promise<string | null>
   /** R4 续（backlog #4）：预设导出——保存对话框 + 主进程写盘（渲染层无 Node 能力）；取消返回 null */
@@ -553,6 +557,8 @@ export const IPC_CHANNELS = {
   toolCreate: 'tool:create',
   /** 工具产物定位：系统文件管理器高亮产物（「打开结果所在目录」） */
   toolReveal: 'tool:reveal',
+  /** 回归审查：demucs 二进制合法升级后重置 TOFU 指纹 */
+  toolDemucsReset: 'tool:demucsReset',
   /** Backlog：平台适配健康面板 */
   healthGet: 'health:get',
   /** Backlog：平台适配脚本注册表 */

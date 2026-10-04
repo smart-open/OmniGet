@@ -12,6 +12,18 @@ let loadSeq = 0
 /** M10：未知任务事件触发的防抖重载句柄 */
 let unknownReloadTimer: ReturnType<typeof setTimeout> | null = null
 
+/** 第六轮审查：已重载过仍未知的 taskId（按过滤器记忆）——排除型视图上运行中任务
+ * 永不匹配过滤器，无记忆会造成 400ms 无限重载；换视图 load() 时清空 */
+const unknownReloadSeen = new Set<string>()
+
+/** 第七轮：上一次 load 的过滤器——区分「用户换视图」与「未知任务自动重载」，
+ * 记忆集合只在换视图时清空（自动重载清空会让无限重载修复失效） */
+let lastLoadFilter: string | null = null
+
+/** 回归审查 P2：真实状态跃迁标记（含 paused/queued→running）——running 进度
+ * 批次不再逐帧触发 counts 全表聚合，但跃迁仍需刷新角标 */
+let countsDirty = false
+
 interface TasksState {
   tasks: Map<string, Task>
   engines: EngineHealth[]
@@ -54,6 +66,9 @@ export const useTasks = create<TasksState>()((set, get) => ({
 
   load: async (filter) => {
     const seq = ++loadSeq
+    // 第七轮修复：unknownReloadSeen 只在「换视图」时清空——此前在每次 load 成功后
+    // 清空，而排除型视图上运行中任务永不匹配过滤器 → 自动重载自身清掉记忆后，
+    // 该任务的下一批进度事件再次触发重载，400ms 节奏的无限重载并未真正闭环
     set({ loading: get().tasks.size === 0, loadError: null })
     try {
       const [list, rawPinned] = await Promise.all([
@@ -61,6 +76,12 @@ export const useTasks = create<TasksState>()((set, get) => ({
         window.omniget.settingsGet('ui.pinnedTasks') as Promise<string[] | null>
       ])
       if (seq !== loadSeq) return // 过期响应：已被更新的 load 取代
+      // 回归审查：viewChanged 与 lastLoadFilter 更新必须在「成功且非过期」分支——
+      // 放在 await 前会让失败的 load 污染 lastLoadFilter（自动重载误指向旧视图、
+      // 记忆被异常路径误清）；「加载成功」分支同时覆盖持续失败不反复放行重载
+      const viewChanged = lastLoadFilter !== filter
+      lastLoadFilter = filter
+      if (viewChanged) unknownReloadSeen.clear()
       const map = new Map<string, Task>()
       for (const t of list) map.set(t.id, t)
       set({
@@ -128,6 +149,9 @@ export const useTasks = create<TasksState>()((set, get) => ({
         unknownTask = true
         continue
       }
+      // 回归审查 P2：running 事件也可能是跃迁（paused/queued→running，恢复任务）——
+      // 同样改变跨视图计数，标脏后由 wireTaskEvents 统一刷新
+      if (e.status !== undefined && e.status !== prev.status) countsDirty = true
       tasks.set(e.taskId, {
         ...prev,
         status: e.status ?? prev.status,
@@ -146,13 +170,27 @@ export const useTasks = create<TasksState>()((set, get) => ({
         delete stageById[e.taskId]
       }
     }
-    // 未知任务：防抖重载当前视图（把新任务/被删任务同步进列表）
+    // 未知任务：防抖重载当前视图（把新任务/被删任务同步进列表）。
+    // 第六轮审查：全局事件流含所有任务，停在「处理完成/失败/回收站」等排除型视图
+    // 时，后台运行中任务永远不匹配过滤器 → 每 400ms 无限重载（IPC+全表查询+全量
+    // 重渲染）。对已重载过仍未知（本视图合法不显示）的 taskId 记忆，不再重发；
+    // load() 换视图时清空记忆
     if (unknownTask) {
-      if (unknownReloadTimer) clearTimeout(unknownReloadTimer)
-      unknownReloadTimer = setTimeout(() => {
-        unknownReloadTimer = null
-        void useTasks.getState().load(useTasks.getState().loadedFilter)
-      }, 400)
+      let needReload = false
+      for (const e of events) {
+        if (e.removed || get().tasks.has(e.taskId)) continue
+        const seenKey = `${useTasks.getState().loadedFilter ?? ''}:${e.taskId}`
+        if (unknownReloadSeen.has(seenKey)) continue
+        unknownReloadSeen.add(seenKey)
+        needReload = true
+      }
+      if (needReload) {
+        if (unknownReloadTimer) clearTimeout(unknownReloadTimer)
+        unknownReloadTimer = setTimeout(() => {
+          unknownReloadTimer = null
+          void useTasks.getState().load(useTasks.getState().loadedFilter)
+        }, 400)
+      }
     }
     for (const t of tasks.values()) {
       if (t.status === 'running') speed += t.speedBps
@@ -171,8 +209,13 @@ export const useTasks = create<TasksState>()((set, get) => ({
 export function wireTaskEvents(): () => void {
   const offTasks = window.omniget.onTaskEvents((events) => {
     useTasks.getState().applyEvents(events)
-    // 状态变化影响跨视图计数（完成/失败等）→ 随事件流刷新角标
-    if (events.some((e) => e.status !== undefined)) void useTasks.getState().refreshCounts()
+    // 状态变化影响跨视图计数（完成/失败等）→ 随事件流刷新角标。
+    // 第七轮审查 P3：running 进度批次恒带 status:'running'，逐批全表聚合 IPC
+    // 是纯浪费——只对真实跃迁（非 running 事件，或 applyEvents 标记的跃迁）刷新
+    if (events.some((e) => e.status !== undefined && e.status !== 'running') || countsDirty) {
+      countsDirty = false
+      void useTasks.getState().refreshCounts()
+    }
   })
   const offEngines = window.omniget.onEngineHealth((health) => {
     useTasks.getState().setEngines(health)

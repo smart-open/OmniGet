@@ -7,7 +7,7 @@
 import { getDb, getSettingParsed } from './db'
 import { broadcastNotices } from './ipc'
 import { createLogger } from './logger'
-import { addArchiveKey, isArchived } from './task/archive'
+import { addArchiveKey, archiveKey, isArchiveFused, isArchived } from './task/archive'
 import { getYtDlpSupervisor } from './orchestrator/ytdlp'
 import type { Subscription, SubscriptionAddInput } from '@shared/types'
 import { uuidv7 } from './task/id'
@@ -67,9 +67,16 @@ export function addSubscription(input: SubscriptionAddInput): Subscription {
   const url = String(input.url ?? '').trim()
   if (!name) throw new Error('订阅名称不能为空')
   if (!/^https?:\/\//i.test(url)) throw new Error('订阅地址必须以 http:// 或 https:// 开头')
-  // 审查修复：同一 URL 可重复添加——列表出现重复订阅、检查与通知翻倍
-  const dup = listSubscriptions().find((s) => s.url === url)
+  // 审查修复：同一 URL 可重复添加——列表出现重复订阅、检查与通知翻倍。
+  // 第六轮审查：精确字符串比对可被 ?si= 等追踪参数绕过——比对前做 archiveKey
+  // 同源归一化（youtu.be 展开/追踪参数/尾斜杠/协议归一）
+  const norm = archiveKey(url)
+  const all = listSubscriptions()
+  const dup = all.find((s) => archiveKey(s.url) === norm)
   if (dup) throw new Error(`该地址已订阅为「${dup.name}」`)
+  // 第七轮审查 P3：数量上限（对齐 scheduler 64 条口径）——tick 串行 flat-parse
+  // 全部到期源，无上限可被塞爆后占满 yt-dlp supervisor，饿死正常任务解析
+  if (all.length >= 64) throw new Error('订阅数量已达上限（64），请先清理不再需要的订阅')
   const sub: Subscription = {
     id: uuidv7(),
     name,
@@ -124,7 +131,9 @@ export async function checkSubscription(
   for (const entry of entries) {
     if (added >= MAX_ENTRIES_PER_CHECK) break
     const url = entry.url as string
-    if (isArchived(url)) continue
+    // 第六轮审查：连续失败熔断——永久失败条目（下架/地区受限）此前每周期
+    // 重建→失败→回滚无限循环，达阈值后跳过直至某次成功清零
+    if (isArchived(url) || isArchiveFused(url)) continue
     attempted++
     try {
       const res = (await host.createTask({ source: url, threads: 16, saveDir })) as {
@@ -133,12 +142,13 @@ export async function checkSubscription(
         error?: string
       }
       if (res.kind === 'failed') throw new Error(res.error ?? '任务创建失败')
+      // 入队即登记档案（而非等确认/完成）——确认失败（任务被用户删除等）时
+      // 下个周期不再重复建 awaiting 任务；后续失败由 manager 侧回滚+熔断兜底
+      addArchiveKey(url)
       if (res.kind === 'awaiting' && res.taskId) {
         // 视频任务默认参数直通确认（复用 awaiting→queued 管线）
         await host.confirmSelection({ taskId: res.taskId, threads: 16 })
       }
-      // 入队即登记档案（而非等完成）——防止下次检查在任务完成前重复入队
-      addArchiveKey(url)
       added++
     } catch (err) {
       // 单条目失败不阻断其余条目

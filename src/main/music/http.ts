@@ -22,7 +22,9 @@ const RETRY_BACKOFF_MS = 1000
 // D4：镜像域清单（原 engine.py VERIFY_DISABLED_HOSTS + 修正：镜像实际使用
 // haitangw.net 域，原清单仅 haitangw.com 后缀匹配永不命中，属 Python 版笔误）
 const VERIFY_DISABLED_HOSTS = [
-  'music.126.net', // 网易云音频 CDN 镜像
+  // 第六轮审查：移除 music.126.net——网易官方音频 CDN（引擎从不主动访问该域取
+  // 直链，四镜像 API 均不在清单内），对其关闭证书校验等于接受官方域 MITM，
+  // 疑似从 Python 版照搬的过度豁免
   'cenguigui.cn',
   'rrvenn.cn',
   'toubiec.cn',
@@ -216,7 +218,16 @@ export async function fetchJson<T = unknown>(
         dispatcher: dispatcherFor(url)
       })
       // M5 修复：响应体大小上限——恶意/被投毒镜像可返回数百 MB JSON 撑爆主进程内存
-      if (res.ok) return (await readBodyCapped(res, 8 * 1024 * 1024, url).then((s) => JSON.parse(s))) as T
+      if (res.ok) {
+        // 第六轮审查：200 但正文非 JSON（HTML 错误页/截断体）或超限属协议层错误，
+        // 重试 3 次只会浪费额度——按不可重试处理（超时仍属网络层，保留重试）
+        const text = await readBodyCapped(res, 8 * 1024 * 1024, url)
+        try {
+          return JSON.parse(text) as T
+        } catch {
+          throw new NonRetryableError('接口返回的不是有效 JSON（可能为错误页或被劫持）')
+        }
+      }
       if (!RETRY_STATUS.has(res.status)) {
         // 审查修复：4xx 路径同样消费响应体（防 undici socket 挂起，与 5xx 路径对称）
         await res.body?.cancel().catch(() => {})
@@ -287,11 +298,18 @@ export async function postForm<T = unknown>(
 /** GET 文本（歌词等） */
 export async function getText(url: string, headers?: Record<string, string>, opts: HttpOpts = {}): Promise<string> {
   url = rewriteUrl(url)
+  // 第六轮审查：R5 的 Accept-Encoding 修复只落在 fetchJson/fetchToFile/openStream，
+  // getText 漏网——咪咕歌词/汽水分享页返回 brotli 时 undici 不解压，正文变
+  // 二进制（歌词降占位、_ROUTER_DATA 解析静默失败），与 R5 同型补齐
+  const reqHeaders = new Headers(headers)
+  if (!reqHeaders.has('accept-encoding')) {
+    reqHeaders.set('accept-encoding', 'gzip, deflate')
+  }
   let res: Awaited<ReturnType<typeof undiciFetch>>
   try {
     res = await undiciFetch(url, {
       method: 'GET',
-      headers,
+      headers: reqHeaders,
       signal: mergeSignal(opts.signal, opts.timeoutMs ?? 15_000),
       dispatcher: dispatcherFor(url)
     })
@@ -321,7 +339,11 @@ async function readBodyCapped(
     total += chunk.byteLength
     if (total > capBytes) {
       await res.body?.cancel().catch(() => {})
-      throw new Error(`响应体超过 ${Math.round(capBytes / 1024 / 1024)}MB 上限，疑似异常数据（${hostOf(url)}）`)
+      // 第七轮审查 P3：超限属协议层错误必须不可重试——此前抛普通 Error 会
+      // 被重试链再拉满 2 次全量响应体（~24MB + 退避）才失败
+      throw new NonRetryableError(
+        `响应体超过 ${Math.round(capBytes / 1024 / 1024)}MB 上限，疑似异常数据（${hostOf(url)}）`
+      )
     }
     parts.push(decoder.decode(chunk, { stream: true }))
   }
@@ -386,13 +408,38 @@ export async function fetchToFile(
         res.body?.cancel().catch(() => {})
         ws.destroy()
       }
+      // 第七轮修复（流停滞检测）：body 不限时的副作用是黑洞镜像 TCP 可达但
+      // 停止发数据时任务无限挂起——45s 无字节进度判定断流（走 reject → catch
+      // 清理 part → 平台回退链继续下一个镜像/平台）
+      const IDLE_MS = 45_000
+      let lastData = Date.now()
+      let stallTimer: ReturnType<typeof setInterval> | null = null
+      let settled = false
+      const finish = (fn: () => void): void => {
+        if (settled) return
+        settled = true
+        if (stallTimer) clearInterval(stallTimer)
+        fn()
+      }
+      stallTimer = setInterval(() => {
+        if (Date.now() - lastData > IDLE_MS) {
+          cleanup()
+          finish(() =>
+            reject(new Error(`下载停滞（45s 无进度，镜像可能已断流）：${hostOf(url)}`))
+          )
+        }
+      }, 5_000)
+      stallTimer.unref?.()
       nodeStream.on('data', (chunk: Buffer) => {
+        lastData = Date.now()
         total += chunk.length
         // 审查修复：总字节上限——被投毒/异常镜像可无限流灌满磁盘（JSON 链路有
         // 8MB cap，文件链路此前刻意遗漏）；超限走 reject → catch 统一清理 part
         if (total > maxBytes) {
           cleanup()
-          reject(new Error(`下载超过 ${Math.round(maxBytes / 1024 / 1024)}MB 上限，疑似异常数据（${hostOf(url)}）`))
+          finish(() =>
+            reject(new Error(`下载超过 ${Math.round(maxBytes / 1024 / 1024)}MB 上限，疑似异常数据（${hostOf(url)}）`))
+          )
           return
         }
         if (!ws.write(chunk)) nodeStream.pause()
@@ -401,13 +448,21 @@ export async function fetchToFile(
       ws.on('drain', () => nodeStream.resume())
       ws.on('error', (e) => {
         cleanup()
-        reject(e)
+        finish(() => reject(e))
       })
       nodeStream.on('error', (e) => {
         cleanup()
-        reject(e)
+        finish(() => reject(e))
       })
-      nodeStream.on('end', () => ws.end(() => resolve()))
+      nodeStream.on('end', () => {
+        // 回归审查 P3：end 即停表——ws.end 回调（大缓冲慢盘 flush）可能超过 45s，
+        // 停表延迟会把已完整传输的下载误判为停滞（语义安全但整段重下）
+        if (stallTimer) {
+          clearInterval(stallTimer)
+          stallTimer = null
+        }
+        ws.end(() => finish(resolve))
+      })
     })
     if (total < minBytes) {
       await unlink(tmp).catch(() => {})

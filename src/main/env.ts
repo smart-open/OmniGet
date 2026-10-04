@@ -108,7 +108,9 @@ export function userDataDir(): string {
 
   const target = join(runtimeBase(), 'data')
   try {
-    mkdirSync(target, { recursive: true })
+    // 0o700：数据目录含 db/bridge token/指纹库等敏感资产——POSIX 下不共享可读
+    //（Windows ACL 由系统默认，mode 参数无副作用）。已存在目录不受影响
+    mkdirSync(target, { recursive: true, mode: 0o700 })
     // 写入探测（目录存在但 ACL 只读时 mkdir 不报错）
     const probe = join(target, '.write-probe')
     writeFileSync(probe, '')
@@ -127,7 +129,9 @@ export function userDataDir(): string {
       // ignore
     }
     try {
-      mkdirSync(fallback, { recursive: true })
+      // 0o700：兜底目录（含 db/bridge token）不应共享可读——仅 userData 不可用
+      // 时才会落到 tmpdir
+      mkdirSync(fallback, { recursive: true, mode: 0o700 })
     } catch (err) {
       // R4-P3：主目录与回退目录均不可写的根因必须留痕（后续 getDb/logger 全线
       // 失败只会给出表层错误）

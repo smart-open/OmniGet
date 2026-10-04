@@ -2,12 +2,12 @@
 // type='tool' 任务走统一队列/状态机；独立信号量（默认 2 并发，不计入下载并发）
 // 产物默认落 源目录/工具箱输出/<工具名>/
 
-import { type ChildProcess } from 'child_process'
+import { execFileSync, type ChildProcess } from 'child_process'
 import { mkdir, rm, stat, writeFile } from 'fs/promises'
 import { basename, dirname, extname, join } from 'path'
 import type { ToolCreateInput, ToolEvent } from '@shared/types'
-import { sanitizeFilename } from '@shared/sanitize'
 import { createLogger } from './logger'
+import { getSettingParsed, setSetting } from './db'
 import { toolPath, ensureVerified } from './orchestrator/binaries'
 import { spawnTreeAware, terminateTree } from './orchestrator/proc'
 import { probeStreams } from './toolbox/ffprobe'
@@ -15,6 +15,9 @@ import { planTrackExtraction } from './toolbox/track-plan'
 import { lookupRecordingTags, parseNameQuery } from './toolbox/musicbrainz'
 
 const log = createLogger('toolbox')
+
+/** 第六轮审查：ffmpeg/demucs 兜底超时（长任务合法耗时可达数小时，取宽限值） */
+const TOOL_TIMEOUT_MS = 6 * 60 * 60 * 1000
 
 const MAX_TOOL_CONCURRENT = 2
 
@@ -61,6 +64,29 @@ export interface ToolDef {
 
 function baseName(input: string): string {
   return basename(input).replace(/\.\w+$/, '')
+}
+
+/** 第七轮：在 PATH 上解析可执行文件完整路径（win 用 where / POSIX 用 which）。
+ * 找不到或执行失败返回 null——调用方保持原样回退 */
+function resolveOnPath(name: string): string | null {
+  try {
+    const cmd = process.platform === 'win32' ? 'where' : 'which'
+    const out = execFileSync(cmd, [name], {
+      encoding: 'utf8',
+      timeout: 5_000,
+      windowsHide: true
+    })
+    const lines = out
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean)
+    // 回归审查（疑似）：Windows 下 where 首个命中可能是 Microsoft Store 执行别名
+    // stub（0 字节 reparse，pip 实际装的 Python Scripts 排在后面）——优先取非 stub 命中
+    const pick = lines.find((l) => !/WindowsApps/i.test(l)) ?? lines[0]
+    return pick || null
+  } catch {
+    return null
+  }
 }
 
 /** 常见文件系统错误中文化（§4.1：用户可见文案必须中文 + 出口动作） */
@@ -119,7 +145,11 @@ export const TOOL_DEFS: ToolDef[] = [
       { key: 'bitrate', label: '码率', type: 'select', options: ['128k', '192k', '320k'], default: '320k' }
     ],
     build: (input, outDir, params) => {
-      const fmt = String(params.format ?? 'mp3')
+      // 第六轮审查：format 必须白名单——subtitle-convert/image-convert 同型已修，
+      // 唯此处漏网：任意字符串原样拼进输出文件名可注入 ../ 路径穿越（P2）
+      const fmt = ['mp3', 'm4a', 'opus', 'flac', 'wav', 'mp4'].includes(String(params.format))
+        ? String(params.format)
+        : 'mp3'
       const audio = ['mp3', 'aac', 'm4a', 'opus', 'flac', 'wav'].includes(fmt)
       // 数值白名单：bitrate 只允许预置档位（防选项注入）；flac/wav 无损不吃码率参数
       const bitrate = ['128k', '192k', '320k'].includes(String(params.bitrate))
@@ -162,8 +192,8 @@ export const TOOL_DEFS: ToolDef[] = [
             : ['.flac', '.wav', '.ogg', '.opus'].includes(ext)
               ? ext
               : '.m4a'
-      // 产物名带起始时间（0.1s 精度）：多区域批量提交时互不覆盖（Math.round 会碰撞）
-      const out = join(outDir, `${baseName(input)}_trim_${from.toFixed(1)}s${outExt}`)
+      // 产物名带起始时间（0.01s 精度）：多区域批量提交时互不覆盖（0.1s 粒度仍可碰撞）
+      const out = join(outDir, `${baseName(input)}_trim_${from.toFixed(2)}s${outExt}`)
       return {
         args: ['-y', '-ss', String(from), '-t', String(duration), '-i', input, '-vn', '-c', 'copy', out],
         output: out
@@ -185,7 +215,7 @@ export const TOOL_DEFS: ToolDef[] = [
       // 容器兼容：mp4 系输入直拷 mp4；webm/mkv 等编码 mp4 容器装不下 → matroska
       const ext = extname(input).toLowerCase()
       const outExt = ['.mp4', '.m4v', '.mov'].includes(ext) ? '.mp4' : '.mkv'
-      const out = join(outDir, `${baseName(input)}_clip_${from.toFixed(1)}s${outExt}`)
+      const out = join(outDir, `${baseName(input)}_clip_${from.toFixed(2)}s${outExt}`)
       return {
         args: ['-y', '-ss', String(from), '-t', String(duration), '-i', input, '-c', 'copy', out],
         output: out
@@ -200,8 +230,10 @@ export const TOOL_DEFS: ToolDef[] = [
     fields: [],
     build: (input, outDir) => {
       const out = join(outDir, `${baseName(input)}_loudnorm.mp3`)
+      // -vn：渲染层 accept 含 video/*，视频源输入时 ffmpeg 默认流选择会把视频流
+      // 塞进 mp3 容器 → Automatic encoder selection failed 必失败（对齐 trim 口径）
       return {
-        args: ['-y', '-i', input, '-af', 'loudnorm=I=-14:TP=-1.5:LRA=11', '-b:a', '320k', out],
+        args: ['-y', '-i', input, '-af', 'loudnorm=I=-14:TP=-1.5:LRA=11', '-vn', '-b:a', '320k', out],
         output: out
       }
     }
@@ -236,7 +268,7 @@ export const TOOL_DEFS: ToolDef[] = [
   {
     // M4-14 L1：中心声道消除（立体声有效；UI 标注"轻量模式"）
     id: 'voice-sep',
-    label: '人声/伴奏分离（轻量）',
+    label: '人声/伴奏分离',
     category: 'audio',
     desc: '中心声道消除法，产出人声/伴奏两轨。仅立体声有效，单声道无效果；实时率约 20 倍，零模型零 GPU',
     fields: [],
@@ -246,8 +278,9 @@ export const TOOL_DEFS: ToolDef[] = [
       return {
         args: [
           '-y', '-i', input,
-          '-af', 'pan=stereo|c0=c0-c1|c1=c1-c0', '-b:a', '320k', inst,
-          '-af', 'pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c1+0.5*c0', '-b:a', '320k', vocal
+          // -vn：视频源输入时防止频流被默认选择进 mp3 输出（两个输出各自需要）
+          '-af', 'pan=stereo|c0=c0-c1|c1=c1-c0', '-vn', '-b:a', '320k', inst,
+          '-af', 'pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c1+0.5*c0', '-vn', '-b:a', '320k', vocal
         ],
         output: inst,
         extraOutputs: [vocal]
@@ -258,11 +291,15 @@ export const TOOL_DEFS: ToolDef[] = [
     id: 'compress',
     label: '视频压缩',
     category: 'video',
-    desc: 'H.264 CRF 三档预设（高画质/均衡/高压缩），音轨直拷不重编码',
+    desc: 'H.264 CRF 三档预设（高画质/均衡/高压缩），音轨直拷不重编码；输出容器跟随源文件',
     fields: [{ key: 'preset', label: '档位', type: 'select', options: ['high', 'balanced', 'small'], default: 'balanced' }],
     build: (input, outDir, params) => {
       const crf = { high: '18', balanced: '23', small: '30' }[String(params.preset ?? 'balanced')] ?? '23'
-      const out = join(outDir, `${baseName(input)}_compressed.mp4`)
+      // 第七轮审查 P2：容器兼容——mp4 系源直拷 mp4；webm/mkv（vorbis/opus）源
+      // 音轨直拷装不进 mp4（Could not find tag for codec），跟随 matroska 容器
+      const ext = extname(input).toLowerCase()
+      const outExt = ['.mp4', '.m4v', '.mov'].includes(ext) ? '.mp4' : '.mkv'
+      const out = join(outDir, `${baseName(input)}_compressed${outExt}`)
       return {
         args: ['-y', '-i', input, '-c:v', 'libx264', '-crf', crf, '-preset', 'medium', '-c:a', 'copy', out],
         output: out
@@ -273,7 +310,7 @@ export const TOOL_DEFS: ToolDef[] = [
     id: 'gif',
     label: 'GIF 截取',
     category: 'video',
-    desc: '视频片段转 GIF/WebP，调色板优化防色带，帧率与宽度可选',
+    desc: '视频片段转 GIF，调色板优化防色带，帧率与宽度可选',
     fields: [
       { key: 'from', label: '起始(秒)', type: 'text', default: '0' },
       { key: 'duration', label: '时长(秒)', type: 'text', default: '5' },
@@ -488,6 +525,7 @@ export const TOOL_DEFS: ToolDef[] = [
         args: [
           '-y', '-i', input,
           '-af', `afade=t=in:st=0:d=${fi},areverse,afade=t=in:st=0:d=${fo},areverse`,
+          '-vn', // 视频源输入时防止频流被默认选择进 mp3 输出
           '-b:a', '320k',
           out
         ],
@@ -497,7 +535,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     id: 'audio-tempo',
-    label: '音频变速（不变调）',
+    label: '音频变速',
     category: 'audio',
     desc: '调整播放速度而保持音高（atempo），适合倍速听课/慢速跟练',
     fields: [
@@ -514,7 +552,7 @@ export const TOOL_DEFS: ToolDef[] = [
         ? String(params.tempo)
         : '1.25'
       const out = join(outDir, `${baseName(input)}_x${s}.mp3`)
-      return { args: ['-y', '-i', input, '-af', `atempo=${s}`, '-b:a', '320k', out], output: out }
+      return { args: ['-y', '-i', input, '-af', `atempo=${s}`, '-vn', '-b:a', '320k', out], output: out }
     }
   },
   {
@@ -595,12 +633,12 @@ export const TOOL_DEFS: ToolDef[] = [
     // T6：多区域剪辑合并（filter_complex 单命令完成 trim+concat）
     // hidden：不出现在工具导航，由剪辑编辑器「合并为单个文件」自动提交
     id: 'region-concat',
-    label: '多区域剪辑（合并输出）',
+    label: '多区域合并',
     category: 'video',
     desc: '按剪辑编辑器标记的多个区域一次裁剪并无缝合并为单一输出（单命令 filter_complex；视频重编码 H.264，音频转 AAC）',
     hidden: true,
     fields: [],
-    build: (input, outDir, params) => {
+    build: async (input, outDir, params) => {
       const regions = parseRegions(params)
       if (regions.length === 0) {
         throw new Error('缺少有效剪辑区域（每段至少 0.5 秒，最多 50 段）')
@@ -620,6 +658,27 @@ export const TOOL_DEFS: ToolDef[] = [
       const vchains = regions
         .map((r, i) => `[0:v]trim=start=${r.start}:end=${r.end},setpts=PTS-STARTPTS[v${i}]`)
         .join(';')
+      // 第七轮审查 P2：无音轨视频（video-mute 工具的存在证明这是常见输入）——
+      // 硬引用 [0:a] 会让 filtergraph 报 "matches no streams" 整单失败。
+      // ffprobe 探流降级为纯视频 concat（探测失败按有音轨处理，保持旧行为）
+      let hasAudio = true
+      try {
+        hasAudio = (await probeStreams(input)).some((s) => s.codec_type === 'audio')
+      } catch (err) {
+        log.warn(
+          `region-concat probeStreams failed (assume audio present): ${err instanceof Error ? err.message : String(err)}`
+        )
+      }
+      if (!hasAudio) {
+        const fc = `${vchains};${regions
+          .map((_, i) => `[v${i}]`)
+          .join('')}concat=n=${regions.length}:v=1:a=0[vout]`
+        const out = join(outDir, `${baseName(input)}_clip_merged.mp4`)
+        return {
+          args: ['-y', '-i', input, '-filter_complex', fc, '-map', '[vout]', '-c:v', 'libx264', '-crf', '23', out],
+          output: out
+        }
+      }
       const achains = regions
         .map((r, i) => `[0:a]atrim=start=${r.start}:end=${r.end},asetpts=PTS-STARTPTS[a${i}]`)
         .join(';')
@@ -762,16 +821,17 @@ export const TOOL_DEFS: ToolDef[] = [
     }
   },
   {
-    // backlog #29（2026-10-03）：MusicBrainz 补标签（工具箱过渡路线，不引入 beets/Python）
+    // backlog #29（2026-10-03）：MusicBrainz 标签补全（工具箱过渡路线，不引入 beets/Python）
     id: 'musicbrainz-tag',
-    label: 'MusicBrainz 补标签',
+    label: '标签补全',
     category: 'audio',
     desc: '按「歌手 - 曲名」（可从文件名自动解析）查询 MusicBrainz 公开 API，把标题/歌手/专辑/日期写入音频标签（流拷贝，不改音频数据）。需联网；未命中时给出重试建议',
     fields: [
       { key: 'artist', label: '歌手（留空自动从文件名解析）', type: 'text', default: '' },
       { key: 'title', label: '曲名（留空自动从文件名解析）', type: 'text', default: '' }
     ],
-    // async build：先联网匹配再组参（产物名用匹配到的真实歌手/曲名）
+    // async build：先联网匹配再组参（产物名锚定输入文件名——第七轮审查 P3：
+    // 网络数据做产物名会让两个不同源文件命中同一录音时静默互相覆盖）
     build: async (input, outDir, params) => {
       const parsed = parseNameQuery(baseName(input))
       const artist = String(params.artist ?? '').trim() || parsed.artist
@@ -783,10 +843,7 @@ export const TOOL_DEFS: ToolDef[] = [
       if (!known.includes(ext)) {
         throw new Error('仅支持音频文件（mp3/m4a/aac/flac/wav/ogg/opus）')
       }
-      const display = [tags.artist ?? artist, tags.title ?? title]
-        .filter(Boolean)
-        .join(' - ') || baseName(input)
-      const out = join(outDir, `${sanitizeFilename(display)}${ext}`)
+      const out = join(outDir, `${baseName(input)}_tagged${ext}`)
       const meta: string[] = []
       if (tags.title) meta.push('-metadata', `title=${tags.title}`)
       if (tags.artist) meta.push('-metadata', `artist=${tags.artist}`)
@@ -798,7 +855,7 @@ export const TOOL_DEFS: ToolDef[] = [
   {
     // backlog #30（2026-10-03）：OpenSubtitles 字幕匹配（工具箱过渡路线，不引入 Bazarr）
     id: 'subtitle-fetch',
-    label: 'OpenSubtitles 字幕匹配',
+    label: '字幕匹配',
     category: 'common',
     desc: '按文件哈希在 OpenSubtitles 内容级精确匹配字幕，保存到视频同目录（zip/gzip 自动解包）。需自备免费 API Key（api.opensubtitles.com 注册）；免费账号每日查询/下载配额有限',
     fields: [
@@ -847,7 +904,7 @@ export const TOOL_DEFS: ToolDef[] = [
     // 遵循 §4.7 "零内置模型"原则：Demucs 运行时与模型（+200MB）由用户自装；
     // 缺席时给出明确出口动作，不静默失败。
     id: 'stem-demucs',
-    label: '音轨分离（神经网络）',
+    label: 'AI 音轨分离',
     category: 'audio',
     desc: 'Demucs 分离：两轨（人声/伴奏）或四/六轨全分离。属可选增强组件——需自行安装 Python 并 `pip install demucs`（模型约 +200MB），CPU 处理 4 分钟歌曲约需数分钟；未安装时会给出安装指引',
     fields: [
@@ -1057,9 +1114,12 @@ export class ToolboxRunner {
     if (prewrite) {
       await writeFile(prewrite.path, prewrite.content, 'utf8')
     }
-    this.emit({ taskId, tool: input.tool, status: 'running', message: '处理中' })
     try {
-      await this.runFfmpeg(args, output, taskId, input.tool, extraOutputs ?? [])
+      // 第六轮审查：emit running 与 procs.set 的实际顺序相反（spawn 在 runFfmpeg
+      // 内部才发生）——窗口内 cancel 恒 false 但进程照跑。改为 spawn 登记后回调 emit
+      await this.runFfmpeg(args, output, taskId, input.tool, extraOutputs ?? [], () =>
+        this.emit({ taskId, tool: input.tool, status: 'running', message: '处理中' })
+      )
       const size = await stat(output).then((s) => s.size).catch(() => 0)
       this.emit({ taskId, tool: input.tool, status: 'completed', message: output, bytes: size })
       log.info(`tool ${input.tool} completed: ${output} (${size} bytes)`)
@@ -1107,6 +1167,32 @@ export class ToolboxRunner {
     ]
     // 安全校验：demucsPath 来自渲染层，basename 必须为 demucs（防渲染层借道执行任意二进制）
     const exeRaw = String(input.params.demucsPath ?? '').trim()
+    // 第七轮：TOFU 指纹闸门收敛为单一路径——用户填路径与 PATH 解析（where/which
+    // 还原完整路径）走同一闸门，消除「填路径=受管、走 PATH=免检」的双标信任口径
+    const verifyDemucsFingerprint = async (exePath: string): Promise<void> => {
+      // 第六轮审查（P1）：basename 校验可被「改名 demucs.exe 的任意二进制」绕过，
+      // 是全 IPC 面唯一无信任锚的 spawn 入口。补 TOFU 指纹：首次使用登记 SHA256，
+      // 此后不一致即拒绝（合法升级需删除设置键 toolbox.demucs.fingerprint 重置）。
+      // 指纹键不进渲染层写白名单，渲染层无法篡改
+      const { createHash } = await import('crypto')
+      const { readFile } = await import('fs/promises')
+      let fingerprint: string
+      try {
+        fingerprint = createHash('sha256').update(await readFile(exePath)).digest('hex')
+      } catch (err) {
+        const message = `无法读取 demucs 可执行文件：${fsErrToChinese(err)}`
+        this.emit({ taskId, tool: input.tool, status: 'failed', message })
+        throw new Error(message)
+      }
+      const stored = getSettingParsed<string>('toolbox.demucs.fingerprint')
+      if (stored && stored !== fingerprint) {
+        const message =
+          'demucs 可执行文件与首次使用时登记的指纹不一致，已拦截执行。如确认是合法升级（非替换的恶意二进制），请在工具箱的「人声/伴奏分离」工具页点击「重置二进制信任」后重试'
+        this.emit({ taskId, tool: input.tool, status: 'failed', message })
+        throw new Error(message)
+      }
+      if (!stored) setSetting('toolbox.demucs.fingerprint', JSON.stringify(fingerprint))
+    }
     let exe = 'demucs'
     if (exeRaw) {
       if (!/^demucs(\.exe)?$/i.test(basename(exeRaw))) {
@@ -1114,14 +1200,28 @@ export class ToolboxRunner {
         this.emit({ taskId, tool: input.tool, status: 'failed', message })
         throw new Error(message)
       }
+      await verifyDemucsFingerprint(exeRaw)
       exe = exeRaw
+    } else {
+      // 留空走 PATH：解析出完整路径纳入同一 TOFU 闸门（解析失败保持原样，由
+      // runDemucs 的 spawn ENOENT 给出友好报错）
+      const resolved = resolveOnPath('demucs')
+      if (resolved) {
+        await verifyDemucsFingerprint(resolved)
+        exe = resolved
+      }
     }
 
     // 排队者额度由释放方同步移交（同 submit）
     if (!(await this.acquireSlot(taskId, input.tool))) throw new Error('任务已取消')
-    this.emit({ taskId, tool: input.tool, status: 'running', message: '正在检测 Demucs 运行时…' })
     try {
-      const output = await this.runDemucs(exe, args, join(outDir, model, baseName(input.sourcePath)), taskId)
+      const output = await this.runDemucs(
+        exe,
+        args,
+        join(outDir, model, baseName(input.sourcePath)),
+        taskId,
+        () => this.emit({ taskId, tool: input.tool, status: 'running', message: '正在检测 Demucs 运行时…' })
+      )
       this.emit({ taskId, tool: input.tool, status: 'completed', message: output })
       log.info(`stem-demucs completed: ${output}`)
       return output
@@ -1142,7 +1242,13 @@ export class ToolboxRunner {
     }
   }
 
-  private runDemucs(exe: string, args: string[], outPath: string, taskId: string): Promise<string> {
+  private runDemucs(
+    exe: string,
+    args: string[],
+    outPath: string,
+    taskId: string,
+    onSpawn?: () => void
+  ): Promise<string> {
     return new Promise((resolve, reject) => {
       let proc: ChildProcess
       try {
@@ -1152,6 +1258,15 @@ export class ToolboxRunner {
         return
       }
       this.procs.set(taskId, { proc, output: outPath, tool: 'stem-demucs', extraOutputs: [] })
+      onSpawn?.()
+      // 第六轮审查：与 runFfmpeg 同口径加兜底超时（demucs CPU 推理可合法耗时数小时，
+      // 取宽限值）——离线网络盘/僵尸进程此前会无限占住并发槽
+      const timer = setTimeout(() => {
+        this.cancelled.add(taskId)
+        terminateTree(proc, 3000)
+        reject(new Error('Demucs 执行超时（6 小时），任务已终止'))
+      }, TOOL_TIMEOUT_MS)
+      const clearTimer = (): void => clearTimeout(timer)
       let stderrTail = ''
       proc.stderr?.on('data', (d: Buffer) => {
         stderrTail = (stderrTail + String(d)).slice(-2000)
@@ -1162,10 +1277,12 @@ export class ToolboxRunner {
         }
       })
       proc.on('error', (err) => {
+        clearTimer()
         this.procs.delete(taskId)
         reject(this.demucsMissingHint(err))
       })
       proc.on('exit', (code) => {
+        clearTimer()
         this.procs.delete(taskId)
         // L3：取消用 cancelled 集合判定（与 ffmpeg 路径口径一致）
         if (this.cancelled.delete(taskId)) {
@@ -1191,7 +1308,7 @@ export class ToolboxRunner {
     return new Error(
       '未检测到 Demucs 运行时。音轨分离 L2 属可选增强组件（模型 +200MB，遵循"零内置模型"原则未随包分发）：' +
         '请安装 Python 并执行 `pip install demucs`，或将 demucs 可执行文件完整路径填入参数后重试；' +
-        '轻量分离可改用「人声/伴奏分离（轻量）」工具（中心声道消除，零模型即时完成）'
+        '轻量分离可改用「人声/伴奏分离」工具（中心声道消除，零模型即时完成）'
     )
   }
 
@@ -1200,14 +1317,25 @@ export class ToolboxRunner {
     output: string,
     taskId: string,
     tool: string,
-    extraOutputs: string[] = []
+    extraOutputs: string[] = [],
+    onSpawn?: () => void
   ): Promise<void> {
     await ensureVerified('ffmpeg') // TOFU 强制校验
     const ffmpeg = toolPath('ffmpeg')
     return new Promise((resolve, reject) => {
       const proc = spawnTreeAware(ffmpeg, args)
-      // 先登记进程表再由调用方 emit running（收窄 cancel 返回 false 但进程照跑的窗口）
+      // 第六轮审查：spawn 登记进程表后再回调 emit running——原注释声称的顺序与
+      // 实际相反，窗口内 cancel 返回 false 但进程照跑
       this.procs.set(taskId, { proc, output, tool, extraOutputs })
+      onSpawn?.()
+      // 第六轮审查：兜底超时（ffprobe 30s 口径不适用于正式转码；长视频转码可合法
+      // 耗时数小时，取宽限值）——离线网络盘/坏扇区此前会无限占住并发槽
+      const timer = setTimeout(() => {
+        this.cancelled.add(taskId)
+        terminateTree(proc, 3000)
+        reject(new Error('工具执行超时（6 小时），任务已终止。文件可能位于离线网络盘或已损坏'))
+      }, TOOL_TIMEOUT_MS)
+      const clearTimer = (): void => clearTimeout(timer)
       let stderrTail = ''
       proc.stderr?.on('data', (d: Buffer) => {
         const text = String(d)
@@ -1219,6 +1347,7 @@ export class ToolboxRunner {
         }
       })
       proc.on('exit', (code) => {
+        clearTimer()
         this.procs.delete(taskId)
         // 取消（L3：跨平台用 cancelled 集合判定，不依赖 proc.killed）：不报「退出码」误导用户
         if (this.cancelled.delete(taskId) || proc.killed) {
@@ -1233,6 +1362,7 @@ export class ToolboxRunner {
           .catch(() => reject(new Error(`ffmpeg 退出码 ${code}，产物未生成${hint}`)))
       })
       proc.on('error', (err) => {
+        clearTimer()
         this.procs.delete(taskId)
         reject(err)
       })

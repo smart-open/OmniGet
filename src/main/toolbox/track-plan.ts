@@ -78,10 +78,12 @@ export function planTrackExtraction(
   if (kind === 'audio') {
     if (selected.length === 0) throw new Error('该文件没有可提取的音轨')
     const outputs = selected.map((_s, i) => join(outDir, `${baseName}.audio${i}.mka`))
-    const args: string[] = ['-y', '-i', inputPath, '-c:a', 'copy']
+    const args: string[] = ['-y', '-i', inputPath]
     for (let i = 0; i < selected.length; i++) {
-      // ffmpeg 多输出：每个 -map 归属其后最近的输出文件，必须交错排列
-      args.push('-map', `0:a:${i}`, outputs[i]!)
+      // ffmpeg 多输出：输出选项只作用于其后最近的输出文件——-c:a copy 必须放进每个
+      // -map/输出对之间（第六轮审查：置于首输出之前只对第 1 条音轨生效，其余按容器
+      // 默认编码器静默重编码或直接报 Automatic encoder selection failed）
+      args.push('-map', `0:a:${i}`, '-c:a', 'copy', outputs[i]!)
     }
     return { args, outputs, skippedBitmap: 0 }
   }
@@ -94,14 +96,16 @@ export function planTrackExtraction(
         : '全部字幕轨均为图形字幕（PGS/DVB/VOBSUB），无法导出为文本字幕'
     )
   }
-  // 统一转 SRT（单命令多输出共用 -c:s srt；ass 样式特效会丢失）
+  // 统一转 SRT（单命令多输出共用 -c:s srt；ass 样式特效会丢失）。
+  // 第六轮审查：同上——-c:s srt 同样按输出对交错排列（.srt 恰好被猜出编码器，
+  // 属侥幸无害，仍统一口径）
   const outputs = textTracks.map((_s, i) => join(outDir, `${baseName}.sub${i}.srt`))
-  const args: string[] = ['-y', '-i', inputPath, '-c:s', 'srt']
+  const args: string[] = ['-y', '-i', inputPath]
   for (let i = 0; i < textTracks.length; i++) {
     // 0:s:N 按文件内字幕轨序号精确锁定（selected = 文件内全部字幕轨的顺序切片，
     // 含被跳过的图形轨时序号不发生错位）
     const ordinal = selected.indexOf(textTracks[i]!)
-    args.push('-map', `0:s:${ordinal}`, outputs[i]!)
+    args.push('-map', `0:s:${ordinal}`, '-c:s', 'srt', outputs[i]!)
   }
   return { args, outputs, skippedBitmap }
 }

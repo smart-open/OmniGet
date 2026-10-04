@@ -24,6 +24,7 @@ import {
   X
 } from '@phosphor-icons/react'
 import { useTasks, wireTaskEvents } from '../stores/tasks'
+import type { ToolEvent } from '@shared/types'
 import logoUrl from '../assets/logo.png'
 import { THEMES, applyTheme, parseStoredTheme, watchSystemTheme, type ThemeId } from '../theme'
 import { initLocale, useI18n } from '../i18n'
@@ -103,7 +104,21 @@ export default function App() {
   const [dialogSource, setDialogSource] = useState<string | undefined>(undefined)
   const [theme, setTheme] = useState<ThemeId>('system')
   const [themeMenu, setThemeMenu] = useState(false)
+  // 快捷键屏蔽经 ref 中转：themeMenu 开合不重挂全局键盘监听（selRef 同款模式）
+  const themeMenuRef = useRef(false)
+  themeMenuRef.current = themeMenu
   const searchRef = useRef<HTMLInputElement>(null)
+
+  // 第六轮审查：工具完成/失败 toast 上收 App 层——ToolboxPage 的页级监听随卸载
+  // 解除，ffmpeg 转码动辄数分钟，用户切走后任务终态完全无感知（反馈硬性标准
+  // 在「离开页面」场景落空）
+  useEffect(() => {
+    const off = window.omniget.onToolEvents((e: ToolEvent) => {
+      if (e.status === 'completed') toast('工具任务处理完成', 'success')
+      if (e.status === 'failed') toast(`工具任务处理失败：${e.message ?? ''}`, 'warning')
+    })
+    return off
+  }, [])
 
   const engines = useTasks((s) => s.engines)
   const globalSpeedBps = useTasks((s) => s.globalSpeedBps)
@@ -162,9 +177,22 @@ export default function App() {
   }
 
   // 托盘/剪贴板/协议唤起 → 打开新建任务（M1-12）
+  // 第七轮审查 P2：对话框已打开时不得应用新 payload——initialSource 变化会整体
+  // 重置在途解析会话（磁力 90s 解析结果/勾选全丢）；向导期间打开会被全屏遮罩盖住
+  // 且 Esc 会静默关掉看不见的对话框
+  const dialogOpenRef = useRef(dialogOpen)
+  dialogOpenRef.current = dialogOpen
+  const onboardingRef = useRef(false) // current 在 onboarding state 声明处同步
   useEffect(() => {
     const off = window.omniget.onUiAction(({ action, payload }) => {
       if (action === 'new-task') {
+        if (onboardingRef.current) return
+        // 回归审查 P3：对话框已开时静默丢弃会让托盘按钮「无响应」/剪贴板新链
+        // 接「无反应」——带 payload 的唤起给一次性提示（托盘纯聚焦主进程已做）
+        if (dialogOpenRef.current) {
+          if (payload) toast('已有新建任务窗口打开，链接未自动填入', 'info')
+          return
+        }
         setDialogSource(payload)
         setDialogOpen(true)
       }
@@ -187,6 +215,7 @@ export default function App() {
 
   const [showHelp, setShowHelp] = useState(false)
   const [onboarding, setOnboarding] = useState(false)
+  onboardingRef.current = onboarding
   const selectedTaskId = useTasks((s) => s.selectedTaskId)
   const select = useTasks((s) => s.select)
 
@@ -241,7 +270,12 @@ export default function App() {
   useEffect(() => {
     if (!themeMenu) return
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') setThemeMenu(false)
+      if (e.key === 'Escape') {
+        // stopImmediatePropagation：Inspector 等同在 window 上的 Esc 监听
+        // 不能连带被触发（帮助面板 + 详情一键双关）
+        e.stopImmediatePropagation()
+        setThemeMenu(false)
+      }
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
@@ -264,7 +298,9 @@ export default function App() {
         return
       }
       // 模态期间屏蔽全局快捷键（确认框/新建任务/帮助/向导/产物预览等弹层——防穿透误触发后台任务操作）
-      if (isConfirmActive() || isAnyModalOpen() || dialogOpen || showHelp || onboarding) return
+      // 第六轮审查：补 themeMenu——主题菜单未走 useModalGate，开着它 Space 可误
+      // 暂停后台任务、Delete 可弹出回收站确认框
+      if (isConfirmActive() || isAnyModalOpen() || dialogOpen || showHelp || onboarding || themeMenuRef.current) return
       const k = eventToKey(e)
       if (!k) return
       if (k === keys['new-task']) {
@@ -315,7 +351,11 @@ export default function App() {
               .controlTask({ taskId: sel, action: 'remove' })
               .then(() => {
                 toast('任务已移入回收站', 'success')
-                return reload('all')
+                // 第七轮审查 P3：按当前 loadedFilter 重载——固定 'all' 会污染
+                // loadedFilter 触发 TaskList 守卫双载 + 骨架闪烁（NewTaskDialog/
+                // TaskRow 同型修复的漏网）
+                const cur = useTasks.getState().loadedFilter
+                return reload(TASK_FILTERS.includes(cur) ? cur : 'all')
               })
               .catch((err) => toastError('移入回收站', err))
           })
@@ -324,6 +364,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
+    // themeMenu 经 ref 中转（下方同步），不进依赖数组防菜单开合重挂监听
   }, [keymap, reload, dialogOpen, showHelp, onboarding])
 
   // 侧栏角标计数：主进程 SQL 全表口径（跨视图一致，含回收站）
@@ -416,7 +457,7 @@ export default function App() {
             { id: 'stats', label: t('nav.stats'), icon: ChartBar, onClick: () => setActive('stats') },
             {
               id: 'theme',
-              label: THEMES.find((th) => th.id === theme)?.label ?? t('nav.theme'),
+              label: t(`theme.${theme}`),
               icon: Palette,
               onClick: () => setThemeMenu((v) => !v)
             },
@@ -449,12 +490,12 @@ export default function App() {
             <>
               <div className="fixed inset-0 z-40" onClick={() => setThemeMenu(false)} />
               <div className="absolute bottom-12 left-2.5 z-50 w-44 overflow-hidden rounded-panel border border-border bg-surface shadow-[var(--shadow-pop)]">
-                {THEMES.map((t) => (
+                {THEMES.map((th) => (
                   <button
-                    key={t.id}
-                    onClick={() => changeTheme(t.id)}
+                    key={th.id}
+                    onClick={() => changeTheme(th.id)}
                     className={`flex h-9 w-full items-center gap-2.5 px-3 text-xs transition-colors ${
-                      theme === t.id
+                      theme === th.id
                         ? 'bg-accent-soft font-medium text-accent'
                         : 'text-text-2 hover:bg-surface-2 hover:text-text-1'
                     }`}
@@ -463,13 +504,14 @@ export default function App() {
                     <span
                       className="inline-block h-4 w-4 shrink-0 rounded-full border-2 transition-colors"
                       style={
-                        theme === t.id
-                          ? { background: t.accent, borderColor: t.accent }
-                          : { background: 'transparent', borderColor: t.accent }
+                        theme === th.id
+                          ? { background: th.accent, borderColor: th.accent }
+                          : { background: 'transparent', borderColor: th.accent }
                       }
                     />
-                    <span className="flex-1 truncate text-left">{t.label}</span>
-                    {theme === t.id && <CheckCircle size={13} weight="fill" className="text-accent" />}
+                    {/* 第七轮：主题名走 i18n（en locale 此前仍显示中文） */}
+                    <span className="flex-1 truncate text-left">{t(`theme.${th.id}`)}</span>
+                    {theme === th.id && <CheckCircle size={13} weight="fill" className="text-accent" />}
                   </button>
                 ))}
               </div>
@@ -619,8 +661,12 @@ export default function App() {
       <Onboarding open={onboarding} onClose={() => setOnboarding(false)} />
       <ConfirmDialog />
 
-      {/* 全局 toast（右下角，操作失败/降级告警统一反馈；R4-P3：可点击手动关闭） */}
-      <div className="pointer-events-none fixed bottom-10 right-4 z-[60] flex flex-col items-end gap-2">
+      {/* 全局 toast（右下角，操作失败/降级告警统一反馈；R4-P3：可点击手动关闭）
+          第七轮审查 P3：role=status 让屏幕阅读器播报操作反馈 */}
+      <div
+        role="status"
+        className="pointer-events-none fixed bottom-10 right-4 z-[60] flex flex-col items-end gap-2"
+      >
         {toasts.map((t) => (
           <div
             key={t.id}

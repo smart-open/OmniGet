@@ -2,7 +2,7 @@
 #
 # 产物命名（CI 内重命名后上传，版本号取自 package.json）：
 #   windows: OmniGet_{version}_x64-setup.exe / OmniGet_{version}_x64_portable.zip / OmniGet_{version}_x64_zh-CN.msi
-#   macos:   OmniGet_{version}_x64.dmg / OmniGet_{version}_aarch64.dmg / OmniGet_{version}_universal.dmg
+#   macos:   OmniGet_{version}_x64.dmg / OmniGet_{version}_aarch64.dmg（universal 无法捆绑平台化 sidecar，不产出）
 #   linux:   OmniGet_{version}_x64.AppImage / OmniGet_{version}_x64.deb
 #
 # 注意：mac/linux 目标缺少对应 sidecar（engines/darwin-*、engines/linux-*）时
@@ -12,6 +12,10 @@
 # darwin-x64 sidecar（此前 x64 dmg 捆绑 arm64 二进制，Intel Mac 引擎全部不可执行）。
 
 name: build
+
+# 第七轮审查 P3：最小权限声明 + npm ci（lock 存在，产物依赖树可重现）
+permissions:
+  contents: read
 
 on:
   push:
@@ -40,7 +44,7 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       - name: Typecheck & unit tests
         run: |
@@ -57,6 +61,8 @@ jobs:
 
       # sidecar 就位门禁（发布口径）：缺失即 fail，杜绝"零引擎安装包"静默出包
       # （跨平台审查 P0-1：yt-dlp 落盘名统一为运行时口径 yt-dlp / yt-dlp.exe）
+      # 第六轮审查：补架构断言——此前 win/linux 只查文件存在，配合 need() 的
+      # 「已存在跳过」会让错误架构/损坏二进制静默进包（mac 侧已有 file 断言）
       - name: Verify sidecars
         if: matrix.platform != 'mac'
         shell: bash
@@ -71,12 +77,30 @@ jobs:
             if [ ! -f "$dirs/$bin" ]; then
               echo "::error::sidecar 缺失：$dirs/$bin"
               missing=1
+              continue
+            fi
+            if [ "$plat" = "linux" ]; then
+              info=$(file "$dirs/$bin")
+              echo "$info"
+              echo "$info" | grep -qi 'x86-64' || { echo "::error::$bin 非 x86_64 构建"; missing=1; }
+            else
+              # Git Bash 无 file——用 PowerShell 读 PE 头 machine 字段（0x8664 = x64）。
+              # 回归审查修正：-Command 的后续 token 不绑定 $args（恒 null 必失败）——
+              # 路径经 bash 展开后直接内插进命令文本（引擎目录无空格/$ 字符）
+              if ! powershell -NoProfile -Command "\$b=[IO.File]::ReadAllBytes('$dirs/$bin'); \$o=[BitConverter]::ToInt32(\$b,0x3C); \$m=[BitConverter]::ToUInt16(\$b,\$o+4); if(\$m -ne 0x8664){exit 1}"; then
+                echo "::error::$bin 非 x64 PE（machine 字段 != 0x8664）"
+                missing=1
+              fi
             fi
           done
           exit $missing
 
       - name: Package (electron-builder)
         if: matrix.platform != 'mac'
+        # 自动更新通道（第七轮恢复 win）：--publish never 本身不产出 latest.yml，
+        # 但下方「Rename artifacts (windows)」已补生成 latest.yml 并保留重命名的
+        # blockmap——win 发布资产挂上即恢复 electron-updater 整包/差量自动更新。
+        # mac/linux 仍走应用内手动检查（GitHub API 比对 + 引擎热更）通道
         run: |
           case "${{ matrix.platform }}" in
             win) npx electron-builder --win --publish never ;;
@@ -141,6 +165,9 @@ jobs:
         run: npx electron-builder --mac --x64 --publish never
 
       # ── 产物重命名（统一命名口径）────────────────────────────────────
+      # 第七轮：保留 blockmap 并生成 latest.yml——原 --publish never 丢弃 blockmap
+      # 且无 latest.yml，electron-updater 自动更新完全断链。发布资产挂上
+      # latest.yml + 重命名后的 blockmap 即可恢复整包/差量自动更新
       - name: Rename artifacts (windows)
         if: matrix.platform == 'win'
         shell: pwsh
@@ -148,13 +175,33 @@ jobs:
           $v = (Get-Content package.json -Raw -Encoding utf8 | ConvertFrom-Json).version
           Set-Location release
           $setup = "OmniGet_${v}_x64-setup.exe"
-          Get-ChildItem *.exe.blockmap -File -ErrorAction SilentlyContinue | Remove-Item -Force
           Get-ChildItem *.exe -File |
             Where-Object { $_.Name -ne $setup } |
             Rename-Item -NewName $setup
+          # blockmap 随 exe 同步重命名（electron-updater 按下载 URL + .blockmap 后缀寻址）
+          $blockmap = Get-ChildItem *.exe.blockmap -File -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($blockmap) { Rename-Item $blockmap.FullName -NewName "$setup.blockmap" }
           Get-ChildItem *.zip -File | Rename-Item -NewName "OmniGet_${v}_x64_portable.zip"
           Get-ChildItem *.msi -File | Rename-Item -NewName "OmniGet_${v}_x64_zh-CN.msi"
-          Get-ChildItem OmniGet_*
+          # 生成 latest.yml（electron-updater 元数据；sha512 为原始摘要的 base64）
+          $hex = (Get-FileHash $setup -Algorithm SHA512).Hash
+          $raw = New-Object byte[] ($hex.Length / 2)
+          for ($i = 0; $i -lt $raw.Length; $i++) { $raw[$i] = [Convert]::ToByte($hex.Substring($i * 2, 2), 16) }
+          $sha512 = [Convert]::ToBase64String($raw)
+          $size = (Get-Item $setup).Length
+          $releaseDate = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+          $yml = @"
+          version: $v
+          path: $setup
+          sha512: $sha512
+          releaseDate: '$releaseDate'
+          files:
+            - url: $setup
+              sha512: $sha512
+              size: $size
+          "@
+          Set-Content -Path 'latest.yml' -Value $yml -Encoding utf8
+          Get-ChildItem OmniGet_*, latest.yml
 
       - name: Rename artifacts (macos)
         if: matrix.platform == 'mac'
@@ -189,6 +236,8 @@ jobs:
           name: omniget-${{ matrix.platform }}
           path: |
             release/OmniGet*.exe
+            release/OmniGet*.exe.blockmap
+            release/latest.yml
             release/OmniGet*.zip
             release/OmniGet*.msi
             release/OmniGet*.dmg

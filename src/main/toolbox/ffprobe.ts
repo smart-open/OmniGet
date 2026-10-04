@@ -1,6 +1,6 @@
 // backlog #28（2026-10-03）：ffprobe 流探测（轨道提取工具需要先知道有哪些音轨/字幕轨）
 
-import { toolPath } from '../orchestrator/binaries'
+import { toolPath, ensureVerified } from '../orchestrator/binaries'
 import { spawnTreeAware, terminateTree } from '../orchestrator/proc'
 
 export interface StreamInfo {
@@ -22,7 +22,10 @@ const PROBE_TIMEOUT_MS = 30_000
  * 此前会挂死，任务停在构建期且不可取消（ytdlp verifyIntegrity 的 runAux+超时
  * 同型教训）
  */
-export function probeStreams(inputPath: string): Promise<StreamInfo[]> {
+export async function probeStreams(inputPath: string): Promise<StreamInfo[]> {
+  // 第七轮：ffprobe 入 TOFU——被替换的二进制不得借完整性探测/轨道提取以用户
+  // 权限执行（首次使用登记指纹，不符即抛 ENGINE_BINARY_TAMPERED）
+  await ensureVerified('ffprobe')
   return new Promise((resolve, reject) => {
     const args = ['-v', 'error', '-show_streams', '-of', 'json', inputPath]
     let proc: ReturnType<typeof spawnTreeAware>

@@ -22,5 +22,5 @@
       "@shared/*": ["src/shared/*"]
     }
   },
-  "include": ["electron.vite.config.ts", "src/main/**/*", "src/preload/**/*", "src/shared/**/*", "src/types/**/*"]
+  "include": ["electron.vite.config.ts", "src/main/**/*", "src/preload/**/*", "src/shared/**/*", "src/types/**/*", "scripts/**/*.ts"]
 }

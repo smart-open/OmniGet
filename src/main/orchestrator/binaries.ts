@@ -12,7 +12,16 @@ import { appRoot, userDataDir } from '../env'
 
 const log = createLogger('binaries')
 
-export type SidecarBinary = 'aria2c' | 'ytdlp' | 'ffmpeg' | 'nm3u8re'
+// 第七轮：ffprobe 入 TOFU——它会被主进程真实执行（完整性探测/轨道提取/region-concat
+// 探流），此前游离在指纹闸门外，替换 aria2c/yt-dlp/ffmpeg 被拦而替换 ffprobe 可静默
+// 执行任意代码（TOFU 围栏的定期执行洞）。deno 仍不入（主进程从不执行它，由 yt-dlp
+// 自行调用，无强制点——在 engine-fetch 注释中显式备案为接受项）
+export type SidecarBinary =
+  | 'aria2c'
+  | 'ytdlp'
+  | 'ffmpeg'
+  | 'nm3u8re'
+  | 'ffprobe'
 
 interface FingerprintStore {
   [binaryName: string]: string // sha256

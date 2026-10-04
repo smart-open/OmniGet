@@ -105,6 +105,12 @@ export function getDb(): Database.Database {
 
 export function migrate(db: Database.Database): void {
   const current = db.pragma('user_version', { simple: true }) as number
+  // 第七轮审查 P3：降级场景（高版本应用建库后回退旧版）留痕——旧代码跑新 schema
+  // 的运行期报错此前无任何版本线索
+  const latest = MIGRATIONS.length > 0 ? MIGRATIONS[MIGRATIONS.length - 1]!.version : 0
+  if (current > latest) {
+    log.warn(`db schema user_version=${current} 高于应用支持的 ${latest}（应用降级运行，兼容性不保证）`)
+  }
   for (const m of MIGRATIONS) {
     if (m.version <= current) continue
     log.info(`applying migration ${m.version}: ${m.name}`)

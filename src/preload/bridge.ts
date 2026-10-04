@@ -43,6 +43,7 @@ const api: OmniGetBridge = {
   engineUpdate: (engine) => ipcRenderer.invoke(IPC_CHANNELS.engineUpdate, engine),
   toolCreate: (input: ToolCreateInput) => ipcRenderer.invoke(IPC_CHANNELS.toolCreate, input),
   revealToolOutput: (output: string) => ipcRenderer.invoke(IPC_CHANNELS.toolReveal, output),
+  resetDemucsFingerprint: () => ipcRenderer.invoke(IPC_CHANNELS.toolDemucsReset),
   settingsGet: (key: string) => ipcRenderer.invoke(IPC_CHANNELS.settingsGet, key),
   settingsSet: (key: string, value: unknown) =>
     ipcRenderer.invoke(IPC_CHANNELS.settingsSet, key, value),
@@ -75,6 +76,7 @@ const api: OmniGetBridge = {
   syncTheme: (theme: 'dark' | 'light'): void => ipcRenderer.send('ui:theme', theme),
   filePath: (file: File): string => webUtils.getPathForFile(file),
   defaultSaveDir: (): Promise<string> => ipcRenderer.invoke('app:defaultSaveDir'),
+  appVersion: (): Promise<string> => ipcRenderer.invoke('app:version'),
   pickFolder: (): Promise<string | null> => ipcRenderer.invoke('app:pickFolder'),
   // R4 续（backlog #4）：预设导出/导入（读写盘收口在主进程）
   exportFile: (defaultName: string, content: string): Promise<string | null> =>

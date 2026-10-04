@@ -137,7 +137,9 @@ export class MusicEngine {
       }
     }
     candidates.sort(
-      (a, b) => Number(a.artistMatch) - Number(b.artistMatch) || b.originality - a.originality
+      // 第六轮审查：升序比较把 artistMatch=false（0）排在 true（1）之前——原唱
+      // 沉底且被 slice 截掉，与注释「原唱命中优先」相反；改降序
+      (a, b) => Number(b.artistMatch) - Number(a.artistMatch) || b.originality - a.originality
     )
     return {
       query: originalQuery,
@@ -216,13 +218,20 @@ export class MusicEngine {
         lrcPath: result.lrcPath
       }
       if (out.success && out.mp3Path) {
-        const renamed = await this.applyNaming(out.mp3Path, out.lrcPath ?? '', artist ?? '', song ?? '')
-        out.mp3Path = renamed.mp3
-        out.lrcPath = renamed.lrc
+        // 第七轮审查 P2：cached 产物（既有文件，可能属于并发同歌任务/用户早前
+        // 下载）不得改名——改名会让引用旧路径的记录/并发任务悬空
+        if (!result.cached) {
+          const renamed = await this.applyNaming(out.mp3Path, out.lrcPath ?? '', artist ?? '', song ?? '')
+          out.mp3Path = renamed.mp3
+          out.lrcPath = renamed.lrc
+        }
         // M-5：rename 阶段不可中断——改名成功后再次复核取消状态，
         // 并用改名后的路径清理（否则清的是改名前路径，产物复活成孤儿）
         if (this.isCancelled(job)) {
-          await this.cleanupArtifacts({ mp3Path: out.mp3Path, lrcPath: out.lrcPath })
+          // 第七轮审查 P2：cached 命中在二次复核同样不得清理（补齐 R4-P2 漏网）
+          if (!result.cached) {
+            await this.cleanupArtifacts({ mp3Path: out.mp3Path, lrcPath: out.lrcPath })
+          }
           return this.cancelledResult()
         }
         out.bytes = await stat(out.mp3Path).then((s) => s.size).catch(() => 0)
@@ -338,9 +347,12 @@ export class MusicEngine {
       const lrcPath = join(input.saveDir, `${filename}.lrc`)
       emit('progress', 'netease', '尝试 网易云（按 ID 精确下载）…')
       const ok = await engine.downloadNeteaseById(nid, mp3Path, lrcPath, quality)
+      // 回归审查 P2：exists 兜底命中的产物非本任务落盘（lastProductForeign，可能
+      // 属于并发同歌任务/用户既有下载）——取消清理不得误删 mp3（lrc 为本任务写入可删）
+      const foreign = engine.lastProductForeign
       if (this.isCancelled(job) || !ok) {
         if (this.isCancelled(job)) {
-          await unlink(mp3Path).catch(() => {})
+          if (!foreign) await unlink(mp3Path).catch(() => {})
           await unlink(lrcPath).catch(() => {})
           return this.cancelledResult()
         }
@@ -353,12 +365,16 @@ export class MusicEngine {
         }
       }
       log.info(`音乐按 ID 下载完成: 网易云:${nid} → ${mp3Path}`)
-      const final = await this.applyNaming(mp3Path, lrcPath, artist, song)
+      // foreign/cached 既有产物不改名（与 download 路径的 cached 口径一致——
+      // 改名会让引用旧路径的记录/并发任务悬空）
+      const final = foreign
+        ? { mp3: mp3Path, lrc: lrcPath }
+        : await this.applyNaming(mp3Path, lrcPath, artist, song)
       // R4-P3：与 download 的 M-5 口径对齐——rename 后再次复核取消，
       // 否则取消落在改名期间会留下孤儿产物（completed 态必须在复核后落位，
       // 否则 rename 期间 cancel() 会被拒、复核永假）
       if (this.isCancelled(job)) {
-        await this.cleanupArtifacts({ mp3Path: final.mp3, lrcPath: final.lrc })
+        if (!foreign) await this.cleanupArtifacts({ mp3Path: final.mp3, lrcPath: final.lrc })
         return this.cancelledResult()
       }
       job.status = 'completed'
@@ -409,8 +425,22 @@ export class MusicEngine {
   async previewUrl(platform: string, sid: string, quality = 'standard'): Promise<string | null> {
     if (platform !== 'netease' || !/^\d{1,20}$/.test(sid)) return null
     if (!(['standard', 'high', 'lossless'] as const).includes(quality as Quality)) return null
-    const engine = this.makeEngine()
-    const url = await engine.previewNetease(sid, quality)
+    // 第七轮审查 P3：试听链路补总 deadline（与 search 60s 同口径）——四镜像 ×
+    // 每镜像 3 次重试在最坏黑洞网络下可达数分钟，渲染层 IPC 无超时兜底
+    const controller = new AbortController()
+    const deadline = setTimeout(() => controller.abort(), 45_000)
+    let url: string
+    try {
+      const engine = this.makeEngine(controller.signal)
+      url = await engine.previewNetease(sid, quality)
+    } catch (err) {
+      // 回归审查 P3：deadline/引擎异常留痕——否则渲染层只见 404，无法归因
+      //「是超时还是镜像全空返回」
+      log.warn(`preview url failed (sid=${sid}): ${err instanceof Error ? err.message : String(err)}`)
+      return null
+    } finally {
+      clearTimeout(deadline)
+    }
     if (!url || !url.startsWith('http')) return null
     try {
       if (!isTrustedAudioHost(new URL(url).hostname)) return null

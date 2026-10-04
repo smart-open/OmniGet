@@ -10,6 +10,7 @@ export function StatsPage({ onNewTask }: { onNewTask?: () => void }) {
   const [statsError, setStatsError] = useState('')
   const tasks = useTasks((s) => s.tasks)
   const loadedFilter = useTasks((s) => s.loadedFilter)
+  const loadError = useTasks((s) => s.loadError)
   const reload = useTasks((s) => s.load)
 
   useEffect(() => {
@@ -70,9 +71,10 @@ export function StatsPage({ onNewTask }: { onNewTask?: () => void }) {
         {/* 库实时总览（始终有数：来自任务库） */}
         <div className="grid grid-cols-3 divide-x divide-border border-y border-border">
           {[
-            { label: '任务总数', value: libReady ? String(lib.total) : '…' },
-            { label: '进行中', value: libReady ? String(lib.running) : '…' },
-            { label: '累计已下载', value: libReady ? formatBytes(lib.bytes) : '…' }
+            // 第六轮审查：加载失败此前永远显示「…」且无错误提示——失败态显式标出
+            { label: '任务总数', value: libReady ? String(lib.total) : loadError ? '加载失败' : '…' },
+            { label: '进行中', value: libReady ? String(lib.running) : loadError ? '加载失败' : '…' },
+            { label: '累计已下载', value: libReady ? formatBytes(lib.bytes) : loadError ? '加载失败' : '…' }
           ].map((m) => (
             <div key={m.label} className="px-4 py-4">
               <p className="num text-xl">{m.value}</p>
@@ -97,8 +99,8 @@ export function StatsPage({ onNewTask }: { onNewTask?: () => void }) {
           ))}
         </div>
 
-        {/* 空数据引导 */}
-        {stats !== null && stats.length === 0 && (
+        {/* 空数据引导（第七轮审查 P3：加载失败时隐藏——空态引导会误导用户以为确实没有记录） */}
+        {stats !== null && stats.length === 0 && !statsError && (
           <div className="mt-3 flex items-center justify-between rounded-panel border border-border px-4 py-3">
             <p className="text-xs text-text-3">还没有完成记录——完成第一个下载任务后这里会出现曲线</p>
             {onNewTask && (

@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { X } from '@phosphor-icons/react'
 import { effectiveKeys, formatKey, parseKeymap, type ShortcutAction } from '../../shortcuts'
+import { useModalGate } from '../../lib/modalGate'
 
 const ACTIONS: Array<{ action: ShortcutAction; desc: string; fallback: string }> = [
   { action: 'new-task', desc: '新建任务', fallback: 'Ctrl+N' },
@@ -23,6 +24,9 @@ const ACTIONS: Array<{ action: ShortcutAction; desc: string; fallback: string }>
 
 export function HelpOverlay({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [rows, setRows] = useState<Array<{ keys: string; desc: string }>>([])
+  // 第七轮审查 P3：必须注册 modalGate——Inspector 的 Esc 让位依赖 isAnyModalOpen，
+  // 未注册时 Inspector 开着按 Esc 会一键双关（帮助面板 + 详情）
+  useModalGate(open)
 
   useEffect(() => {
     if (!open) return

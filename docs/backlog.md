@@ -16,6 +16,17 @@
 
 ---
 
+## 〇-B、第七轮全面审查 + 遗留清账（2026-10-04，五域并行 + 三路回归审查）
+
+> 第七轮审查修 P1×2 / P2×12 / P3×20+；同日「全部修复」清账全部遗留项（增量补下双重记账、engine-fetch 断点续传+空闲超时、流停滞检测、ffprobe/demucs PATH 入 TOFU、CI 自动更新通道恢复、fetch-sidecars 下载侧 SHA256 预校验、设置页反馈迁移、mini/主题名 i18n、scripts 纳入 typecheck、渲染层测试破零）；三路回归审查再修本批自身引入的 P2×4 / P3×10。完整清单见 CHANGELOG 0.7.3 与 git 历史。**接受不修项**（记录备查）：
+> - **exe 签名**：见 §一 #1/#2（外部证书资源，代码侧无解）；
+> - **deno 不入 TOFU**：主进程从不执行 deno（yt-dlp 自行调用，无强制点），入 TOFU 无 enforcement 意义——engine-fetch 注释已显式备案；
+> - **demucs TOFU 指纹单键**：用户填路径与 PATH 解析共用 `toolbox.demucs.fingerprint`，交替使用两个 demucs 版本需手动重置（有「重置二进制信任」出口，摩擦可接受）；
+> - **themeMenu Esc stopImmediatePropagation**：对「主题菜单与其他弹层互斥」存在隐式依赖，未来新增非模态浮层需留意；
+> - **回收站内选中任务按 Delete**：重复 softDelete（幂等无害）+ 确认文案与实际操作不符——主进程 isTrashed 守卫在，留待 UX 打磨。
+
+---
+
 ## 一、发布阻塞 / 外部资源类
 
 ### 1. 🔴 macOS 签名与公证（等待 Apple 证书）

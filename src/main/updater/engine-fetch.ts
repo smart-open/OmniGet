@@ -5,8 +5,9 @@
 // 流程：仅补缺失（已存在且指纹通过的引擎不覆盖）→ 流式下载 .part（边下边算 SHA256）
 // → 与 manifest 比对（不符即丢弃，杜绝投毒）→ 原子改名安装 → TOFU 指纹登记。
 import { createHash } from 'crypto'
-import { createWriteStream } from 'fs'
+import { createReadStream, createWriteStream } from 'fs'
 import { chmod, mkdir, rename, rm, stat } from 'fs/promises'
+import { dirname } from 'path'
 import { lookup } from 'dns/promises'
 import { pipeline } from 'stream/promises'
 import { fetch as undiciFetch } from 'undici'
@@ -112,11 +113,14 @@ function mirrorBase(): string {
 
 /** 参与按需下载的引擎（ffprobe 为可选工具，同样支持补齐）。
  * deno（backlog #16）：yt-dlp 外部 JS 运行时（YouTube EJS 要求），与 yt-dlp
- * 同目录放置即被识别（jsruntime.ts 另做 PATH 注入双保险）；kind=tool 不入 TOFU */
+ * 同目录放置即被识别（jsruntime.ts 另做 PATH 注入双保险）。
+ * ⚠ TOFU 覆盖面备案（第七轮审查）：ffprobe 会由主进程执行 → 入 TOFU 闸门
+ * （sidecar: 'ffprobe'）；deno 主进程从不执行（由 yt-dlp 自行调用，无强制点）
+ * → 维持不入 TOFU，为显式接受项 */
 const ENGINE_FILES: Array<{ name: string; kind: 'sidecar' | 'tool'; sidecar?: SidecarBinary }> = [
   { name: 'aria2c', kind: 'sidecar', sidecar: 'aria2c' },
   { name: 'ffmpeg', kind: 'sidecar', sidecar: 'ffmpeg' },
-  { name: 'ffprobe', kind: 'tool' },
+  { name: 'ffprobe', kind: 'tool', sidecar: 'ffprobe' },
   { name: 'yt-dlp', kind: 'sidecar', sidecar: 'ytdlp' },
   { name: 'deno', kind: 'tool' },
   // backlog #17：HLS/DASH 引擎（发布侧直接放置解包后的单文件，免 zip 解压支持）
@@ -163,54 +167,116 @@ function manifestUrl(base: string): string {
 
 async function fetchManifest(base: string): Promise<Record<string, string>> {
   const res = await undiciFetch(manifestUrl(base), { signal: AbortSignal.timeout(15_000) })
-  if (!res.ok) throw new Error(`manifest 获取失败（HTTP ${res.status}）`)
+  if (!res.ok) {
+    // 404 = 分发源尚无当前平台目录（发布资产未就绪，backlog #3）——给出可自解释
+    // 的文案，避免每次启动的"补齐失败"通知让用户误判为故障
+    const hint = res.status === 404 ? '（分发源暂未提供该平台的引擎清单，等待发布资产）' : ''
+    throw new Error(`manifest 获取失败（HTTP ${res.status}）${hint}`)
+  }
   const raw = (await res.json()) as { files?: Record<string, string> }
   if (!raw?.files || typeof raw.files !== 'object') throw new Error('manifest 格式不合法')
   return raw.files
 }
 
+/** 第七轮：空闲超时——60s 无任何字节进度才中断（硬 10min 总超时对弱网大引擎
+ * ~100-200MB 必超时且每次从 0 重来；配合下方 Range 断点续传后弱网也能装完） */
+const FETCH_IDLE_TIMEOUT_MS = 60_000
+
 async function downloadAndVerify(url: string, sha256: string, dest: string, onProgress?: (received: number, total: number) => void): Promise<void> {
   const part = `${dest}.part`
-  await rm(part, { force: true })
-  const res = await undiciFetch(url, { signal: AbortSignal.timeout(600_000) })
-  if (!res.ok || !res.body) throw new Error(`下载失败（HTTP ${res.status}）`)
-  const body = res.body
-  const total = Number(res.headers.get('content-length') ?? 0)
-  const hash = createHash('sha256')
-  const ws = createWriteStream(part)
-  let received = 0
+  // 第七轮审查 P1：引擎目录可能尚未创建（全新安装/按需目录回退到 userData/engines）——
+  // createWriteStream 的异步 open ENOENT 会被 pipeline 吞成下载失败且每次启动重复
+  // 失败。与 updater/ytdlp.ts 同口径：落盘前先建目录
+  await mkdir(dirname(part), { recursive: true })
+
+  // 第七轮：断点续传——已存在的 .part 发起 Range 续传（失败路径不再删 .part，
+  // 残缺部分最终由 SHA256 比对兜底丢弃）；服务器不支持 Range（200）则从头重下
+  const partStat = await stat(part).catch(() => null)
+  let offset = partStat?.size ?? 0
+  if (offset > 0) log.info(`resuming download from ${offset} bytes: ${dest}`)
+
+  const controller = new AbortController()
+  let idleTimer: NodeJS.Timeout | null = null
+  const armIdle = (): void => {
+    if (idleTimer) clearTimeout(idleTimer)
+    idleTimer = setTimeout(() => {
+      controller.abort(new Error(`下载停滞（${FETCH_IDLE_TIMEOUT_MS / 1000}s 无进度）`))
+    }, FETCH_IDLE_TIMEOUT_MS)
+    idleTimer.unref?.()
+  }
   try {
-    await pipeline(
-      (async function* () {
-        for await (const chunk of body) {
-          const buf = chunk as Buffer
-          hash.update(buf)
-          received += buf.length
-          onProgress?.(received, total)
-          yield buf
-        }
-      })(),
-      ws
-    )
-  } catch (err) {
-    // R4-P3：网络异常/超时等失败路径必须清理 .part（此前仅 SHA 不符分支清理，
-    // 引擎目录会累积残缺的 *.part）
-    await rm(part, { force: true }).catch(() => {})
-    throw err
-  }
-  const digest = hash.digest('hex')
-  if (digest !== sha256.toLowerCase()) {
-    await rm(part, { force: true })
-    throw new Error(`SHA256 校验不符（期望 ${sha256.slice(0, 12)}…，实际 ${digest.slice(0, 12)}…），已丢弃`)
-  }
-  await mkdir(enginesDir(), { recursive: true })
-  await rename(part, dest)
-  // H2 修复：Unix 侧按需安装的引擎必须有执行位（createWriteStream 默认 0644，
-  // 否则 checkBinary 的 access(X_OK) 永远失败，首启补齐后引擎必挂）
-  if (process.platform !== 'win32') {
-    await chmod(dest, 0o755).catch((err: unknown) =>
-      log.warn(`chmod +x failed for ${dest}`, err)
-    )
+    armIdle()
+    let res = await undiciFetch(url, {
+      headers: offset > 0 ? { range: `bytes=${offset}-` } : undefined,
+      signal: controller.signal
+    })
+    if (res.ok && offset > 0 && res.status !== 206) {
+      // 服务器不支持 Range：忽略 .part 从头重下
+      offset = 0
+    }
+    if (res.status === 206 && offset > 0) {
+      // 回归审查 P3：206 必须校验 Content-Range 起始偏移——镜像/代理返回错位
+      // 206（如从 0 开始）时新旧数据拼接错乱（最终有 SHA256 兜底，但弱网下会
+      // 「看似在续传、实则反复整包校验失败从零重来」），错位按不支持 Range 处理
+      const cr = /^bytes\s+(\d+)-/i.exec(res.headers.get('content-range') ?? '')
+      if (!cr || cr[1] !== String(offset)) {
+        log.warn(
+          `content-range mismatch (expect offset ${offset}, got "${res.headers.get('content-range') ?? ''}")，回退整包重下`
+        )
+        offset = 0
+      }
+    }
+    if (res.status === 416 && offset > 0) {
+      // .part 已达/超过远端体积（上次写到尾部中断）：丢弃重下
+      await rm(part, { force: true }).catch(() => {})
+      offset = 0
+      res = await undiciFetch(url, { signal: controller.signal })
+    }
+    if (!res.ok || !res.body) throw new Error(`下载失败（HTTP ${res.status}）`)
+    const body = res.body
+    const total = offset + Number(res.headers.get('content-length') ?? 0)
+    const hash = createHash('sha256')
+    if (offset > 0) {
+      // 续传：先对既有部分求哈希（新数据续接后才可能通过整包 SHA256 比对）
+      const existing = createReadStream(part)
+      for await (const chunk of existing) hash.update(chunk as Buffer)
+    }
+    const ws = createWriteStream(part, { flags: offset > 0 ? 'a' : 'w' })
+    let received = offset
+    try {
+      await pipeline(
+        (async function* () {
+          for await (const chunk of body) {
+            armIdle()
+            const buf = chunk as Buffer
+            hash.update(buf)
+            received += buf.length
+            onProgress?.(received, total)
+            yield buf
+          }
+        })(),
+        ws
+      )
+    } finally {
+      // 失败路径保留 .part 供下次续传（残缺内容由最终 SHA256 比对兜底丢弃）
+      if (idleTimer) clearTimeout(idleTimer)
+    }
+    const digest = hash.digest('hex')
+    if (digest !== sha256.toLowerCase()) {
+      await rm(part, { force: true })
+      throw new Error(`SHA256 校验不符（期望 ${sha256.slice(0, 12)}…，实际 ${digest.slice(0, 12)}…），已丢弃`)
+    }
+    await mkdir(enginesDir(), { recursive: true })
+    await rename(part, dest)
+    // H2 修复：Unix 侧按需安装的引擎必须有执行位（createWriteStream 默认 0644，
+    // 否则 checkBinary 的 access(X_OK) 永远失败，首启补齐后引擎必挂）
+    if (process.platform !== 'win32') {
+      await chmod(dest, 0o755).catch((err: unknown) =>
+        log.warn(`chmod +x failed for ${dest}`, err)
+      )
+    }
+  } finally {
+    if (idleTimer) clearTimeout(idleTimer)
   }
 }
 

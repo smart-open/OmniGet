@@ -491,6 +491,8 @@ export class YtDlpAdapter {
       }
       if (!video) return
       // P2 修复：改走 supervisor.runAux——登记 + 超时（探测挂死此前会永久阻塞）
+      // 第七轮：ffprobe 已入 TOFU——spawn 前过指纹闸门
+      await ensureVerified('ffprobe')
       const out = await this.supervisor
         .runAux(
           toolPath('ffprobe'),

@@ -107,8 +107,10 @@ export async function refreshTrackers(): Promise<number> {
   const tx = getDb().transaction((items: Array<{ source: string; urls: string[] }>) => {
     for (const { source, urls } of items) {
       for (const u of urls.slice(0, PER_SOURCE_CAP)) {
-        upsert.run(u, source)
-        total++
+        // 第六轮审查：4/8 订阅源是同数据的 CDN 镜像——ON CONFLICT DO NOTHING 前
+        // total++ 使统计值约为实际入库数的 2 倍；按真实写入行数计数
+        const info = upsert.run(u, source)
+        total += Number(info.changes)
       }
     }
   })

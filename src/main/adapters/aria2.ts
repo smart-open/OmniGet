@@ -48,6 +48,28 @@ function cleanupMetadataDir(metaDir: string): void {
   )
 }
 
+/** 第六轮审查：放弃确认的磁力任务（parse 成功后用户关闭对话框永不确认）的
+ * 元数据目录无人回收，累积至进程退出——启动时清扫 mtime 超 24h 的陈旧目录
+ *（活跃 awaiting 任务目录是新写的，不会被误删） */
+export function cleanupStaleMetadataDirs(): void {
+  void (async () => {
+    const { readdir, rm, stat } = await import('fs/promises')
+    const root = join(tmpdir(), 'omniget-metadata')
+    const entries = await readdir(root, { withFileTypes: true }).catch(() => [])
+    const stale = Date.now() - 24 * 60 * 60 * 1000
+    for (const e of entries) {
+      if (!e.isDirectory()) continue
+      const dir = join(root, e.name)
+      const m = await stat(dir)
+        .then((s) => s.mtimeMs)
+        .catch(() => 0)
+      if (m > 0 && m < stale) {
+        await rm(dir, { recursive: true, force: true }).catch(() => {})
+      }
+    }
+  })()
+}
+
 interface Aria2Status {
   gid: string
   status: string
@@ -638,9 +660,15 @@ export class Aria2Adapter implements EngineAdapter {
    * 配合 --continue=true 下次同名任务可能复用脏状态 */
   async remove(task: Task): Promise<void> {
     if (task.engineGid) {
-      await this.rpc().call('remove', task.engineGid).catch(() => {
-        // 已完成任务的 gid 已销毁，忽略
-      })
+      // 第六轮审查：rpc() 在引擎离线时同步 throw（orchestrator.getClient 客户端为
+      // null），原 .catch 只包住 call() —— 删除/清空回收站在 aria2 启动失败窗口
+      // 整体失败。引擎离线时本地清理照常进行，RPC 失败一并吞掉（引擎重启后
+      // recoverAria2Restart/recoverEngineTasks 会重置这些任务）
+      try {
+        await this.rpc().call('remove', task.engineGid)
+      } catch {
+        // 已完成任务的 gid 已销毁 / 引擎离线，忽略
+      }
     }
     const { getTaskFiles } = await import('../task/store')
     const { rm } = await import('fs/promises')

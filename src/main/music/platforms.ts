@@ -140,6 +140,11 @@ async function writeLrc(lrcPath: string, content: string): Promise<void> {
 export class PlatformEngine {
   constructor(private readonly cb: EngineCallbacks) {}
 
+  /** 第七轮审查 P2：产物归属标记——「目标已存在即视为成功」的兜底路径落到的
+   * mp3 可能是并发同歌任务刚产出的文件（本任务未写入任何字节）。tryAllPlatforms
+   * 据此把结果标为 cached，取消清理时不得误删他人产物 */
+  lastProductForeign = false
+
   private async gate(url: string): Promise<void> {
     const h = hostOf(url)
     if (h) await this.cb.gate.wait(h, this.cb.signal) // M-5：限速等待可被取消
@@ -282,15 +287,19 @@ export class PlatformEngine {
         const size = await fetchToFile(url, part, { signal: this.cb.signal, minBytes: 1024 })
         if (size >= minMb * 1024 * 1024) {
           // P2 修复：目标已存在（Windows EEXIST/EPERM，如上次任务只留下 mp3）时
-          // rename 抛错会把已到手产物误判为下载失败——目标存在即视为成功并清理 part
+          // rename 抛错会把已到手产物误判为下载失败——目标存在即视为成功并清理 part。
+          // 第七轮审查：此路径本任务未落盘任何字节（文件可能属于并发同歌任务）——
+          // 置 lastProductForeign，engine 取消清理与改名均按 cached 语义跳过
           try {
             await rename(part, mp3Path)
+            this.lastProductForeign = false
           } catch (err) {
             const exists = await stat(mp3Path)
               .then(() => true)
               .catch(() => false)
             if (!exists) throw err
             await unlink(part).catch(() => {})
+            this.lastProductForeign = true
           }
           return true
         }
@@ -362,6 +371,7 @@ export class PlatformEngine {
   }
 
   async tryNeteaseRobust(singer: string, songName: string, mp3Path: string, lrcPath: string, quality: Quality): Promise<boolean> {
+    this.lastProductForeign = false // 每次尝试前重置归属标记
     const candidates = await this.searchNetease(`${singer} ${songName}`.trim(), 10)
     if (!candidates.length) return false
     const enriched = []
@@ -843,6 +853,11 @@ export async function tryAllPlatforms(
   if (onEvent) onEvent({ type: 'progress', platform: 'netease', message: '尝试 网易云…' })
   if (await engine.tryNeteaseRobust(singer, songName, mp3Path, lrcPath, quality)) {
     onEvent?.({ type: 'platform-ok', platform: 'netease', message: '网易云 下载成功' })
+    // 第七轮审查 P2：exists 兜底命中的产物非本任务落盘（lastProductForeign）——
+    // 按 cached 语义返回，engine 取消清理/改名跳过，防误删并发同歌任务的产物
+    if (engine.lastProductForeign) {
+      return { success: true, source: '网易云', message: `网易云: ${songName}`, mp3Path, lrcPath, cached: true }
+    }
     return { success: true, source: '网易云', message: `网易云: ${songName}`, mp3Path, lrcPath }
   }
   onEvent?.({ type: 'progress', platform: 'netease', message: '网易云 未命中' })

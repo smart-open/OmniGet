@@ -268,7 +268,11 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
             lead={<MagnifyingGlass size={14} />}
             className="flex-1"
           />
-          <Button onClick={() => void doSearch()} disabled={searching}>
+          <Button
+            onClick={() => void doSearch()}
+            disabled={searching || !q.trim()}
+            title={!q.trim() ? '请输入搜索内容' : undefined}
+          >
             {searching ? '搜索中…' : '搜索'}
           </Button>
           <Button

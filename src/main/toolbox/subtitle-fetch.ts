@@ -3,6 +3,12 @@
 
 import { inflateRawSync, gunzipSync } from 'zlib'
 
+// 第六轮审查：下载与解压上限——OpenSubtitles 下载链接内容不可信（30s 超时管不住
+// 1GB 慢流），zip/gzip 可被构造放大数千倍耗尽内存。口径对齐 bridge.readBody 1MB
+// 级钳制（字幕文本远小于此）
+const DOWNLOAD_LIMIT_BYTES = 32 * 1024 * 1024
+const DECOMPRESS_LIMIT_BYTES = 32 * 1024 * 1024
+
 // ── OpenSubtitles 文件哈希（官方算法：size + 首/尾 64KB 逐 8 字节 LE 求和）──
 
 /** 纯函数（单测覆盖）：输入文件大小与首/尾各 64KB 数据 → 16 位十六进制哈希 */
@@ -52,7 +58,9 @@ export function extractFirstFromZip(buf: Buffer): Buffer | null {
       const dataStart = localOff + 30 + lNameLen + lExtraLen
       const data = buf.slice(dataStart, dataStart + compSize)
       try {
-        return method === 0 ? Buffer.from(data) : inflateRawSync(data)
+        return method === 0
+          ? Buffer.from(data)
+          : inflateRawSync(data, { maxOutputLength: DECOMPRESS_LIMIT_BYTES })
       } catch {
         return null
       }
@@ -70,7 +78,13 @@ export function unwrapSubtitleBody(buf: Buffer): Buffer {
     return inner
   }
   if (buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b) {
-    return gunzipSync(buf)
+    // 回归审查：gzip 路径超限/损坏抛原始英文 RangeError，与 zip 路径（返回 null →
+    // 中文报错）语义不一致——统一中文
+    try {
+      return gunzipSync(buf, { maxOutputLength: DECOMPRESS_LIMIT_BYTES })
+    } catch {
+      throw new Error('字幕压缩包解压失败（gzip 结构异常或超过解压上限）')
+    }
   }
   return buf
 }
@@ -83,7 +97,7 @@ function apiHeaders(apiKey: string): Record<string, string> {
   return {
     'Api-Key': apiKey,
     Accept: 'application/json',
-    'User-Agent': 'OmniGet v0.1.0'
+    'User-Agent': 'OmniGet/0.7'
   }
 }
 
@@ -126,6 +140,10 @@ export async function fetchSubtitleForVideo(
   if (!dl.link) throw new Error('OpenSubtitles 未返回下载链接')
   const subRes = await fetch(dl.link, { signal: AbortSignal.timeout(30_000) })
   if (!subRes.ok) throw new Error(`字幕文件下载失败（HTTP ${subRes.status}）`)
+  // 第六轮审查：响应体全量入内存前钳制大小（原 arrayBuffer 无上限）
+  const declared = Number(subRes.headers.get('content-length') ?? '0')
+  if (declared > DOWNLOAD_LIMIT_BYTES) throw new Error('字幕文件过大（超过 32MB 上限），已取消下载')
   const body = Buffer.from(await subRes.arrayBuffer())
+  if (body.length > DOWNLOAD_LIMIT_BYTES) throw new Error('字幕文件过大（超过 32MB 上限），已取消下载')
   return { body: unwrapSubtitleBody(body), fileName: dl.file_name || 'subtitle.srt', release: entry?.attributes?.release }
 }
