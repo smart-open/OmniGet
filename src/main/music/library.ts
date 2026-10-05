@@ -6,7 +6,7 @@
 
 import { randomUUID } from 'crypto'
 import { rename, stat, unlink } from 'fs/promises'
-import { dirname, extname, join } from 'path'
+import { basename, dirname, extname, join } from 'path'
 import { getDb } from '../db'
 import { createLogger } from '../logger'
 import { ensureVerified, toolPath } from '../orchestrator/binaries'
@@ -84,6 +84,14 @@ export function removeTracksByTask(taskId: string): void {
   getDb().prepare('DELETE FROM music_tracks WHERE task_id = ?').run(taskId)
 }
 
+/** 第十轮审查：按任务取库行（删除含文件时反查真实产物路径——music.template
+ * 带目录段时产物在 saveDir 子目录，task_files 存量 basename 登记会漏删） */
+export function getTracksByTask(taskId: string): MusicTrackRow[] {
+  return getDb()
+    .prepare('SELECT * FROM music_tracks WHERE task_id = ?')
+    .all(taskId) as unknown as MusicTrackRow[]
+}
+
 /**
  * 一键补标签（库行入口串 #29 MusicBrainz 查询）：
  * 查询词优先用库行元数据，缺失时从文件名解析（'Artist - Title'）→
@@ -95,7 +103,10 @@ export async function retagTrack(
 ): Promise<{ title: string; artist?: string; album?: string; date?: string }> {
   const row = listTracks().find((t) => t.id === id)
   if (!row) throw new Error('曲目不存在或已被移除')
-  const parsed = parseNameQuery(row.path)
+  // 第十轮审查 P2：按文件名（而非完整路径）解析查询词——目录名含「 - 」时
+  // parseNameQuery 会把目录当歌手名（错误命中会把错误标签写回原文件，
+  // 与工具箱 musicbrainz-tag 的 baseName(input) 口径对齐）
+  const parsed = parseNameQuery(basename(row.path))
   const artist = row.artist?.trim() || parsed.artist
   const title = row.title?.trim() || parsed.title
   if (!title) throw new Error('缺少曲名（库记录与文件名均无法解析出查询词）')

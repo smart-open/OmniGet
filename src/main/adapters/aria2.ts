@@ -260,18 +260,43 @@ export class Aria2Adapter implements EngineAdapter {
     }
   }
 
-  /** R7 续审查加固：单 URL 探测（HEAD 优先；调用方在 HEAD 被拒时以 GET Range 重试） */
+  /** R7 续审查加固：单 URL 探测（HEAD 优先；调用方在 HEAD 被拒时以 GET Range 重试）。
+   * 第十轮审查 P3：改手动重定向逐跳内网校验——redirect:'follow' 时中间跳若是内网
+   * （公网 302 → 内网 → 302 回公网），请求会真实打到内网（盲探测），仅复核最终
+   * URL 拦不住（对齐 music/http.ts openStream / nm3u8 fetchManifestText 口径） */
   private async probeHttpUrl(
     url: string,
     method: 'HEAD' | 'GET',
     headers?: Record<string, string>
   ): Promise<Response> {
-    return fetch(url, {
-      method,
-      redirect: 'follow',
-      headers,
-      signal: AbortSignal.timeout(HTTP_PROBE_TIMEOUT_MS)
-    })
+    const { isInternalUrl } = await import('../net-guard')
+    if (await isInternalUrl(url)) {
+      throw new Error('该链接指向内网/回环地址，已拦截')
+    }
+    let current = url
+    for (let hop = 0; ; hop++) {
+      const res = await fetch(current, {
+        method,
+        redirect: 'manual',
+        headers,
+        signal: AbortSignal.timeout(HTTP_PROBE_TIMEOUT_MS)
+      })
+      const location = res.headers.get('location')
+      if (res.status >= 300 && res.status < 400 && location) {
+        await res.body?.cancel().catch(() => {})
+        if (hop >= 3) throw new Error('重定向次数超限')
+        const next = new URL(location, current)
+        if (next.protocol !== 'https:' && next.protocol !== 'http:') {
+          throw new Error(`重定向协议不允许：${next.protocol}`)
+        }
+        if (await isInternalUrl(next.toString())) {
+          throw new Error('该链接重定向至内网/回环地址，已中止探测。')
+        }
+        current = next.toString()
+        continue
+      }
+      return res
+    }
   }
 
   /** HTTP 直链 HEAD 探测（M1-7）：大小/文件名嗅探；带超时防挂起。
@@ -353,8 +378,10 @@ export class Aria2Adapter implements EngineAdapter {
         await res.body?.cancel().catch(() => {}) // GET 兜底的 206 体必须消费，防 socket 挂起
         const entry = { url, len, res }
         if (!primary) primary = entry
-        else if (primary.len > 0 && len === primary.len) probed.push(entry)
-        else if (len !== primary.len) {
+        else if (len === primary.len) probed.push(entry)
+        // 第十轮审查 P3：primary 无 content-length（len=0）时等长(0)镜像不再被
+        // 误剔除——否则多源并下载对该站点整体失效
+        else {
           log.warn(`多源镜像大小不一致（${len} ≠ ${primary.len}），已剔除: ${url}`)
         }
       } catch (err) {
@@ -606,10 +633,15 @@ export class Aria2Adapter implements EngineAdapter {
       .map(Number)
     // #17 加固（与 confirmSelection 同防线）：勾选与元数据 0 命中时不带 select-file
     // 的 unpause 会静默全量下载——明确失败并给出口动作（磁力缓存路径复用此方法）
-    if (relativePaths.length > 0 && indexes.length === 0) {
+    // 第十轮审查 P2：部分命中同族漏网——1≤命中<勾选数时按命中子集静默下载，
+    // 用户其余文件无任何提示即丢失。同样明确失败（对齐 0 命中文案口径）
+    if (relativePaths.length > 0 && indexes.length < relativePaths.length) {
       throw new Error(
-        `勾选的 ${relativePaths.length} 个文件与种子元数据 0 命中（文件清单可能已变化）。` +
-          '请删除该任务后重新解析，在文件树中重新勾选'
+        indexes.length === 0
+          ? `勾选的 ${relativePaths.length} 个文件与种子元数据 0 命中（文件清单可能已变化）。` +
+              '请删除该任务后重新解析，在文件树中重新勾选'
+          : `勾选的 ${relativePaths.length} 个文件仅 ${indexes.length} 个与种子元数据匹配（文件清单可能已变化）。` +
+              '为避免静默丢文件已中止，请删除该任务后重新解析并重新勾选'
       )
     }
     await this.rpc().call('changeOption', gid, {
@@ -702,10 +734,14 @@ export class Aria2Adapter implements EngineAdapter {
       .map(Number)
     // #17 加固：用户勾选与引擎元数据 0 命中（镜像改名/大小写口径漂移）时，
     // 不带 select-file 的 unpause 会静默全量下载——明确失败并给出口动作
-    if (selectedPaths.length > 0 && indexes.length === 0) {
+    // 第十轮审查 P2：部分命中同族漏网同修（对齐 applySelectionByPath 口径）
+    if (selectedPaths.length > 0 && indexes.length < selectedPaths.length) {
       throw new Error(
-        `勾选的 ${selectedPaths.length} 个文件与种子元数据 0 命中（文件清单可能已变化）。` +
-          '请删除该任务后重新解析，在文件树中重新勾选'
+        indexes.length === 0
+          ? `勾选的 ${selectedPaths.length} 个文件与种子元数据 0 命中（文件清单可能已变化）。` +
+              '请删除该任务后重新解析，在文件树中重新勾选'
+          : `勾选的 ${selectedPaths.length} 个文件仅 ${indexes.length} 个与种子元数据匹配（文件清单可能已变化）。` +
+              '为避免静默丢文件已中止，请删除该任务后重新解析并重新勾选'
       )
     }
     await this.rpc().call('changeOption', gid, {

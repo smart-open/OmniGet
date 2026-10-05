@@ -30,7 +30,7 @@ export interface NfoInput {
 /** 纯函数（单测覆盖）：库行 → Jellyfin/Emby movie NFO（Kodi 通用方言子集） */
 export function buildMovieNfo(input: NfoInput): string {
   const date = new Date(input.date ?? Date.now())
-  const lines: string[] = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?', '<movie>']
+  const lines: string[] = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>', '<movie>']
   const push = (tag: string, value: string): void => {
     lines.push(`  <${tag}>${escapeXml(value)}</${tag}>`)
   }
@@ -73,7 +73,9 @@ async function exportNfo(
   await writeFile(nfoPath, buildMovieNfo({
     title: video.title,
     platform: video.platform,
-    durationSec: video.duration_sec
+    durationSec: video.duration_sec,
+    // 第十轮审查：归档日期用库行登记时间（下载完成时刻），此前恒取导出时刻
+    date: (video as { created_at?: number }).created_at
   }), 'utf8')
   // 海报：复用库封面抽帧产物（cover 存在才拷贝）；命名 <视频名>-poster.jpg（Jellyfin/Emby 均识别）
   let posterPath: string | null = null
@@ -83,7 +85,11 @@ async function exportNfo(
       log.info(`nfo poster auto-export skipped (existing): ${posterPath}`)
       posterPath = null
     } else {
-      await copyFile(video.cover_path, posterPath)
+      // 第十轮审查：封面文件可能已被清理（任务删除/库行注销）——拷贝失败降级
+      // 为「仅 NFO」，不吞掉已写成功的 NFO
+      posterPath = await copyFile(video.cover_path, posterPath)
+        .then(() => posterPath)
+        .catch(() => null)
     }
   }
   if (broadcast) {

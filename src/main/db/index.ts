@@ -158,6 +158,9 @@ export function getDb(): Database.Database {
   instance.pragma('journal_mode = WAL')
   instance.pragma('foreign_keys = ON')
   migrate(instance)
+  // 第十轮审查 P3：videos.path 索引幂等补建——registerVideo 每次视频完成都按
+  // path = ? 全表扫描（v4 迁移只建了 task 索引，存量库无法靠迁移版本补）
+  instance.exec('CREATE INDEX IF NOT EXISTS idx_videos_path ON videos(path)')
   return instance
 }
 

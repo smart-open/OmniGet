@@ -3,6 +3,28 @@
 > OmniGet 产品变更记录。版本号遵循 `0.x.y` 约定：**x（中间版本号）随功能里程碑递增**，y 为里程碑内的小修/加固版本。初始版本 0.1.0。
 > 格式参考 Keep a Changelog；日期为里程碑完成时间。里程碑与验收口径溯源至《OmniGet-产品技术设计文档》§10。
 
+## [0.11.2] - 2026-10-05
+
+### 第十轮全功能审查修复（六域子代理并行：下载核心 / 音乐 / 视频·直播·弹幕·字幕·NFO / 工具箱 / 网盘·集成·更新·设置 / 横切 IPC·安全·DB·全局 UX；P1×6 / P2×20 / P3 逐项清账）
+
+- **P1 下载核心（增量补下）**：`completedAt` 锚点在 re-add 起跑成功瞬间被消费（防双计的正确设计），但 allowOverwrite 判据也是同一锚点——此后恢复泵/重试/回收站恢复/aria2 崩溃重启等任何二次起跑裸 start 撞 saveDir 原完成文件报 `File already exists`，任务陷入不可修复的失败循环。改随 params 持久化 `incremental` 标记，覆盖放行与记账回撤解耦（`allowOverwriteForTask` 统一三处出口）
+- **P1 音乐（归档漏删）**：`music.template` 带目录段（官方预设 `{{artist}}/{{album}}/`）时产物在 saveDir 子目录，task_files 存量 basename 登记 join 回 saveDir 根——「删除（含文件）」`rm force` 静默成功、mp3/lrc 永久残留且库行已注销。改用 `music_tracks` 绝对路径反查补齐（新旧任务都覆盖）；顺带 `deleteTaskFiles` 补 `recursive`（demucs 目录产物此前必 ENOTEMPTY 残留数百 MB）
+- **P1 视频（NFO 全部非法）**：XML 声明行缺闭合 `>`（`standalone="yes"?`）——Jellyfin/Emby/tinyMediaManager 解析必失败，自动钩子与手动导出两条路径的产物全部不可用；新增 `video/nfo.test.ts` 锁定
+- **P1 工具箱（R9 修复未生效）**：batch-convert 的 `hasVideo` 判定违背 `probeStreams`「只返回 audio/subtitle 流」的约定恒 false——音频目标遇无声视频的剔除分支从未触发，整批产物仍会拖死。按约定修正为「探测成功且无音轨即剔除音频目标」（mp4 目标因 map 全带 `?` 无需剔除）
+- **P1 网盘（凭据写入即丢失）**：WebDAV 明文降级分支把已 JSON 编码的 payload 单层落库，`getSettingParsed` 读取时解析一层得对象而 `read()` 只认 string——safeStorage 不可用环境保存凭据后永远 401。save 改双重编码 + read 兼容对象形态（存量行），新增往返回归测试
+- **P1 横切（SSRF 漏网）**：N_m3u8DL-RE 清单解析链（`fetchManifestText`/`probeMasterLive`）`redirect:'follow'` 且无内网校验——公网 302 跳内网的响应体被解析后回显渲染层，击穿 net-guard。改手动重定向逐跳 `isInternalUrl`（上限 3 跳）
+- **P2 下载核心**：①磁力/种子解析期在途查重缺失——创建期预写 infohash（解析窗口内二次粘贴明确拒绝）+ 解析后按 infohash 补查（覆盖 .torrent 与并发解析窗口，命中即撤单）；②「处理中」视图数据源漏 `awaiting`（渲染层过滤器声明包含但主进程 SQL 不返回，任务在待确认阶段切换视图即「消失」）；③aria2 中途重启把用户**主动暂停**的任务一并重置 queued 自动续传（保留 paused 语义仅清 gid，resume 走无 gid 分支重过启动闸门）；④磁力快速通道**部分命中**从静默降级改明确报错（此前勾 5 个只下 1 个无任何提示）
+- **P2 音乐**：①SSRF 重定向闸门补全调用面——`fetchToFile`/`fetchJson`/`getText` 此前仍 follow 重定向（openStream 同型漏网，共享 `fetchWithGuardedRedirects` helper 收口四处）；②QQ/酷狗/咪咕/汽水链目标音频已存在（如歌词缺失重下）时 rename 撞 Windows EPERM → 六个 br 全试一遍白耗流量 → 五平台全空——`fetchToFile` 目标已存在兜底（不重拉流）+ `onForeign` 标记贯通 + 四平台分支补 cached 语义（取消清理/改名跳过，防误删既有产物）；③自定义 `music.template` 后 skip_existing 永不命中（产物已被改名/迁目录）——补音乐库 title/artist 命中兜底（按 cached 返回，杜绝「(2)」副本堆积）；④歌单超 100 首静默截断——`MusicPlaylistInfo.total` + UI 黄字「共 N 首，仅加载前 100 首」
+- **P2 视频/直播**：①`videos.duration_sec` 是死列（永不写入，封面墙时长恒「—」、NFO duration 永不输出）——`generateCover` 顺带回填；②直播判据引擎无关化——RE 缺席回落 yt-dlp 直录的路径无 roomUrl，完成入档案/失败熔断记账的直播豁免漏网（创建期持久化 `liveRoom` 标记，`isLiveRecordingTask` 统一判据）；③直播任务重试前重解清单（时效直链拿旧清单必 403/404）；④**直播断流自动重连**（30s × 3 次，凭 roomUrl 重解清单，广播通知，耗尽后维持 failed）；⑤OpenSubtitles 入库钩子失败从纯日志改广播 warning（配额/凭据类错误用户可见，「未匹配」保持静默）；⑥弹幕压制 `fetchCid` 补 UA/Referer（B站 view 接口无浏览器头被风控 -352/-412，功能等于不可用）
+- **P2 工具箱**：①batch-convert 剔除清单随 completed 事件带给用户（此前仅 log，用户以为全部文件已转换，BuildResult 新增 notice 字段）；②音乐库补标签按 basename 解析查询词（目录名含「 - 」时把目录当歌手名，错误命中会写回原文件）；③subtitle-mux 选 mp4 容器遇图形字幕轨（PGS/DVB）build 期探测并给明确出口（mov_text 无法编码图形字幕，此前 stderr 尾行晦涩）
+- **P2 网盘/更新/设置**：①全新安装 aria2 引擎补齐成功后**自动拉起监督器**（此前首次 spawn 从未发生、重启链无触发点，核心引擎直到用户手动重启都不可用）；②应用自动更新 error/downloaded 事件经通知栏广播（文件头声称「降级为通知」但零通知路径）；③Linux 托盘创建失败时不注册关窗拦截（无托盘环境把窗口拦成 hide = 僵尸进程，注释与实现此前相反）
+- **P2 横切**：①`sidecarProbe` 探测面收敛到设置项（此前接受渲染层任意 URL 做「可达性+状态码回显」探测，唯一未持久化输入的 oracle）；②渲染进程崩溃 `render-process-gone` 自动 reload（上限 3 次）+ 通知——此前白屏死置、下载照跑但无任何 UI 出口
+- **P3 要点**：before-quit 补停订阅/调度/tracker 三个周期定时器（shutdown 12s 窗口内到期会落库/重拉引擎）；HTTP 直链探测改手动重定向逐跳内网校验 + len=0 等长镜像不再被静默剔除；NFO 归档日期取库行 created_at（此前恒取导出时刻）+ poster 拷贝失败降级「仅 NFO」；弹幕实体解码容错非法码点；videos.path 幂等索引；tool 任务隐藏必报错的暂停按钮；工具箱预览扩展名补 mkv/mka/m4b；WebDAV 凭据保存文案不再谎称「加密存储」；musicDownload 音质档位白名单；咪咕/汽水搜索补专辑名映射（{{album}} 恒 Unknown Album）；镜像主机公网判定缓存加 5min TTL（防 rebinding 钉死）；musicbrainz-tag 扩展名校验前移（不白耗 MusicBrainz 配额）；向导加「跳过」按钮 + 默认目录加载失败行内提示 + 设置 → 外观新增「重新运行向导」入口；bt.upnp/forceEncryption 保存提示重启生效；歌单接口响应体 8MB 上限；QQ 317ak 链按所选音质分档（此前标准档也先拉无损再丢弃）；字幕落盘保留原始扩展名（vtt/sub 不再误存 .srt）；弹幕超 3000 条截断在完成消息附注
+
+### 测试
+
+- 新增 2 组回归 6 例（NFO XML 声明/转义/日期 4 例、WebDAV 凭据往返与对象形态兼容 2 例）；全量 171/171，typecheck 双端通过
+
 ## [0.11.1] - 2026-10-05
 
 ### 第九轮全面审查修复（五域子代理并行：主进程编排 / 渲染层 UX / 音乐·工具箱·热更 / IPC·安全 / 三四期新功能；P1×1 / P2×13 / P3×25）

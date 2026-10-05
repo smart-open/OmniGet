@@ -385,7 +385,10 @@ export class YtDlpAdapter {
             const r = await burnDanmaku(task.source, video)
             const list = this.outputFiles.get(task.id)
             if (list && !list.includes(r.output)) list.push(r.output)
-            message = `${message ? `${message}；` : ''}弹幕压制完成（${r.comments} 条）`
+            // 第十轮审查 P3：超渲染器上限截断必须用户可见（防静默丢弹幕）
+            message = `${message ? `${message}；` : ''}弹幕压制完成（${r.comments} 条${
+              r.truncated ? '，超过 3000 条上限已截断' : ''
+            }）`
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err)
             log.warn(`danmaku burn failed for ${task.id}: ${msg}`)

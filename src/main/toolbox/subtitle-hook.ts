@@ -34,5 +34,5 @@ export async function autoFetchSubtitle(videoPath: string, languages: string): P
     await fh.close()
   }
   const sub = await fetchSubtitleForVideo(size, head, tail, apiKey, languages)
-  return saveSubtitleBesideVideo(videoPath, sub.body, languages.split(',')[0] ?? 'zh')
+  return saveSubtitleBesideVideo(videoPath, sub.body, languages.split(',')[0] ?? 'zh', sub.fileName)
 }

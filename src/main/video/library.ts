@@ -141,6 +141,11 @@ export async function generateCover(videoId: string, videoPath: string): Promise
       return
     }
     const dur = await probeDurationSec(videoPath)
+    // 第十轮审查 P2：duration_sec 回填——此前该列永不写入（死列），封面墙时长
+    // 角标恒「—」且 NFO <fileinfo><duration> 永不输出
+    if (dur) {
+      getDb().prepare('UPDATE videos SET duration_sec = ? WHERE id = ?').run(dur, videoId)
+    }
     // 取 10% 处（长视频片头多为黑场/片头字幕）；探不到时长用 3s
     const pos = dur ? Math.min(dur * 0.1, 120) : 3
     await ensureVerified('ffmpeg')

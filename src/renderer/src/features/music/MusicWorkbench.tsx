@@ -437,6 +437,11 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
                 <div className="mt-3 flex items-center justify-between text-xs text-text-2">
                   <span>
                     {plInfo.kind === 'playlist' ? '歌单' : '专辑'}「{plInfo.name}」· {plInfo.tracks.length} 首
+                    {typeof plInfo.total === 'number' && plInfo.total > plInfo.tracks.length && (
+                      <span className="ml-2 text-warning">
+                        共 {plInfo.total} 首，仅加载前 {plInfo.tracks.length} 首
+                      </span>
+                    )}
                   </span>
                   <span className="flex items-center gap-2">
                     <button

@@ -66,8 +66,10 @@ const CLIP_TOOLS = new Set(['trim', 'trim-video'])
 type PreviewKind = 'image' | 'video' | 'audio' | 'text'
 
 const IMAGE_EXTS = ['.jpg', '.jpeg', '.png', '.webp', '.gif']
-const VIDEO_EXTS = ['.mp4', '.webm', '.mov', '.m4v']
-const AUDIO_EXTS = ['.mp3', '.m4a', '.aac', '.flac', '.wav', '.opus', '.ogg']
+// 第十轮审查 P3：补 mkv/mka/m4b——subtitle-mux/trim-video 等工具对 mkv 源/产物
+// 此前只能「打开目录」，浏览器 video/audio 实际支持这些容器
+const VIDEO_EXTS = ['.mp4', '.webm', '.mov', '.m4v', '.mkv']
+const AUDIO_EXTS = ['.mp3', '.m4a', '.aac', '.flac', '.wav', '.opus', '.ogg', '.mka', '.m4b']
 const TEXT_EXTS = ['.txt', '.srt', '.ass', '.vtt', '.sha256', '.sha1', '.md5']
 
 function previewKindOf(path: string | null | undefined): PreviewKind | null {

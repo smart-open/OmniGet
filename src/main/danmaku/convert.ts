@@ -32,9 +32,18 @@ export interface AssOptions {
 }
 
 function decodeEntities(s: string): string {
+  // 第十轮审查 P3：非法码点（>0x10FFFF）String.fromCodePoint 抛 RangeError
+  // 会令整次压制失败——单条降级为原样保留
+  const safeCodePoint = (n: number): string => {
+    try {
+      return String.fromCodePoint(n)
+    } catch {
+      return ''
+    }
+  }
   return s
-    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
-    .replace(/&#x([0-9a-fA-F]+);/g, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+    .replace(/&#(\d+);/g, (_, n) => safeCodePoint(Number(n)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, n) => safeCodePoint(parseInt(n, 16)))
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')

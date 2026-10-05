@@ -67,7 +67,10 @@ export function insertTask(task: Task & { seedRatio?: number; infohash?: string;
     .run({
       params: task.params ?? null,
       seedRatio: task.seedRatio ?? 0,
-      infohash: null,
+      // 第十轮审查 P2：创建期预写 infohash（磁力 URI 可零成本提取）——
+      // 此前恒 null，BEP-9 解析窗口（最长 90s）内第二次粘贴同磁力的查重必 miss，
+      // 同种子双开并发下载
+      infohash: task.infohash ?? null,
       formatId: null,
       noWatermark: task.noWatermark === undefined ? null : task.noWatermark ? 1 : 0,
       wmLevel: null,

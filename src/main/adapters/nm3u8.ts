@@ -23,13 +23,43 @@ const BROWSER_UA =
 
 const MAX_MANIFEST_BYTES = 8 * 1024 * 1024
 
-/** 拉取清单文本（带 UA、15s 超时、8MB 上限——防异常端点撑爆内存） */
+/** 拉取清单文本（带 UA、15s 超时、8MB 上限——防异常端点撑爆内存）。
+ * 第十轮审查 P1（SSRF）：清单解析是「主进程代发请求 + 内容回显渲染层」路径，
+ * 必须过 net-guard 闸门——此前 redirect:'follow' 且无校验，公网 302 跳内网
+ * （169.254.169.254 等）会被自动跟随并把响应体回显（对齐 music/http.ts
+ * openStream 口径：手动重定向逐跳 isInternalUrl，上限 3 跳） */
 async function fetchManifestText(url: string): Promise<string> {
-  const res = await fetch(url, {
-    headers: { 'user-agent': BROWSER_UA, accept: '*/*' },
-    redirect: 'follow',
-    signal: AbortSignal.timeout(15_000)
-  })
+  const { isInternalUrl } = await import('../net-guard')
+  if (await isInternalUrl(url)) throw new Error('清单地址为内网地址，已拦截')
+  let current = url
+  let res: Awaited<ReturnType<typeof fetch>>
+  for (let hop = 0; ; hop++) {
+    res = await fetch(current, {
+      headers: { 'user-agent': BROWSER_UA, accept: '*/*' },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(15_000)
+    })
+    const location = res.headers.get('location')
+    if (res.status >= 300 && res.status < 400 && location) {
+      await res.body?.cancel().catch(() => {})
+      if (hop >= 3) throw new Error('重定向次数超限')
+      let next: URL
+      try {
+        next = new URL(location, current)
+      } catch {
+        throw new Error(`重定向地址无效：${location}`)
+      }
+      if (next.protocol !== 'https:' && next.protocol !== 'http:') {
+        throw new Error(`重定向协议不允许：${next.protocol}`)
+      }
+      if (await isInternalUrl(next.toString())) {
+        throw new Error('重定向目标为内网地址，已拦截')
+      }
+      current = next.toString()
+      continue
+    }
+    break
+  }
   if (!res.ok) throw new Error(`清单获取失败（HTTP ${res.status}）`)
   const reader = res.body?.getReader()
   if (!reader) return ''

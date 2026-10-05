@@ -253,6 +253,10 @@ export default function App() {
         // R4-P3：读取失败按未完成向导处理（可再走一遍，无害）
         setOnboarding(true)
       })
+    // 第十轮审查 P3：设置页「重新运行向导」入口
+    const reopen = (): void => setOnboarding(true)
+    window.addEventListener('app:open-onboarding', reopen)
+    return () => window.removeEventListener('app:open-onboarding', reopen)
   }, [])
 
   // 快捷键（§7.9 可自定义）：默认表 + 用户覆盖（settings ui.keymap），设置页录制后经事件刷新

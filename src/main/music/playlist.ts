@@ -21,6 +21,9 @@ export interface MusicPlaylistInfo {
   id: string
   name: string
   tracks: PlaylistTrack[]
+  /** 第十轮审查：歌单/专辑实际曲目总数——超过 tracks.length 说明发生截断，
+   * 调用方（UI）必须显式提示，不得让用户误以为已拿到全部曲目 */
+  total?: number
 }
 
 /** 单批入队上限（防巨型歌单一次塞爆任务队列；超过部分 UI 明示截断） */
@@ -87,24 +90,36 @@ export async function fetchMusicPlaylist(
     throw new Error('网易云歌单接口不可达或超时，请检查网络后重试')
   }
   if (!res.ok) throw new Error(`网易云歌单接口失败（HTTP ${res.status}）`)
-  const body = (await res.json().catch(() => null)) as {
-    result?: { name?: string; tracks?: Array<Record<string, unknown>> }
-    album?: { name?: string; songs?: Array<Record<string, unknown>> }
-  } | null
+  // 第十轮审查（P3）：与 M5 口径对齐——响应体加 8MB 上限（此前裸 fetch + json()
+  // 可被异常响应撑爆内存）
+  const text = await res.text().then((t) => (t.length > 8 * 1024 * 1024 ? null : t))
+  if (text === null) throw new Error('网易云歌单接口响应超过 8MB 上限（异常数据）')
+  const body = ((): {
+    result?: { name?: string; tracks?: Array<Record<string, unknown>>; trackCount?: number }
+    album?: { name?: string; songs?: Array<Record<string, unknown>>; size?: number }
+  } | null => {
+    try {
+      return JSON.parse(text)
+    } catch {
+      return null
+    }
+  })()
   if (!body) throw new Error('网易云歌单接口返回异常（非 JSON）')
   if (kind === 'playlist') {
-    const tracks = (body.result?.tracks ?? [])
+    const all = (body.result?.tracks ?? [])
       .map((t) => trackFrom(t))
       .filter((t): t is PlaylistTrack => t !== null && !!t.name)
-      .slice(0, PLAYLIST_MAX_TRACKS)
+    const tracks = all.slice(0, PLAYLIST_MAX_TRACKS)
     if (!tracks.length) throw new Error('歌单为空或接口未返回曲目（歌单可能已被删除/设为隐私）')
-    return { kind, id, name: String(body.result?.name ?? `歌单 ${id}`), tracks }
+    const total = Number(body.result?.trackCount) > 0 ? Number(body.result?.trackCount) : all.length
+    return { kind, id, name: String(body.result?.name ?? `歌单 ${id}`), tracks, total }
   }
   const albumName = String(body.album?.name ?? `专辑 ${id}`)
-  const tracks = (body.album?.songs ?? [])
+  const all = (body.album?.songs ?? [])
     .map((t) => trackFrom(t, albumName))
     .filter((t): t is PlaylistTrack => t !== null && !!t.name)
-    .slice(0, PLAYLIST_MAX_TRACKS)
+  const tracks = all.slice(0, PLAYLIST_MAX_TRACKS)
   if (!tracks.length) throw new Error('专辑为空或接口未返回曲目')
-  return { kind, id, name: albumName, tracks }
+  const total = Number(body.album?.size) > 0 ? Number(body.album?.size) : all.length
+  return { kind, id, name: albumName, tracks, total }
 }

@@ -10,12 +10,19 @@ import { useI18n } from '../../i18n'
 export function Onboarding({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [step, setStep] = useState(0)
   const [saveDir, setSaveDir] = useState('')
+  const [dirLoadError, setDirLoadError] = useState(false)
   const [theme, setTheme] = useState<ThemeId>('dark')
   const [clipboard, setClipboard] = useState(true)
   // 第七轮：主题名走 i18n
   const t = useI18n((s) => s.t)
 
   if (!open) return null
+
+  // 第十轮审查 P3：跳过出口——此前三步必须走完（遮罩不响应点击、无关闭按钮）
+  async function skip(): Promise<void> {
+    onClose()
+    await window.omniget.settingsSet('onboarded', true).catch((err) => toastError('跳过向导', err))
+  }
 
   async function finish(): Promise<void> {
     // 剪贴板监听默认开（§8 向导第四步）；关闭则记录偏好
@@ -78,7 +85,7 @@ export function Onboarding({ open, onClose }: { open: boolean; onClose: () => vo
                       .then(setSaveDir)
                       .catch(() => {
                         // R4-P3：自动填充失败留行内提示（此前静默失败，输入框停留空态无解释）
-                        setSaveDir('')
+                        setDirLoadError(true)
                       })
                   }
                 }}
@@ -99,6 +106,11 @@ export function Onboarding({ open, onClose }: { open: boolean; onClose: () => vo
                 浏览
               </Button>
             </div>
+            {dirLoadError && (
+              <p className="mt-1.5 text-[10px] text-warning">
+                系统默认目录获取失败，请手动输入或点击「浏览」选择
+              </p>
+            )}
           </div>
         )}
 
@@ -156,21 +168,30 @@ export function Onboarding({ open, onClose }: { open: boolean; onClose: () => vo
           </div>
         )}
 
-        <div className="mt-5 flex justify-end gap-2">
-          {step > 0 && (
-            <Button variant="ghost" onClick={() => setStep(step - 1)}>
-              上一步
-            </Button>
-          )}
-          {step < 2 ? (
-            <Button icon={<ArrowRight size={13} />} onClick={() => setStep(step + 1)}>
-              下一步
-            </Button>
-          ) : (
-            <Button icon={<Check size={13} weight="bold" />} onClick={() => void finish()}>
-              开始使用
-            </Button>
-          )}
+        <div className="mt-5 flex items-center justify-between">
+          {/* 第十轮审查 P3：向导可跳过 */}
+          <button
+            className="text-[11px] text-text-3 hover:text-text-2 hover:underline"
+            onClick={() => void skip()}
+          >
+            跳过，使用默认设置
+          </button>
+          <div className="flex gap-2">
+            {step > 0 && (
+              <Button variant="ghost" onClick={() => setStep(step - 1)}>
+                上一步
+              </Button>
+            )}
+            {step < 2 ? (
+              <Button icon={<ArrowRight size={13} />} onClick={() => setStep(step + 1)}>
+                下一步
+              </Button>
+            ) : (
+              <Button icon={<Check size={13} weight="bold" />} onClick={() => void finish()}>
+                开始使用
+              </Button>
+            )}
+          </div>
         </div>
       </motion.div>
     </div>

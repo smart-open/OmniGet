@@ -521,7 +521,10 @@ const TaskRow = memo(function TaskRow({
     toast(`已重新入队「${task.name || task.source}」`, 'success')
   }
 
-  const canPause = task.status === 'running' || task.status === 'queued'
+  // 第十轮审查 P3：tool 引擎不支持暂停（manager 显式拒绝），此前按钮照显
+  // 点击必报错——隐藏（取消走「移入回收站」）
+  const canPause =
+    task.engine !== 'tool' && (task.status === 'running' || task.status === 'queued')
   const canResume = task.status === 'paused'
 
   return (

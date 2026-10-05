@@ -14,13 +14,13 @@ import { YtDlpAdapter } from './adapters/ytdlp'
 import { Nm3u8Adapter } from './adapters/nm3u8'
 import { getYtDlpSupervisor } from './orchestrator/ytdlp'
 import { TaskManager } from './task/manager'
-import { startSubscriptionTimer } from './subscribe'
+import { startSubscriptionTimer, stopSubscriptionTimer } from './subscribe'
 import { getDb, closeDb } from './db'
 import { registerIpcHandlers, setTaskManager, setMusicAdapter } from './ipc'
 import { createLogger } from './logger'
 import { adoptPortableUserData, runtimeBase } from './env'
 import { startStatsScheduler, stopStatsScheduler } from './stats'
-import { startScheduler, invalidateSchedule } from './scheduler'
+import { startScheduler, stopScheduler, invalidateSchedule } from './scheduler'
 import { startBridge, stopBridge } from './bridge'
 import { toolbox } from './toolbox'
 import { broadcastToolEvents } from './ipc'
@@ -158,6 +158,15 @@ if (!gotLock) {
   })
 }
 
+/** 第十轮审查 P2：aria2 监督器引用（自动补齐完成后拉起用——bootstrap 内
+ * 声明的 supervisor 对更早启动的异步补齐链不可见） */
+const supervisorRef: { current: import('./orchestrator/aria2').Aria2Supervisor | null } = {
+  current: null
+}
+const managerRef: { current: import('./task/manager').TaskManager | null } = { current: null }
+
+let trackerRefreshTimer: ReturnType<typeof setInterval> | null = null
+
 async function bootstrap(): Promise<void> {
   // 去掉原生菜单栏（应用内导航 + 自绘标题栏承担全部入口）
   Menu.setApplicationMenu(null)
@@ -191,6 +200,25 @@ async function bootstrap(): Promise<void> {
         broadcastNotices([
           { level: 'info', message: `已自动安装引擎：${r.installed.join('、')}，如未生效请重启应用` }
         ])
+        // 第十轮审查 P2：aria2 补齐成功后自动拉起监督器——此前 supervisor.start()
+        // 在补齐启动前已因 checkBinary 失败退场，重启链（exit/close 事件驱动）
+        // 从此无触发点，核心下载引擎直到用户手动重启都不可用（任务永久卡排队）
+        if (r.installed.includes('aria2c')) {
+          void (async () => {
+            for (let i = 0; i < 30 && !supervisorRef.current; i++) {
+              await new Promise((res) => setTimeout(res, 500))
+            }
+            const sup = supervisorRef.current
+            if (!sup) return
+            try {
+              await sup.start()
+              log.info('aria2 supervisor started after engine auto-fetch')
+            } catch (err) {
+              log.warn('aria2 supervisor start after auto-fetch failed', { error: String(err) })
+              managerRef.current?.broadcastHealth(false, 'aria2 引擎不可用')
+            }
+          })()
+        }
       }
       if (r.failed.length > 0) {
         broadcastNotices([
@@ -272,6 +300,8 @@ async function bootstrap(): Promise<void> {
   })
   const adapter = new Aria2Adapter(supervisor)
   const manager = new TaskManager(adapter)
+  supervisorRef.current = supervisor
+  managerRef.current = manager
   const ytdlpAdapter = new YtDlpAdapter()
   manager.setYtdlpEngine(ytdlpAdapter)
   // R7 续（backlog #17）：N_m3u8DL-RE 引擎（二进制缺失时任务回落 yt-dlp，注入无害）
@@ -313,9 +343,11 @@ async function bootstrap(): Promise<void> {
   startScheduler((limit) => supervisor.getClient().call('changeGlobalOption', { 'max-overall-download-limit': limit }))
   // M4-16：Tracker 刷新（注入统一在 aria2 onOnline 后兜底执行，避免启动竞态告警）
   void refreshTrackers().catch((err) => log.warn('tracker refresh failed (使用缓存)', err))
-  // R7 P0-4：每日定时刷新 tracker（原注释与实现不符——只有启动一次）+ 刷新后重注入
+  // R7 P0-4：每日定时刷新 tracker（原注释与实现不符——只有启动一次）+ 刷新后重注入。
+  // 第十轮审查 P3：句柄模块级持有——退出清理段可停表（supervisor.shutdown 期间
+  // 到期的定时器此前仍会跑，甚至 killAll 后重新拉起 yt-dlp）
   const TRACKER_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000
-  setInterval(() => {
+  trackerRefreshTimer = setInterval(() => {
     void refreshTrackers()
       .then(() => {
         if (supervisor.isOnline) {
@@ -356,14 +388,18 @@ async function bootstrap(): Promise<void> {
       const win = getMainWindow()
       if (win) {
         // 第七轮审查 P2：createTray 与关窗拦截解耦——Linux 无 AppIndicator 扩展
-        // 的桌面环境 new Tray() 会 throw，此前同一回调内 interceptCloseToTray
-        // 未注册 → 关窗后无托盘无窗口无交互入口的僵尸进程
+        // 的桌面环境 new Tray() 会 throw
+        // 第十轮审查 P2：仅在托盘创建成功时拦截关窗——无托盘环境把关窗拦成
+        // hide 会造出「无托盘无窗口无交互入口」的僵尸进程（注释此前声称
+        // 「退化为直接关闭」但实现相反）；托盘缺失时关窗语义真正退化为直接关闭
+        let trayOk = true
         try {
           createTray()
         } catch (err) {
-          log.error('tray creation failed (关窗最小化将退化为直接关闭)', err)
+          trayOk = false
+          log.error('tray creation failed (关窗将直接退出，不最小化到托盘)', err)
         }
-        interceptCloseToTray(win)
+        if (trayOk) interceptCloseToTray(win)
         if (clipboardWatchEnabled()) startClipboardWatcher(() => {})
       }
     })
@@ -393,6 +429,14 @@ async function bootstrap(): Promise<void> {
     try {
       manager.stopPolling()
       stopStatsScheduler()
+      // 第十轮审查 P3：补停三个周期任务——supervisor.shutdown() 最长约 12s，
+      // 期间 10min 订阅 tick 到期会 createTask 落库甚至重新 spawn yt-dlp
+      stopSubscriptionTimer()
+      stopScheduler()
+      if (trackerRefreshTimer) {
+        clearInterval(trackerRefreshTimer)
+        trackerRefreshTimer = null
+      }
       getYtDlpSupervisor().killAll()
       // 音乐任务 abort 全部网络请求，避免遗留 .part 文件
       getMusicEngine().shutdown()
@@ -449,6 +493,25 @@ function createWindow(): void {
   })
 
   win.once('ready-to-show', () => win.show())
+
+  // 第十轮审查 P2：渲染进程崩溃自动恢复——进程级 crash（OOM/native 崩溃）后
+  // 主窗白屏死置，下载照常运行但用户没有任何 UI 可操作（RootBoundary 只兜
+  // React 渲染期异常）。带次数上限的自动 reload + 通知告知
+  let rendererReloads = 0
+  win.webContents.on('render-process-gone', (_e, details) => {
+    log.error(`renderer process gone: ${details.reason} (exitCode ${details.exitCode})`)
+    if (rendererReloads >= 3 || details.reason === 'clean-exit') return
+    rendererReloads++
+    setTimeout(() => {
+      if (win.isDestroyed()) return
+      void win.webContents.reload()
+      void import('./ipc')
+        .then(({ broadcastNotices }) =>
+          broadcastNotices([{ level: 'warning', message: '界面异常已自动恢复；如仍白屏请重启应用' }])
+        )
+        .catch(() => {})
+    }, 1000)
+  })
 
   // 自绘窗口控件：最小化 / 最大化切换 / 关闭（关闭走托盘拦截 → 隐藏）
   win.on('maximize', () => win.webContents.send('win:state', true))

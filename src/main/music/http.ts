@@ -128,6 +128,59 @@ function mergeSignal(signal: AbortSignal | undefined, timeoutMs: number): AbortS
   return signal ? AbortSignal.any([signal, t]) : t
 }
 
+// ── SSRF：手动重定向逐跳内网校验（第十轮审查：openStream 口径抽取共享）────
+// undici 默认 follow（最多 20 跳）——被投毒镜像返回 302 跳内网（127.0.0.1/
+// 169.254.169.254 等）会被自动跟随并把响应体回显/落盘，击穿 net-guard。
+// 统一改手动循环：入口 + 每个跳转目标都过 isInternalUrl，协议白名单，上限 3 跳；
+// dispatcher 按当前跳 URL 重算（跨域重定向不沿用初始 dispatcher 的 TLS 策略）。
+// 内网拦截/协议违规按不可重试处理（重试只会原样复现）
+async function fetchWithGuardedRedirects(
+  url: string,
+  init: {
+    method?: string
+    body?: UndiciRequestInit['body']
+    headers: Headers
+    signal?: AbortSignal
+    dispatcherFor: (u: string) => Agent | undefined
+  }
+): Promise<Awaited<ReturnType<typeof undiciFetch>>> {
+  const { isInternalUrl } = await import('../net-guard')
+  let current = url
+  if (await isInternalUrl(current)) {
+    throw new NonRetryableError('请求地址为内网地址，已拦截')
+  }
+  for (let hop = 0; ; hop++) {
+    const res = await undiciFetch(current, {
+      method: init.method ?? 'GET',
+      body: init.body,
+      headers: init.headers,
+      redirect: 'manual',
+      signal: init.signal,
+      dispatcher: init.dispatcherFor(current)
+    })
+    const location = res.headers.get('location')
+    if (res.status >= 300 && res.status < 400 && location) {
+      await res.body?.cancel().catch(() => {})
+      if (hop >= 3) throw new NonRetryableError('重定向次数超限')
+      let next: URL
+      try {
+        next = new URL(location, current)
+      } catch {
+        throw new NonRetryableError(`重定向地址无效：${location}`)
+      }
+      if (next.protocol !== 'https:' && next.protocol !== 'http:') {
+        throw new NonRetryableError(`重定向协议不允许：${next.protocol}`)
+      }
+      if (await isInternalUrl(next.toString())) {
+        throw new NonRetryableError('重定向目标为内网地址，已拦截')
+      }
+      current = next.toString()
+      continue
+    }
+    return res
+  }
+}
+
 // ── 网络错误中文化（§4.1：用户可见文案必须中文 + 出口动作）────────────
 // undici 的顶层错误是英文 'fetch failed'，真实原因在 cause 链的 errno 上，
 // 逐层下钻归因后给出中文原因 + 检查建议。
@@ -212,11 +265,12 @@ export async function fetchJson<T = unknown>(
       if (!reqHeaders.has('accept-encoding')) {
         reqHeaders.set('accept-encoding', 'gzip, deflate')
       }
-      const res = await undiciFetch(url, {
-        ...init,
+      const res = await fetchWithGuardedRedirects(url, {
+        method: init.method,
+        body: init.body,
         headers: reqHeaders,
         signal: merged,
-        dispatcher: dispatcherFor(url)
+        dispatcherFor
       })
       // M5 修复：响应体大小上限——恶意/被投毒镜像可返回数百 MB JSON 撑爆主进程内存
       if (res.ok) {
@@ -308,11 +362,11 @@ export async function getText(url: string, headers?: Record<string, string>, opt
   }
   let res: Awaited<ReturnType<typeof undiciFetch>>
   try {
-    res = await undiciFetch(url, {
+    res = await fetchWithGuardedRedirects(url, {
       method: 'GET',
       headers: reqHeaders,
       signal: mergeSignal(opts.signal, opts.timeoutMs ?? 15_000),
-      dispatcher: dispatcherFor(url)
+      dispatcherFor
     })
   } catch (err) {
     logHttpFailure(url, err)
@@ -359,12 +413,25 @@ async function readBodyCapped(
 export async function fetchToFile(
   url: string,
   dest: string,
-  opts: HttpOpts & { minBytes?: number; maxBytes?: number } = {}
+  opts: HttpOpts & { minBytes?: number; maxBytes?: number; onForeign?: () => void } = {}
 ): Promise<number> {
   const { signal, minBytes = 1024, maxBytes = 512 * 1024 * 1024 } = opts
   url = rewriteUrl(url)
-  const { mkdir, rename, unlink } = await import('fs/promises')
+  const { mkdir, rename, unlink, stat } = await import('fs/promises')
   const { dirname } = await import('path')
+  // 第十轮审查 P2：目标已存在（≥minBytes）→ 不再拉流直接按成功返回。
+  // 背景：QQ/酷狗/咪咕/汽水链 downloadFile 落到固定 mp3Path——音频已存在但
+  // 歌词缺失（skip_existing 要求二者同时在）时，rename 撞已存在目标在 Windows
+  // 必 EPERM → 返回 0 → 六个 br 全试一遍（每次完整下载后丢弃）→ 五平台全空，
+  // 用户看到「所有平台均无法下载」。命中时 onForeign 通知调用方标记
+  // lastProductForeign（产物非本任务落盘，取消清理/改名按 cached 语义跳过）
+  if (minBytes > 0) {
+    const existing = await stat(dest).catch(() => null)
+    if (existing && existing.size >= minBytes) {
+      opts.onForeign?.()
+      return existing.size
+    }
+  }
   // 第九轮审查：part 名掺随机后缀——QQ/酷狗/咪咕/汽水链路此前共用固定
   // `${dest}.part`，同名歌曲并发任务（skip_existing 仅 tryAllPlatforms 开头
   // 判定一次）交错写入产生损坏产物。M2 修复只落在网易云链路，此处下沉到
@@ -378,21 +445,22 @@ export async function fetchToFile(
   }
   try {
     // 流式下载：headers 10s / body 不限时（大文件慢镜像不被总超时掐断）；
-    // 对 5xx 做与 Python Retry(total=2) 一致的重试
-    let res = await undiciFetch(url, {
+    // 对 5xx 做与 Python Retry(total=2) 一致的重试。
+    // 第十轮审查：接入手动重定向逐跳内网校验（与 fetchJson/getText 同口径）
+    let res = await fetchWithGuardedRedirects(url, {
       method: 'GET',
       headers: reqHeaders,
       signal,
-      dispatcher: streamingDispatcherFor(url)
+      dispatcherFor: streamingDispatcherFor
     })
     for (let attempt = 0; RETRY_STATUS.has(res.status) && attempt < RETRY_TOTAL; attempt++) {
       await res.body?.cancel().catch(() => {}) // 消费旧响应体，防 socket 挂起
       await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS * (attempt + 1)))
-      res = await undiciFetch(url, {
+      res = await fetchWithGuardedRedirects(url, {
         method: 'GET',
         headers: reqHeaders,
         signal,
-        dispatcher: streamingDispatcherFor(url)
+        dispatcherFor: streamingDispatcherFor
       })
     }
     if (!res.ok || !res.body) {
@@ -473,7 +541,16 @@ export async function fetchToFile(
       await unlink(tmp).catch(() => {})
       return 0
     }
-    await rename(tmp, dest)
+    await rename(tmp, dest).catch(async (renameErr) => {
+      // 第十轮审查 P2：与网易云链 exists 兜底同口径——rename 撞已存在目标
+      // （并发同歌任务刚落盘）按 foreign 成功返回，清理 part
+      const existing = await stat(dest).then(() => true).catch(() => false)
+      if (existing) {
+        opts.onForeign?.()
+        return stat(dest).then((s) => s.size)
+      }
+      throw renameErr
+    })
     return total
   } catch (err) {
     await unlink(tmp).catch(() => {})
@@ -559,7 +636,7 @@ export async function openStream(
 export async function downloadFile(
   url: string,
   dest: string,
-  opts: HttpOpts = {}
+  opts: HttpOpts & { onForeign?: () => void } = {}
 ): Promise<boolean> {
   const n = await fetchToFile(url, dest, { ...opts, minBytes: 1024 })
   return n >= 1024

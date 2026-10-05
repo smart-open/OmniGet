@@ -1,7 +1,7 @@
 // 任务管理器（M1-1/M1-11，§4.5）：编排、状态机驱动、持久化恢复、事件广播。
 
 import { app } from 'electron'
-import { basename, dirname, isAbsolute, join } from 'path'
+import { basename, dirname, isAbsolute, join, relative } from 'path'
 import { validateSaveDir } from '../save-dir'
 import { credentialDirs, hitsAny, normPath, realishPath, SYSTEM_DIRS } from '../sensitive-paths'
 import type {
@@ -181,7 +181,7 @@ export class TaskManager {
         // 原分享链接（params.originUrl），否则同链接重复下载
         // 第九轮审查：直播任务 task.source 已改写为清单直链——直链时效极短，入
         // 档案只会造成无意义查重键（对齐「直播 URL 不入去重档案」三期口径）
-        if (task.type === 'video' && !this.isPlaylistTask(task) && !parseParamsJson(task.params).roomUrl) {
+        if (task.type === 'video' && !this.isPlaylistTask(task) && !this.isLiveRecordingTask(task)) {
           // 审查修复：sidecar 改道任务的 task.source 已换成时效直链——登记原分享
           // 链接（params.originUrl），否则与创建期预检键不一致、去重失效
           addArchiveKey(readTaskOriginUrl(task) ?? task.source)
@@ -191,7 +191,7 @@ export class TaskManager {
           if (origin) addArchiveKey(origin)
         }
       }
-      if (e.status === 'failed' && task.type === 'video' && !this.isPlaylistTask(task) && !parseParamsJson(task.params).roomUrl) {
+      if (e.status === 'failed' && task.type === 'video' && !this.isPlaylistTask(task) && !this.isLiveRecordingTask(task)) {
         // 审查修复：订阅侧「入队即登记档案」，下载失败必须回滚——否则失败条目被
         // 永久拉黑（订阅追更从此跳过该视频，唯一解法是手删 download.archive）。
         // 第六轮审查：回滚+下轮重建的循环对永久失败条目（下架/地区受限）是无限
@@ -200,6 +200,12 @@ export class TaskManager {
         removeArchiveKey(origin)
         removeArchiveKey(task.source)
         noteArchiveFailure(origin)
+      }
+      // 第十轮审查 P2：直播录制断流自动重连（有限次）——长时录制中 CDN 抖动/
+      // 主播短暂断流此前直接落 failed 终态，录制止于断点需人工介入。30s 后凭
+      // roomUrl 重解清单再试，上限 3 次，耗尽后维持 failed 给用户出口
+      if (e.status === 'failed' && task.engine === 'nm3u8' && this.isLiveRecordingTask(task)) {
+        this.scheduleLiveRetry(task)
       }
       // 审查修复（P2-3 配套）：失败/暂停外的终态路径无人调用 persistCliProduct，
       // 适配器 outputFiles 登记需在此兜底注销（防 Map 无界增长；暂停保留供 resume）
@@ -317,9 +323,15 @@ export class TaskManager {
                 ])
               }
             } catch (err) {
-              log.warn(
-                `subtitle hook failed for ${task.id}: ${err instanceof Error ? err.message : String(err)}`
-              )
+              const msg = err instanceof Error ? err.message : String(err)
+              log.warn(`subtitle hook failed for ${task.id}: ${msg}`)
+              // 第十轮审查 P2：配额/凭据/网络类失败必须用户可见——「未匹配到字幕」
+              // 是正常结果保持静默，其余广播 warning（与成功路径对称；不含 Key）
+              if (!msg.includes('未匹配')) {
+                broadcastNotices([
+                  { level: 'warning', message: `自动匹配字幕失败：${msg}`, taskId: task.id }
+                ])
+              }
             }
           }
           const { maybeExportNfo } = await import('../video/nfo')
@@ -608,6 +620,7 @@ export class TaskManager {
     const threads = Math.round(Math.min(64, Math.max(1, input.threads || 8)))
 
     // 磁力查重：infohash 已存在 → 秒开文件树（§4.2 Step4）；回收站任务已被排除（B7）
+    let magnetInfohash: string | undefined
     if (s.type === 'magnet') {
       let ih = /xt=urn:btih:([a-zA-Z0-9]+)/.exec(s.source)?.[1]
       if (ih) {
@@ -620,6 +633,9 @@ export class TaskManager {
           ih = undefined
         }
       }
+      // 第十轮审查 P2：创建期预写 infohash（随任务落库）——解析窗口内第二次
+      // 粘贴同磁力经 findTaskByInfohash 命中 parsing 状态 → 明确拒绝双开
+      if (ih) magnetInfohash = ih
       if (ih) {
         const existing = findTaskByInfohash(ih)
         if (existing) {
@@ -679,11 +695,16 @@ export class TaskManager {
       threads,
       noWatermark: s.noWatermark ?? input.noWatermark,
       seedRatio: input.seedRatio,
+      ...(magnetInfohash ? { infohash: magnetInfohash } : {}),
       // R7 P1：镜像列表 + 单任务限速 + 视频平台标识入 params（parse 阶段校验后回写）
       params: JSON.stringify({
         ...(multiSource ? { urls: multiSource } : {}),
         ...(input.speedLimit?.trim() ? { speedLimit: input.speedLimit.trim() } : {}),
-        ...(s.type === 'video' && s.platform ? { platform: s.platform } : {})
+        ...(s.type === 'video' && s.platform ? { platform: s.platform } : {}),
+        // 第十轮审查 P2：直播标记随任务持久化——RE 缺席回落 yt-dlp 原生直录时
+        // 不走 nm3u8 改写分支（无 roomUrl），归档/熔断记账的直播豁免判据需
+        // 引擎无关（isLiveRecordingTask：roomUrl || liveRoom）
+        ...(s.liveRoom ? { liveRoom: true } : {})
       }),
       createdAt: Date.now()
     }
@@ -760,6 +781,29 @@ export class TaskManager {
         engineGid: parsed.pendingGid ?? null,
         ...(task.params ? { params: task.params } : {})
       })
+      // 第十轮审查 P2：解析后补查重——.torrent 文件（type 'bt'）创建期无 infohash
+      // 可提取，同种子双开此前完全无防线；磁力并发窗口的漏网（双方同时 parse）
+      // 也在此收口。命中在途同种任务 → 清理本任务的引擎侧条目并整体撤销
+      if (parsed.infohash) {
+        const dupBt = findTaskByInfohash(parsed.infohash)
+        if (
+          dupBt &&
+          dupBt.id !== task.id &&
+          !isTrashed(dupBt.id) &&
+          ['parsing', 'awaiting', 'queued', 'running', 'paused'].includes(dupBt.status)
+        ) {
+          if (parsed.pendingGid) {
+            await this.aria2
+              .remove({ ...task, engineGid: parsed.pendingGid })
+              .catch(() => {})
+          }
+          purgeTask(task.id)
+          return {
+            kind: 'failed',
+            error: `该磁力/种子已有任务在进行中（${dupBt.name}，当前状态：${dupBt.status}）。请在任务列表中操作原任务，勿重复创建`
+          }
+        }
+      }
       if (parsed.files?.length) {
         saveTaskFiles(
           task.id,
@@ -1022,13 +1066,21 @@ export class TaskManager {
       // 之后从回收站恢复再完成，旧完成记录未回撤而新完成照常入账 → daily_stats 双计。
       // 改为保留旧 completedAt 作为「待回撤」锚点：重新起跑成功后由
       // consumePendingCompletion 回撤；排队/重启/失败窗口期间记录保持不变
+      // 第十轮审查 P1：增量补下的「覆盖放行」与「记账回撤」必须解耦——锚点在
+      // 起跑成功瞬间被 consumePendingCompletion 消费（防双计的正确设计），若
+      // allowOverwrite 继续以锚点为唯一判据，此后恢复泵/重试/回收站恢复等任何
+      // 二次起跑都会裸 start 撞 File already exists（saveDir 躺着原完成文件），
+      // 任务陷入不可修复的失败循环。改随 params 持久化 incremental 标记，
+      // 三处二次起跑路径按标记注入 allowOverwrite（见 allowOverwriteForTask）
+      const prevParams = parseParamsJson(task.params)
       updateTaskFields(task.id, {
         status: 'queued',
         threads: input.threads,
         error: null,
         // 回归审查 P3：清旧 gid——旧 gid 指向已完成/做种中的引擎条目，排队窗口
         // 内轮询对它做无谓 tellStatus（对齐 retryTask 口径）
-        engineGid: null
+        engineGid: null,
+        params: JSON.stringify({ ...prevParams, incremental: true })
       })
       this.pushEvent({ taskId: task.id, status: 'queued' })
       this.gateStart(
@@ -1270,10 +1322,11 @@ export class TaskManager {
                   // 回归审查 P2：增量补下任务（completedAt 锚点在）二次起跑必须
                   // 放行覆盖——saveDir 里有原完成文件，裸 start 必撞 File already
                   // exists（对齐 confirmSelection 增量入口的 allowOverwrite: true）
-                  const pendingIncremental = getTaskCompletedAt(cur.id) != null
+                  // 第十轮审查 P1：放行判据改 allowOverwriteForTask（锚点 + params
+                  // incremental 标记）——锚点被消费后二次起跑仍须放行覆盖
                   const gid = await this.aria2.start(cur, {
                     ...this.selectionFor(cur),
-                    ...(pendingIncremental ? { allowOverwrite: true } : {})
+                    ...(this.allowOverwriteForTask(cur) ? { allowOverwrite: true } : {})
                   })
                   // 第七轮修复（双重记账）：排队暂停恢复路径同样回撤未消化的旧记账
                   this.consumePendingCompletion(cur.id, cur.totalBytes ?? 0)
@@ -1321,7 +1374,30 @@ export class TaskManager {
           // B6：只删除任务文件（task_files 记录的相对路径），禁止整目录 rm
           // M2 修复：先 purge 记录后删文件——中途崩溃最多残留孤儿文件（无害可再清），
           // 而非「记录在但文件已删」的矛盾状态
-          const files = getTaskFiles(task.id)
+          let files = getTaskFiles(task.id)
+          // 第十轮审查 P1：music.template 带目录段（官方预设 {{artist}}/{{album}}）
+          // 时产物在 saveDir 子目录——task_files 存量 basename 登记 join 回 saveDir
+          // 根必漏删（rm force 静默成功，mp3/lrc 永久残留且库行已注销）。用
+          // music_tracks 绝对路径反查补齐（新旧任务都覆盖；purge 前捕获同 M2 口径）
+          if (task.engine === 'music') {
+            try {
+              const { getTracksByTask } = await import('../music/library')
+              const known = new Set(files.map((f) => f.path))
+              const extras: TaskFile[] = []
+              for (const t of getTracksByTask(task.id)) {
+                for (const abs of [t.path, t.lrc_path]) {
+                  if (!abs) continue
+                  const rel = relative(task.saveDir, abs).replace(/\\/g, '/')
+                  if (!rel || rel.startsWith('..') || isAbsolute(rel) || known.has(rel)) continue
+                  known.add(rel)
+                  extras.push({ path: rel, size: 0, selected: true, downloaded: 0 })
+                }
+              }
+              if (extras.length > 0) files = [...files, ...extras]
+            } catch (err) {
+              log.warn(`music track paths lookup failed for ${task.id}`, { error: String(err) })
+            }
+          }
           purgeTask(task.id)
           // 四期（0.11.x）：统一内容库与回收站口径打通——文件已删时库行随之注销，
           // 不留死链；「删除·保留文件」（purgeRecord）不在此路径，库行保留
@@ -1375,7 +1451,10 @@ export class TaskManager {
       }
       dirs.add(dirname(abs.replace(/\\/g, '/')))
       // 终态删除用户文件：失败必须留痕（记录已删但文件残留会让用户困惑）
-      await rm(abs, { force: true }).catch((err) =>
+      // 第十轮审查 P2：recursive 补齐——demucs（音轨分离）等工具产物是目录，
+      // 无 recursive 对非空目录必 ENOTEMPTY，数百 MB stem 文件永久残留
+      //（取消路径 toolbox.ts 清理早已带 recursive，仅此路径漏）
+      await rm(abs, { force: true, recursive: true }).catch((err) =>
         log.warn(`删除任务文件失败（残留磁盘）: ${abs}`, { error: String(err) })
       )
     }
@@ -1469,11 +1548,18 @@ export class TaskManager {
       (t) => t.engine === 'aria2'
     )
     for (const t of rows) {
-      updateTaskFields(t.id, { status: 'queued', engineGid: null })
-      this.pushEvent({ taskId: t.id, status: 'queued' })
+      // 第十轮审查 P2：用户主动暂停的任务必须保留 paused 语义——此前一律重置
+      // queued 由恢复泵自动续传，用户明确表达的「停住」被引擎一次重启静默撤销
+      //（ytdlp/nm3u8 恢复路径本就只处理 queued，口径不一致）。paused 保持原状态
+      // 仅清 gid：resume 走无 gid 分支重新过启动闸门（re-add + selectionFor），
+      // 语义与正常暂停恢复一致
+      const nextStatus = t.status === 'paused' ? 'paused' : 'queued'
+      updateTaskFields(t.id, { status: nextStatus, engineGid: null })
+      this.pushEvent({ taskId: t.id, status: nextStatus })
     }
-    if (rows.length > 0) {
-      log.warn(`aria2 中途重启：${rows.length} 个任务已重置回排队待续传`)
+    const reset = rows.filter((t) => t.status !== 'paused')
+    if (reset.length > 0) {
+      log.warn(`aria2 中途重启：${reset.length} 个任务已重置回排队待续传`)
     }
   }
 
@@ -1538,11 +1624,11 @@ export class TaskManager {
           if (cur.engine === 'aria2') {
             // R7 续修复（backlog #11）：sidecar 兜底任务恢复前刷新时效直链
             const withFreshLink = await this.refreshSidecarLink(cur)
-            // 回归审查 P2：增量补下任务重启恢复同理——锚点在即放行覆盖
-            const pendingIncremental = getTaskCompletedAt(cur.id) != null
+            // 回归审查 P2：增量补下任务重启恢复同理——放行覆盖（第十轮：判据改
+            // allowOverwriteForTask，锚点被消费后凭 params.incremental 标记放行）
             gid = await this.aria2.start(withFreshLink, {
               ...this.selectionFor(cur),
-              ...(pendingIncremental ? { allowOverwrite: true } : {})
+              ...(this.allowOverwriteForTask(cur) ? { allowOverwrite: true } : {})
             })
             // 第七轮修复（双重记账）：重启前遗留的「增量补下 queued 任务」（带旧
             // completedAt 锚点）经恢复泵起跑成功后回撤旧记账
@@ -1631,6 +1717,19 @@ export class TaskManager {
           // R7 续（backlog #17）：RE 重 spawn
           // 回归审查（videoOpts 覆盖面补全）：从 params 回放（含 liveRecordMinutes）
           const p = parseParamsJson(cur.params)
+          // 第十轮审查 P2：直播任务重试前重解清单——清单直链时效分钟~小时级，
+          // 拿旧清单重试几乎必然 403/404 且报错晦涩（对齐 refreshSidecarLink 口径）
+          if (p.roomUrl) {
+            const liveParsed = await import('../live/resolve')
+              .then((m) => m.resolveLiveRoom({ ...cur, source: String(p.roomUrl) }))
+              .catch(() => null)
+            if (liveParsed?.manifestUrl) {
+              cur.source = liveParsed.manifestUrl
+              updateTaskFields(cur.id, { source: liveParsed.manifestUrl })
+            } else {
+              throw new Error('直播间清单刷新失败（可能未开播或接口变动）。请稍后重试，或重新提交直播间地址')
+            }
+          }
           if (p.videoOptions && typeof p.videoOptions === 'object') {
             this.nm3u8?.setVideoOptions(cur.id, p.videoOptions as Parameters<
               NonNullable<Nm3u8Adapter['setVideoOptions']>
@@ -1640,11 +1739,11 @@ export class TaskManager {
         } else {
           // R7 续修复（backlog #11）：sidecar 兜底任务重试前刷新时效直链
           const fresh = await this.refreshSidecarLink(cur)
-          // 回归审查 P2：增量补下任务失败重试同理——锚点在即放行覆盖
-          const pendingIncremental = getTaskCompletedAt(cur.id) != null
+          // 回归审查 P2：增量补下任务失败重试同理——放行覆盖（第十轮：判据改
+          // allowOverwriteForTask）
           gid = await this.aria2.start(fresh, {
             ...this.selectionFor(cur),
-            ...(pendingIncremental ? { allowOverwrite: true } : {})
+            ...(this.allowOverwriteForTask(cur) ? { allowOverwrite: true } : {})
           })
           // 第七轮修复（双重记账）：失败任务若带未回撤的旧 completedAt（增量补下
           // 启动失败落入 failed），重试起跑成功后回撤
@@ -1848,6 +1947,81 @@ export class TaskManager {
     recordCompletion(Date.now(), Math.max(0, bytes ?? 0))
   }
 
+  /**
+   * 第十轮审查 P1：增量补下任务的覆盖放行判据（二次起跑路径统一出口）。
+   * 两个语义源：① completedAt 锚点仍在（起跑前窗口）；② params.incremental
+   * 标记（锚点已被 consumePendingCompletion 消费后的整个增量生命周期——
+   * 回收站恢复会删 .aria2 控制文件、aria2 崩溃重启会重置 queued，这些路径
+   * 的裸 start 撞 saveDir 里的原完成文件必报 File already exists）
+   */
+  private allowOverwriteForTask(task: TaskExt): boolean {
+    if (getTaskCompletedAt(task.id) != null) return true
+    return parseParamsJson(task.params).incremental === true
+  }
+
+  /**
+   * 第十轮审查 P2：直播录制任务判据（引擎无关）——nm3u8 改写路径写 roomUrl，
+   * RE 缺席回落 yt-dlp 原生直录的路径只写 liveRoom 标记。归档/熔断记账必须
+   * 同时豁免两条路径（三期口径：直播 URL 不入去重档案、失败不熔断记账）
+   */
+  private isLiveRecordingTask(task: TaskExt): boolean {
+    const p = parseParamsJson(task.params)
+    return Boolean(p.roomUrl || p.liveRoom)
+  }
+
+  private liveRetryTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+  /** 第十轮审查 P2：直播录制断流自动重连调度（30s × 上限 3 次） */
+  private scheduleLiveRetry(task: TaskExt): void {
+    const attempts = Number(parseParamsJson(task.params).liveRetries) || 0
+    if (attempts >= 3) return
+    if (this.liveRetryTimers.has(task.id)) return
+    log.info(`live recording failed, auto-retry ${attempts + 1}/3 in 30s: ${task.id}`)
+    const timer = setTimeout(() => {
+      this.liveRetryTimers.delete(task.id)
+      void (async () => {
+        const cur = getTask(task.id) as TaskExt | null
+        if (!cur || cur.status !== 'failed' || isTrashed(cur.id)) return
+        const roomUrl = String(parseParamsJson(cur.params).roomUrl ?? '')
+        if (!roomUrl) return
+        // 重解清单（旧直链必已过期）；未开播/接口变动时维持 failed，用户手动重试
+        let source = cur.source
+        try {
+          const parsed = await import('../live/resolve').then((m) =>
+            m.resolveLiveRoom({ ...cur, source: roomUrl })
+          )
+          if (parsed.manifestUrl) source = parsed.manifestUrl
+        } catch (err) {
+          log.info(`live retry aborted (resolve failed): ${cur.id}`, {
+            error: err instanceof Error ? err.message : String(err)
+          })
+          return
+        }
+        const prev = parseParamsJson(cur.params)
+        updateTaskFields(cur.id, {
+          source,
+          error: null,
+          params: JSON.stringify({ ...prev, liveRetries: attempts + 1 })
+        })
+        broadcastNotices([
+          {
+            level: 'info',
+            message: `直播断流，已自动重连（第 ${attempts + 1}/3 次）：${cur.name || cur.id}`,
+            taskId: cur.id
+          }
+        ])
+        try {
+          await this.retryTask(cur.id)
+          this.pushEvent({ taskId: cur.id, status: 'queued' })
+        } catch (err) {
+          log.warn(`live retry start failed: ${cur.id}`, { error: String(err) })
+        }
+      })()
+    }, 30_000)
+    timer.unref?.()
+    this.liveRetryTimers.set(task.id, timer)
+  }
+
   /** 第七轮修复（双重记账）：增量补下 re-add 保留旧 completedAt 作「待回撤」锚点
    * （排队/删除恢复/重启/失败重试窗口期间旧记录不丢）。任务经任何路径真正重新
    * 起跑成功后调用本方法回撤旧记账并清锚点——此后完成照常入账，杜绝双计 */
@@ -1948,6 +2122,11 @@ export class TaskManager {
   }): Promise<{ taskId: string }> {
     if (!this.music || !this.music.isOnline) {
       throw new Error('音乐服务未就绪，请稍后重试或重启应用。')
+    }
+    // 第十轮审查 P3：音质档位白名单——此前渲染层异常值原样入库传给引擎
+    //（静默回退默认档），与 previewUrl 的同型校验对齐
+    if (!['standard', 'high', 'lossless'].includes(input.quality)) {
+      throw new Error('无效的音质档位（可选：standard / high / lossless）')
     }
     let artist = (input.artist ?? '').trim()
     let song = (input.song ?? '').trim()

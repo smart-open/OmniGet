@@ -184,6 +184,8 @@ export interface MusicPlaylistInfo {
   id: string
   name: string
   tracks: MusicPlaylistTrack[]
+  /** 曲目总数——超过 tracks.length 说明发生截断（UI 必须显式提示） */
+  total?: number
 }
 
 /** 音乐库曲目（music.done 完成即登记） */

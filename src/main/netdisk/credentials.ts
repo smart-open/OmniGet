@@ -35,6 +35,13 @@ function safeStorage(): SafeStorageLike | null {
   }
 }
 
+function normalizeCreds(obj: Partial<WebdavCredentials>): WebdavCredentials | null {
+  if (typeof obj.username === 'string' && obj.username) {
+    return { username: obj.username, password: typeof obj.password === 'string' ? obj.password : '' }
+  }
+  return null
+}
+
 export function saveWebdavCredentials(username: string, password: string): void {
   const payload = JSON.stringify({ username, password } satisfies WebdavCredentials)
   const ss = safeStorage()
@@ -45,19 +52,24 @@ export function saveWebdavCredentials(username: string, password: string): void 
     return
   }
   log.warn('safeStorage 不可用，WebDAV 凭据降级明文存储（仅本地 settings 表）')
-  setSetting(KEY_PLAIN, payload)
+  // 第十轮审查 P1：getSettingParsed 读取时会 JSON.parse 一层——此处必须把
+  // payload 字符串再编码一层，否则读回的是对象而 read() 只认 string，
+  // 凭据写入即丢失（保存后永远 401）
+  setSetting(KEY_PLAIN, JSON.stringify(payload))
   setSetting(KEY_ENC, 'null')
 }
 
 /** 读取凭据；未配置/解密失败返回 null（调用方按匿名访问处理或明确报错） */
 export function getWebdavCredentials(): WebdavCredentials | null {
   const read = (raw: unknown): WebdavCredentials | null => {
+    // 第十轮审查：兼容对象形态（修复前明文降级分支单层编码写入的存量行）
+    if (raw !== null && typeof raw === 'object') {
+      return normalizeCreds(raw as Partial<WebdavCredentials>)
+    }
     if (typeof raw !== 'string') return null
     try {
       const obj = JSON.parse(raw) as Partial<WebdavCredentials>
-      if (typeof obj.username === 'string' && obj.username) {
-        return { username: obj.username, password: typeof obj.password === 'string' ? obj.password : '' }
-      }
+      return normalizeCreds(obj)
     } catch {
       // 结构损坏按未配置处理
     }

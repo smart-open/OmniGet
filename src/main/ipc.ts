@@ -180,7 +180,10 @@ export function registerIpcHandlers(): void {
     // filter: 'all' | 'downloading' | 'completed' | 'trash' | 类型分组
     switch (filter) {
       case 'downloading':
-        return listTasks({ status: ['queued', 'running', 'paused', 'verifying', 'parsing'] })
+        // 第十轮审查 P2：补 'awaiting'——渲染层 FILTERS.downloading 声明包含
+        // awaiting（待确认），但数据源由主进程 SQL 决定，缺了它任务在 awaiting
+        // 阶段切换视图后「消失」，只能去「全部」里找
+        return listTasks({ status: ['queued', 'running', 'paused', 'verifying', 'parsing', 'awaiting'] })
       case 'completed':
         return listTasks({ status: ['completed', 'seeding'] })
       // R6：「下载失败」侧栏视图（失败任务列表 + 角标）
@@ -391,9 +394,17 @@ export function registerIpcHandlers(): void {
   })
 
   // ── R7 续（backlog #11）：短视频解析服务连接测试 ─────────────────────
-  ipcMain.handle(IPC_CHANNELS.sidecarProbe, async (_e, baseUrl: string) => {
-    const { probeVideoSidecar } = await import('./sidecar/video-api')
-    return probeVideoSidecar(String(baseUrl ?? ''))
+  ipcMain.handle(IPC_CHANNELS.sidecarProbe, async () => {
+    const { probeVideoSidecar, getVideoSidecarBase } = await import('./sidecar/video-api')
+    // 第十轮审查 P2：探测面收敛——此通道此前接受渲染层任意 URL 做「可达性 +
+    // 状态码回显」探测（netdiskProbe 只探设置项，这里是唯一接受未持久化输入的
+    // 探测 oracle，可被借道枚举内网主机/端口的存活与状态）。改为仅探测当前
+    // 设置项地址，测试新地址走「先保存再测试」（与网盘探测同口径）
+    const configured = getVideoSidecarBase()
+    if (!configured) {
+      return { ok: false, detail: '解析服务未配置：请先填写地址并保存，再测试连接' }
+    }
+    return probeVideoSidecar(configured)
   })
 
   // ── R7 续（backlog #18）：订阅追更 ──────────────────────────────────

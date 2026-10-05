@@ -53,13 +53,16 @@ function isPrivateIPv4(host: string): boolean {
 }
 
 /** DNS 解析结果全部必须是公网地址（防域名解析到内网的 rebinding 式绕过） */
-const resolvedHostCache = new Map<string, boolean>()
+const resolvedHostCache = new Map<string, number>()
+// 第十轮审查 P3：公网判定加 TTL——此前 true 永久缓存，自定义镜像域首次校验后
+// DNS rebinding 到内网时不再复核
+const RESOLVED_HOST_TTL_MS = 5 * 60 * 1000
 async function isPublicHost(host: string): Promise<boolean> {
   if (isPrivateIPv4(host)) return false
   if (host === 'localhost' || host.endsWith('.local') || host.endsWith('.internal')) return false
   if (ipLiteralPrivate.test(host)) return false
-  const cached = resolvedHostCache.get(host)
-  if (cached !== undefined) return cached
+  const cachedAt = resolvedHostCache.get(host)
+  if (cachedAt !== undefined && Date.now() - cachedAt < RESOLVED_HOST_TTL_MS) return true
   try {
     const addrs = await lookup(host, { all: true })
     const ok =
@@ -71,7 +74,7 @@ async function isPublicHost(host: string): Promise<boolean> {
       )
     // M2 修复：只缓存"确认公网"的结果——首启离线/DNS 抖动期的不可信判定不得
     // 钉死整个进程生命周期（此前 false 永久缓存，github.com 会被误拒到重启为止）
-    if (ok) resolvedHostCache.set(host, true)
+    if (ok) resolvedHostCache.set(host, Date.now())
     return ok
   } catch {
     return false // 解析失败按不可信处理（fail-closed），但不落缓存

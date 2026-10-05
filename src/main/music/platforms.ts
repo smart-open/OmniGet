@@ -7,6 +7,7 @@ import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { mkdir, open, rename, stat, unlink, writeFile } from 'fs/promises'
 import { getJson, postForm, postJson, getText, fetchToFile, downloadFile, hostOf, isTrustedAudioHost } from './http'
+import { listTracks } from './library'
 import { HostGate } from './gate'
 import { mergeBilingualLrc, getLyricsMode } from './lyrics'
 import { createLogger } from '../logger'
@@ -557,6 +558,7 @@ export class PlatformEngine {
   }
 
   async tryQq(songMid: string, mp3Path: string, lrcPath: string, quality: Quality): Promise<boolean> {
+    this.lastProductForeign = false // 第十轮审查：与 tryNeteaseRobust 同口径重置归属标记
     const q = QUALITY_MAP.qq![quality]
     const h = { 'user-agent': 'Mozilla/5.0' }
     // vkeys
@@ -565,7 +567,7 @@ export class PlatformEngine {
       await this.gate(url)
       const r = await getJson<{ data?: { url?: string } }>(url, h, { signal: this.cb.signal, timeoutMs: 10_000 })
       const url2 = r.data?.url ?? ''
-      if (trustedAudioUrl(url2) && (await downloadFile(url2, mp3Path, { signal: this.cb.signal }))) {
+      if (trustedAudioUrl(url2) && (await downloadFile(url2, mp3Path, { signal: this.cb.signal, onForeign: () => { this.lastProductForeign = true } }))) {
         await this.saveQqLyric(songMid, lrcPath)
         return true
       }
@@ -574,12 +576,21 @@ export class PlatformEngine {
     }
     // 317ak
     try {
-      for (const q2 of ['7', '9', '10', '8', '6', '5']) {
+      // 第十轮审查：QQ 317ak 链此前无视所选音质恒从高到低全试（标准档也先拉
+      // 无损再丢弃）——与酷狗链 quality 接线口径对齐。br 越大音质越高（同 317ak
+      // 酷狗链惯例）；链路自带逐档回退，选低档优先命中低 br
+      const brChain =
+        quality === 'lossless'
+          ? ['10', '9', '8', '7', '6', '5']
+          : quality === 'high'
+            ? ['7', '6', '5']
+            : ['5', '6', '7']
+      for (const q2 of brChain) {
         const url = `https://api.317ak.com/api/yinyue/qqyinyue?ckey=Wk83NlFKQ0lINVBQSUNKT09YVUg=&i=${songMid}&br=${q2}&type=json&lrc=1`
         await this.gate(url)
         const data = await getJson<{ url?: string; lyric?: string }>(url, h, { signal: this.cb.signal, timeoutMs: 10_000 })
         const url2 = data.url ?? ''
-        if (trustedAudioUrl(url2) && (await downloadFile(url2, mp3Path, { signal: this.cb.signal }))) {
+        if (trustedAudioUrl(url2) && (await downloadFile(url2, mp3Path, { signal: this.cb.signal, onForeign: () => { this.lastProductForeign = true } }))) {
           await writeLrc(lrcPath, data.lyric || EMPTY_LRC)
           return true
         }
@@ -638,6 +649,7 @@ export class PlatformEngine {
   }
 
   async tryKugou(fileHash: string, mp3Path: string, lrcPath: string, quality: Quality): Promise<boolean> {
+    this.lastProductForeign = false // 第十轮审查：重置归属标记
     // 二期（0.9.x 无损档）：quality 接线（此前 void quality 忽略音质，恒从 br=6 起试）。
     // 317ak br 值越大音质越高（1-6）；haitangw level：hires > lossless > exhigh > standard
     const h = { 'user-agent': 'Mozilla/5.0' }
@@ -648,7 +660,7 @@ export class PlatformEngine {
         await this.gate(url)
         const data = await getJson<{ url?: string; lyric?: string }>(url, h, { signal: this.cb.signal, timeoutMs: 10_000 })
         const url2 = data.url ?? ''
-        if (trustedAudioUrl(url2) && (await downloadFile(url2, mp3Path, { signal: this.cb.signal }))) {
+        if (trustedAudioUrl(url2) && (await downloadFile(url2, mp3Path, { signal: this.cb.signal, onForeign: () => { this.lastProductForeign = true } }))) {
           await writeLrc(lrcPath, data.lyric || EMPTY_LRC)
           return true
         }
@@ -663,7 +675,7 @@ export class PlatformEngine {
         await this.gate(url)
         const r = await getJson<{ data?: { url?: string } }>(url, h, { signal: this.cb.signal, timeoutMs: 10_000 })
         const url2 = r.data?.url ?? ''
-        if (trustedAudioUrl(url2) && (await downloadFile(url2, mp3Path, { signal: this.cb.signal }))) {
+        if (trustedAudioUrl(url2) && (await downloadFile(url2, mp3Path, { signal: this.cb.signal, onForeign: () => { this.lastProductForeign = true } }))) {
           await writeLrc(lrcPath, EMPTY_LRC)
           return true
         }
@@ -703,7 +715,10 @@ export class PlatformEngine {
             id: String(cid),
             copyrightId: String(copyid),
             name: String(s.name ?? s.songName ?? ''),
-            artist: singers.filter((g) => typeof g === 'object').map((g) => g.name ?? '').join(', ')
+            artist: singers.filter((g) => typeof g === 'object').map((g) => g.name ?? '').join(', '),
+            // 第十轮审查 P3：补专辑名映射——此前 tryMigu 的 lastAlbum 恒空，
+            // {{album}} 归档模板对咪咕恒 Unknown Album（死代码）
+            album: String((s.album as { name?: string } | undefined)?.name ?? s.albumName ?? '') || undefined
           })
         }
       }
@@ -714,6 +729,7 @@ export class PlatformEngine {
   }
 
   async tryMigu(song: PlatformSong, mp3Path: string, lrcPath: string, quality: Quality): Promise<boolean> {
+    this.lastProductForeign = false // 第十轮审查：重置归属标记
     this.lastAlbum = song.album ?? ''
     const contentId = song.id
     const copyrightId = song.copyrightId ?? ''
@@ -752,6 +768,9 @@ export class PlatformEngine {
       trustedAudioUrl(audio) &&
       (await downloadFile(audio, mp3Path, {
         signal: this.cb.signal,
+        onForeign: () => {
+          this.lastProductForeign = true
+        },
         headers: { 'User-Agent': 'Mozilla/5.0', Referer: 'https://m.music.migu.cn/v3' }
       }))
     ) {
@@ -818,7 +837,9 @@ export class PlatformEngine {
             name: String(track.name ?? ''),
             artist: ((track.artists as Array<{ name?: string }> | undefined) ?? [])
               .map((a) => a.name ?? '')
-              .join(', ')
+              .join(', '),
+            // 第十轮审查 P3：补专辑名映射（同 tryMigu 口径）
+            album: String((track.album as { name?: string } | undefined)?.name ?? '') || undefined
           })
         }
       }
@@ -829,6 +850,7 @@ export class PlatformEngine {
   }
 
   async trySoda(song: PlatformSong, mp3Path: string, lrcPath: string): Promise<boolean> {
+    this.lastProductForeign = false // 第十轮审查：重置归属标记
     this.lastAlbum = song.album ?? ''
     const songId = song.id
     try {
@@ -847,7 +869,7 @@ export class PlatformEngine {
         { signal: this.cb.signal, timeoutMs: 10_000 }
       )
       const url2 = data.data?.url ?? ''
-      if (trustedAudioUrl(url2) && (await downloadFile(url2, mp3Path, { signal: this.cb.signal }))) {
+      if (trustedAudioUrl(url2) && (await downloadFile(url2, mp3Path, { signal: this.cb.signal, onForeign: () => { this.lastProductForeign = true } }))) {
         await writeLrc(lrcPath, data.data?.lyric || EMPTY_LRC)
         return true
       }
@@ -918,6 +940,27 @@ export async function tryAllPlatforms(
   if (await alreadyDownloaded(mp3Path, lrcPath)) {
     return { success: true, source: 'cached', message: '已存在，跳过', mp3Path, lrcPath, cached: true }
   }
+  // 第十轮审查 P2：music.template 自定义命名后 skip_existing 永不命中——首次
+  // 下载的产物已被 applyNaming 改名/迁目录，原生命名路径必不存在，重复入队会
+  // 全量重下并堆积「(2)」副本。补音乐库兜底：title/artist 命中且文件在盘 →
+  // 按 cached 返回（engine 取消清理与改名自动跳过）
+  const libHit = listTracks().find(
+    (t) =>
+      t.title === songName &&
+      (!singer || (t.artist ?? '').includes(singer)) &&
+      stat(t.path).then(() => true).catch(() => false)
+  )
+  if (libHit) {
+    log.info(`skip_existing (library): ${libHit.path}`)
+    return {
+      success: true,
+      source: 'cached',
+      message: '已存在（音乐库命中），跳过',
+      mp3Path: libHit.path,
+      lrcPath: libHit.lrc_path ?? '',
+      cached: true
+    }
+  }
 
   // R4-P3：每轮平台尝试前检查取消——取消后快速失败请求被平台 catch 吞成空结果，
   // 循环会白耗遍历并广播「尝试 QQ 音乐…」等误导性进度事件
@@ -954,7 +997,10 @@ export async function tryAllPlatforms(
     engine.lastAlbum = song.album ?? ''
     if (await engine.tryQq(song.id, mp3Path, lrcPath, quality)) {
       onEvent?.({ type: 'platform-ok', platform: 'qq', message: 'QQ 音乐 下载成功' })
-      return await finish('QQ 音乐', `QQ 音乐: ${song.name}`)
+      // 第十轮审查：exists 兜底命中的产物按 cached 返回（对齐网易云分支口径）
+      const r = await finish('QQ 音乐', `QQ 音乐: ${song.name}`)
+      if (engine.lastProductForeign) return { ...r, cached: true }
+      return r
     }
   }
   onEvent?.({ type: 'progress', platform: 'qq', message: 'QQ 音乐 未命中' })
@@ -966,7 +1012,9 @@ export async function tryAllPlatforms(
     engine.lastAlbum = song.album ?? ''
     if (await engine.tryKugou(song.id, mp3Path, lrcPath, quality)) {
       onEvent?.({ type: 'platform-ok', platform: 'kugou', message: '酷狗 下载成功' })
-      return await finish('酷狗', `酷狗: ${song.name}`)
+      const r = await finish('酷狗', `酷狗: ${song.name}`)
+      if (engine.lastProductForeign) return { ...r, cached: true }
+      return r
     }
   }
   onEvent?.({ type: 'progress', platform: 'kugou', message: '酷狗 未命中' })
@@ -977,7 +1025,9 @@ export async function tryAllPlatforms(
   for (const song of await engine.searchMigu(keyword)) {
     if (await engine.tryMigu(song, mp3Path, lrcPath, quality)) {
       onEvent?.({ type: 'platform-ok', platform: 'migu', message: '咪咕 下载成功' })
-      return await finish('咪咕', `咪咕: ${song.name}`)
+      const r = await finish('咪咕', `咪咕: ${song.name}`)
+      if (engine.lastProductForeign) return { ...r, cached: true }
+      return r
     }
   }
   onEvent?.({ type: 'progress', platform: 'migu', message: '咪咕 未命中' })
@@ -988,7 +1038,9 @@ export async function tryAllPlatforms(
   for (const song of await engine.searchSoda(keyword)) {
     if (await engine.trySoda(song, mp3Path, lrcPath)) {
       onEvent?.({ type: 'platform-ok', platform: 'soda', message: '汽水 下载成功' })
-      return await finish('汽水', `汽水: ${song.name}`)
+      const r = await finish('汽水', `汽水: ${song.name}`)
+      if (engine.lastProductForeign) return { ...r, cached: true }
+      return r
     }
   }
   onEvent?.({ type: 'progress', platform: 'soda', message: '汽水 未命中' })

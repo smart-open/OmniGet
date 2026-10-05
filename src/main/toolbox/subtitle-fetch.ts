@@ -157,9 +157,21 @@ export async function fetchSubtitleForVideo(
 /**
  * 落盘到视频同目录（播放器可自动加载）；重名不覆盖，追加序号。
  * 返回最终路径（工具 compute 与四期入库钩子共用）。
+ * 第十轮审查 P3：originalName 传 OpenSubtitles 返回的原始文件名——内容探测
+ * 不出 ass 时按其扩展名落盘（vtt/sub/ssa），防止非 srt 内容被误存 .srt
  */
-export async function saveSubtitleBesideVideo(videoPath: string, body: Buffer, lang0: string): Promise<string> {
-  const contentExt = body.slice(0, 13).toString('utf8').startsWith('[Script Info]') ? 'ass' : 'srt'
+export async function saveSubtitleBesideVideo(
+  videoPath: string,
+  body: Buffer,
+  lang0: string,
+  originalName?: string
+): Promise<string> {
+  let contentExt = body.slice(0, 13).toString('utf8').startsWith('[Script Info]') ? 'ass' : null
+  if (!contentExt) {
+    const m = /\.(\w{2,4})$/.exec(originalName ?? '')
+    const known = ['srt', 'vtt', 'ssa', 'sub']
+    contentExt = m && known.includes(m[1]!.toLowerCase()) ? m[1]!.toLowerCase() : 'srt'
+  }
   const stem = basename(videoPath).replace(/\.\w+$/, '')
   let out = join(dirname(videoPath), `${stem}.${lang0}.${contentExt}`)
   for (let i = 1; await stat(out).then(() => true).catch(() => false); i++) {

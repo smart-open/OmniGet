@@ -53,12 +53,15 @@ export interface ToolDef {
         extraOutputs?: string[]
         /** 执行前写入的辅助文件（如 concat 清单） */
         prewrite?: { path: string; content: string }
+        /** 第十轮审查：随 completed 事件带给用户的说明（如 batch-convert 剔除清单） */
+        notice?: string
       }
     | Promise<{
         args: string[]
         output: string
         extraOutputs?: string[]
         prewrite?: { path: string; content: string }
+        notice?: string
       }>
 }
 
@@ -208,9 +211,13 @@ export const TOOL_DEFS: ToolDef[] = [
           usable.push(f)
           continue
         }
-        const hasVideo = streams.some((s) => s.codec_type === 'video')
+        // 修复（第十轮审查 P1）：probeStreams 的约定是只返回 audio/subtitle 流
+        //（ffprobe.ts 显式过滤，video 流永不可见）——此前 hasVideo 判定恒 false，
+        // 音频目标遇无声视频的剔除分支从未生效。按约定修正：探测成功且无音轨，
+        // 音频目标即剔除（无声视频/图片的音频流计数必为 0）；mp4 目标因 map 全带
+        // ?（下方），任一输入至少有音频或视频之一即可产出，无需剔除
         const hasAudio = streams.some((s) => s.codec_type === 'audio')
-        if (audio && !hasAudio && hasVideo) {
+        if (audio && !hasAudio) {
           skipped.push(baseName(f))
           continue
         }
@@ -224,6 +231,11 @@ export const TOOL_DEFS: ToolDef[] = [
           `批内文件均无可${audio ? '提取的音轨（无声视频无法转音频格式）' : '用流'}。请检查所选文件，或改用 mp4 目标格式`
         )
       }
+      // 第十轮审查 P2：剔除清单必须用户可见（此前仅 log，用户会以为全部文件已转换）
+      const notice =
+        skipped.length > 0
+          ? `已跳过 ${skipped.length} 个无可${audio ? '提取音轨' : '用流'}的文件：${skipped.join('、')}`
+          : undefined
       // 产物名去重：不同目录同名文件（a/01.mp3 与 b/01.mp3）不得互相覆盖
       const used = new Set<string>()
       const outputs = usable.map((f) => {
@@ -236,6 +248,7 @@ export const TOOL_DEFS: ToolDef[] = [
         return join(outDir, name)
       })
       return {
+        ...(notice ? { notice } : {}),
         args: [
           '-y',
           ...usable.flatMap((f) => ['-i', f]),
@@ -945,8 +958,29 @@ export const TOOL_DEFS: ToolDef[] = [
       { key: 'container', label: '封装容器', type: 'select', options: ['mkv', 'mp4'], default: 'mkv' },
       { key: 'lang', label: '字幕语言代码（可选，如 chi / eng）', type: 'text', default: '' }
     ],
-    build: (input, outDir, params) => {
+    build: async (input, outDir, params) => {
       const container = String(params.container) === 'mp4' ? 'mp4' : 'mkv'
+      // 第十轮审查 P2：mp4 容器遇图形字幕轨（PGS/DVB/VOBSUB）时 mov_text 无法编码
+      //（-c:s mov_text 作用于全部字幕流），ffmpeg 初始化期致命错误且 stderr 尾行
+      // 晦涩——build 期探测并给出明确出口（改 mkv）。探测失败按「无法判定」放行
+      if (container === 'mp4') {
+        try {
+          const streams = await probeStreams(input)
+          const bitmap = streams.some(
+            (s) =>
+              s.codec_type === 'subtitle' &&
+              ['hdmv_pgs_subtitle', 'dvb_subtitle', 'dvd_subtitle', 'xsub'].includes(s.codec_name)
+          )
+          if (bitmap) {
+            throw new Error(
+              '源视频含图形字幕轨（PGS/DVB 等），mp4 容器无法封装。请改用 mkv 容器（图形字幕可原样直拷）'
+            )
+          }
+        } catch (err) {
+          if (err instanceof Error && err.message.includes('图形字幕')) throw err
+          // 探测失败放行（与 region-concat 降级口径一致），运行期报错兜底
+        }
+      }
       // 语言代码白名单：ISO 639 两/三字母（白名单外静默忽略，防选项注入）
       const lang = /^[a-z]{2,3}$/i.test(String(params.lang ?? '').trim())
         ? String(params.lang).trim().toLowerCase()
@@ -982,12 +1016,14 @@ export const TOOL_DEFS: ToolDef[] = [
       const artist = String(params.artist ?? '').trim() || parsed.artist
       const title = String(params.title ?? '').trim() || parsed.title
       if (!title) throw new Error('无法确定曲名：请在参数中填写曲名（文件名不含有效曲名）')
-      const tags = await lookupRecordingTags(artist, title)
+      // 第十轮审查 P3：扩展名校验前移——此前先联网查询后校验，不支持的容器
+      // 也白耗一次 MusicBrainz 请求与限流额度
       const ext = extname(input).toLowerCase()
       const known = ['.mp3', '.m4a', '.aac', '.flac', '.wav', '.ogg', '.opus']
       if (!known.includes(ext)) {
         throw new Error('仅支持音频文件（mp3/m4a/aac/flac/wav/ogg/opus）')
       }
+      const tags = await lookupRecordingTags(artist, title)
       const out = join(outDir, `${baseName(input)}_tagged${ext}`)
       const meta: string[] = []
       if (tags.title) meta.push('-metadata', `title=${tags.title}`)
@@ -1038,7 +1074,7 @@ export const TOOL_DEFS: ToolDef[] = [
       }
       const sub = await fetchSubtitleForVideo(size, head, tail, apiKey, languages)
       // 落盘到视频同目录（播放器可自动加载）；重名不覆盖，追加序号
-      const out = await saveSubtitleBesideVideo(inputPath, sub.body, languages.split(',')[0] ?? 'zh')
+      const out = await saveSubtitleBesideVideo(inputPath, sub.body, languages.split(',')[0] ?? 'zh', sub.fileName)
       log.info(`subtitle-fetch: saved ${out} (release=${sub.release ?? 'unknown'})`)
       return out
     }
@@ -1290,6 +1326,7 @@ export class ToolboxRunner {
     // 任务 = N 路并发 ffmpeg 全量解码
     if (!(await this.acquireSlot(taskId, input.tool))) throw new Error('任务已取消')
     let prewrite: { path: string; content: string } | undefined
+    let buildNotice: string | undefined
     try {
       // 参数构建失败（如多区域剪辑无有效区域）也必须广播 failed 事件，不静默
       let built: Awaited<ReturnType<ToolDef['build']>>
@@ -1304,6 +1341,7 @@ export class ToolboxRunner {
       if (taskId && this.cancelled.delete(taskId)) throw new Error('任务已取消')
       const { args, output, extraOutputs } = built
       prewrite = built.prewrite
+      buildNotice = built.notice
       log.info(`tool ${input.tool} → ${output}`)
       // R4-P3：prewrite 在 acquireSlot 之后写——排队中被取消的任务不再留下
       // 无人清理的 concat 清单；审查修复：写盘入 try——磁盘满/EACCES 此前会
@@ -1317,7 +1355,13 @@ export class ToolboxRunner {
         this.emit({ taskId, tool: input.tool, status: 'running', message: '处理中' })
       )
       const size = await stat(output).then((s) => s.size).catch(() => 0)
-      this.emit({ taskId, tool: input.tool, status: 'completed', message: output, bytes: size })
+      this.emit({
+        taskId,
+        tool: input.tool,
+        status: 'completed',
+        message: buildNotice ? `${output}（${buildNotice}）` : output,
+        bytes: size
+      })
       log.info(`tool ${input.tool} completed: ${output} (${size} bytes)`)
       // 四期审查：全产物返回——多产物工具（批量转码/voice-sep）的第 2..N 产物
       // 也须落 task_files，否则「彻底删除（含文件）」漏删

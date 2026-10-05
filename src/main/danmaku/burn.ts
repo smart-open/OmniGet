@@ -33,7 +33,13 @@ interface BiliViewData {
 /** 取视频 cid（公开接口 view?bvid= / ?aid=，无签名） */
 async function fetchCid(id: { bvid?: string; aid?: string }): Promise<number> {
   const q = id.bvid ? `bvid=${encodeURIComponent(id.bvid)}` : `aid=${id.aid}`
-  const json = await getJson<BiliViewData>(`https://api.bilibili.com/x/web-interface/view?${q}`)
+  // 第十轮审查 P2：补 UA/Referer——B站 web-interface/view 无浏览器头近年普遍
+  // 返回 -352/-412 风控，弹幕压制此前必然失败（弹幕 XML 拉取已带头，此处同型补齐）
+  const json = await getJson<BiliViewData>(`https://api.bilibili.com/x/web-interface/view?${q}`, {
+    referer: 'https://www.bilibili.com/',
+    'user-agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
+  })
   if (json.code !== 0 || !json.data) throw new Error('B站视频信息获取失败（接口异常或视频不存在）')
   const cid = json.data.cid ?? json.data.pages?.[0]?.cid
   if (!cid) throw new Error('未获取到视频 cid（多P视频暂不支持弹幕压制）')
@@ -50,6 +56,8 @@ export interface BurnResult {
   output: string
   /** 弹幕条数（说明文案用） */
   comments: number
+  /** 第十轮审查 P3：超过 3000 条渲染器上限发生截断（完成消息附注，防静默丢弹幕） */
+  truncated?: boolean
 }
 
 /**
@@ -122,5 +130,5 @@ export async function burnDanmaku(
     await unlink(assPath).catch(() => {})
   }
   log.info(`danmaku burned: ${out} (${comments.length} comments)`)
-  return { output: out, comments: comments.length }
+  return { output: out, comments: comments.length, truncated: comments.length > 3000 }
 }

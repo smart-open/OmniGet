@@ -255,6 +255,16 @@ function AppearanceSection() {
         「随系统」随 Windows 深浅色自动切换曜石黑 / 石墨灰
       </p>
 
+      {/* 第十轮审查 P3：向导重开入口（向导现已可跳过，跳过用户需要再来一次的出口） */}
+      <div className="mt-4 border-t border-border pt-3">
+        <button
+          className="text-[11px] text-text-3 hover:text-accent hover:underline"
+          onClick={() => window.dispatchEvent(new CustomEvent('app:open-onboarding'))}
+        >
+          重新运行首次启动向导（下载目录 / 外观 / 系统集成）
+        </button>
+      </div>
+
       {/* Backlog：多语言 i18n（外壳与健康页已覆盖，存量页面按迁移节奏收敛） */}
       <div className="mt-4 border-t border-border pt-4">
         <p className="mb-2 text-xs text-text-2">语言 / Language</p>
@@ -938,8 +948,10 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                   onClick={() => {
                     setSidecarProbing(true)
                     setSidecarProbeMsg(null)
+                    // 第十轮审查 P2：探测面收敛后走「先保存再测试」（与网盘同口径）
                     window.omniget
-                      .sidecarProbe(sidecarUrl.trim())
+                      .settingsSet('sidecar.videoApiUrl', sidecarUrl.trim())
+                      .then(() => window.omniget.sidecarProbe(sidecarUrl.trim()))
                       .then((r) => setSidecarProbeMsg(r))
                       .catch((err) => toastError('测试解析服务连接', err))
                       .finally(() => setSidecarProbing(false))
@@ -1046,7 +1058,9 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                           // 仅成功清空密码框（失败正是最需要重试的场景）；
                           // 端点/凭据变更后旧浏览状态失效，一并重置
                           setNetdiskPass('')
-                          flash('WebDAV 凭据已保存（加密存储）')
+                          // 第十轮审查 P3：不谎称「加密存储」——netdisk 侧暂无
+                          // storageInfo 回显，safeStorage 降级明文时此前文案失实
+                          flash('WebDAV 凭据已保存')
                           setNetdiskBrowse(false)
                           setNetdiskEntries([])
                           setNetdiskError('')
@@ -1816,7 +1830,9 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                     window.omniget.settingsSet('bt.upnp', upnp),
                     window.omniget.settingsSet('bt.forceEncryption', btEncrypt)
                   ])
-                    .then(() => flash('BT 网络加速设置已保存'))
+                    // 第十轮审查 P3：两项均在启动期消费（UPnP 映射 / 引擎启动参数），
+                    // 保存 toast 必须提示重启生效
+                    .then(() => flash('BT 网络加速设置已保存（重启应用后生效）'))
                     .catch((err) => toastError('保存 BT 网络设置', err))
                 }}
               >

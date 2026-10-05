@@ -38,11 +38,35 @@ export function startAppUpdater(): void {
       autoUpdater.on('update-not-available', () => {
         log.debug('update not available')
       })
+      // 第十轮审查 P2：失败/下载完成事件必须用户可见——文件头声称「失败事件
+      // 降级为通知」但此前只有日志，用户以为后台已更新成功而静默不生效。
+      // error 只广播首次（4h 复查的瞬时网络抖动不做通知轰炸）
+      let errorNoticeShown = false
       autoUpdater.on('error', (err) => {
         log.warn('auto update error (downgrade to manual):', String(err))
+        if (errorNoticeShown) return
+        errorNoticeShown = true
+        const msg = err instanceof Error ? err.message : String(err)
+        void import('./ipc')
+          .then(({ broadcastNotices }) =>
+            broadcastNotices([
+              {
+                level: 'warning',
+                message: `自动更新失败（当前版本可正常使用）：${msg.slice(0, 120)}。可到设置 → 更新 手动检查`
+              }
+            ])
+          )
+          .catch(() => {})
       })
       autoUpdater.on('update-downloaded', (info) => {
         log.info(`update downloaded: ${String(info.version)}, will install on quit`)
+        void import('./ipc')
+          .then(({ broadcastNotices }) =>
+            broadcastNotices([
+              { level: 'info', message: `新版本 ${String(info.version)} 已下载，重启应用后自动安装` }
+            ])
+          )
+          .catch(() => {})
       })
 
       await autoUpdater.checkForUpdatesAndNotify()
