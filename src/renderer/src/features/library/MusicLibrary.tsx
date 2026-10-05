@@ -167,7 +167,7 @@ export function MusicLibrary() {
 
   return (
     <main className="h-full overflow-y-auto">
-      <div className="mx-auto max-w-[900px] px-6 py-6">
+      <div className="mx-auto max-w-[1100px] px-6 py-6">
         {/* ── 顶部：统计 + 检索 + 刷新 ─────────────────────────────── */}
         <div className="mb-4 flex items-center gap-3">
           <div className="flex items-center gap-2 text-sm text-text-1">
