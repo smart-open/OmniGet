@@ -18,7 +18,7 @@ import { startSubscriptionTimer } from './subscribe'
 import { getDb, closeDb } from './db'
 import { registerIpcHandlers, setTaskManager, setMusicAdapter } from './ipc'
 import { createLogger } from './logger'
-import { runtimeBase } from './env'
+import { adoptPortableUserData, runtimeBase } from './env'
 import { startStatsScheduler, stopStatsScheduler } from './stats'
 import { startScheduler, invalidateSchedule } from './scheduler'
 import { startBridge, stopBridge } from './bridge'
@@ -77,6 +77,13 @@ const gotLock = app.requestSingleInstanceLock()
 if (!gotLock) {
   app.quit()
 } else {
+  // ── 便携数据目录收拢（第九轮清账 D10）────────────────────────────────
+  // Chromium 自身 profile（缓存/GPU cache/localStorage）一并重定向到应用数据
+  // 目录——此前仅应用数据落 runtimeBase/data，Chromium 侧仍写系统 userData，
+  // 便携承诺不完整。必须先于任何 getSettingParsed（DB 打开 → userDataDir）与
+  // ready 调用；失败静默保留系统 userData 行为
+  adoptPortableUserData()
+
   // ── GPU 硬件加速禁用开关（跨平台加固 P3）────────────────────────────
   // Linux（Wayland + NVIDIA）与部分老 GPU 上 Electron 硬件加速崩溃/白屏是常见报障源，
   // 提供 ui.disableGpu 设置项（设置 → 外观 → 兼容模式）+ OMNIGET_DISABLE_GPU=1 环境变量；

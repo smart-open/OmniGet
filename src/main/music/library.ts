@@ -115,26 +115,54 @@ export async function retagTrack(
   args.push(tmp)
 
   const proc = spawnTreeAware(ffmpeg, args, { stdio: 'ignore' })
+  // 第九轮审查：ffmpeg 兜底超时（坏文件/离线网络盘此前会永久挂住库操作）——
+  // 超时按 -1 走下方非零清理路径（删 tmp + 报错）
   const code = await new Promise<number | null>((resolve, reject) => {
-    proc.once('error', reject)
-    proc.once('exit', (c) => resolve(c))
+    const timer = setTimeout(() => {
+      terminateTree(proc, 1000)
+      resolve(-1)
+    }, 60_000)
+    timer.unref?.()
+    proc.once('error', (err) => {
+      clearTimeout(timer)
+      reject(err)
+    })
+    proc.once('exit', (c) => {
+      clearTimeout(timer)
+      resolve(c)
+    })
   })
   if (code !== 0) {
     await unlink(tmp).catch(() => {})
     if (code === null) terminateTree(proc, 1000)
-    throw new Error(`ffmpeg 元数据回写失败（exit ${code ?? 'signal'}）`)
+    throw new Error(
+      code === -1
+        ? 'ffmpeg 元数据回写超时（60s），请检查文件所在磁盘是否可用'
+        : `ffmpeg 元数据回写失败（exit ${code ?? 'signal'}）`
+    )
   }
   const size = await stat(tmp).then((s) => s.size).catch(() => 0)
   if (size < 1024) {
     await unlink(tmp).catch(() => {})
     throw new Error('ffmpeg 产物为空，已放弃替换原文件')
   }
-  // 原地替换：旧文件换名保留为 .bak 失败不阻断（磁盘上先有新文件再删旧）
-  await unlink(row.path).catch(() => {})
-  await rename(tmp, row.path).catch(async () => {
-    // 替换失败：保留临时文件并报错，不静默丢产物
-    throw new Error(`元数据文件替换失败：${tmp}`)
+  // 第九轮审查（C4）：原地替换改「旧文件换名 .bak → rename 新文件 → 成功后删
+  // .bak；失败回滚」——此前先 unlink 原文件，rename 遇 AV/索引器占用句柄失败时
+  // 原文件已删、库行死链（注释宣称的「先有新文件再删旧」与实现不符）
+  const bak = `${row.path}.omgretag-bak`
+  await rename(row.path, bak).catch(() => {
+    void unlink(tmp).catch(() => {})
+    throw new Error('原文件不可访问（被占用或权限不足），已放弃替换')
   })
+  const renamed = await rename(tmp, row.path)
+    .then(() => true)
+    .catch(() => false)
+  if (!renamed) {
+    await rename(bak, row.path).catch(() => {}) // 回滚原文件
+    await unlink(tmp).catch(() => {})
+    throw new Error(`元数据文件替换失败：${tmp}`)
+  }
+  await unlink(bak).catch(() => {})
   getDb()
     .prepare('UPDATE music_tracks SET title = ?, artist = ?, album = ? WHERE id = ?')
     .run(tags.title ?? row.title, tags.artist ?? row.artist, tags.album ?? row.album, id)

@@ -303,6 +303,14 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
       // 音乐查询：创建即入队，无文件树，直接关框（任务出现在列表中）
       // UX 硬性标准：成功必须有可见反馈，不得静默关框
       toast('任务已创建并入队', 'success')
+      // 第九轮审查：与 confirm/submitBatch 口径一致——主动按当前视图重载，
+      // 不依赖 unknown-task 防抖自愈（排除型视图下会先写入 unknownReloadSeen 记忆）
+      const cur = useTasks.getState().loadedFilter
+      const target =
+        cur && ['all', 'downloading', 'completed', 'failed', 'bt', 'video', 'music', 'trash'].includes(cur)
+          ? cur
+          : 'all'
+      void useTasks.getState().load(target)
       onClose()
       return
     }
@@ -444,11 +452,15 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
     setPresets(next)
     setPresetName('')
     setActivePreset(p.id)
-    // UX 硬性标准：持久化失败必须可见反馈
+    // UX 硬性标准：持久化失败必须可见反馈并回滚（乐观更新失败不回滚 = UI 说谎）
     window.omniget
       .settingsSet('download.videoPresets', next)
       .then(() => toast(`预设「${name}」已保存`, 'success'))
-      .catch((err) => toastError('保存预设', err))
+      .catch((err) => {
+        setPresets(presets) // 回滚：移除未落盘项
+        setActivePreset(null)
+        toastError('保存预设', err)
+      })
   }
 
   /** R4 续（backlog #4）：导出全部预设为自描述 JSON（分享/备份） */
@@ -560,7 +572,12 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
     window.omniget
       .settingsSet('download.videoPresets', next)
       .then(() => toast('预设已删除', 'success'))
-      .catch((err) => toastError('删除预设', err))
+      .catch((err) => {
+        // 第九轮审查：失败回滚（恢复被删项），UI 不得显示与持久层不一致的状态
+        setPresets(presets)
+        if (target) setActivePreset(target.id)
+        toastError('删除预设', err)
+      })
   }
 
   /** F1：选择/拖入 .torrent → 取绝对路径直接解析（webUtils 桥）。
@@ -1134,8 +1151,10 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
                     内嵌元数据与章节（标题/标签/章节写入文件）
                   </label>
 
-                  {/* 三期（backlog #23）：B站弹幕压制（仅 bilibili 非直播任务显示） */}
-                  {sniffPlatform === 'bilibili' && !parsed?.live && (
+                  {/* 三期（backlog #23）：B站弹幕压制（仅 bilibili 非直播单视频显示——
+                      第九轮审查：合集/列表任务无单一 cid，勾选只会完成后报
+                      「非B站视频链接」式误导文案，直接不展示） */}
+                  {sniffPlatform === 'bilibili' && !parsed?.live && !parsed?.playlist && (
                     <label className="mt-2 flex cursor-pointer items-center gap-1.5 text-[11px] text-text-2">
                       <input
                         type="checkbox"

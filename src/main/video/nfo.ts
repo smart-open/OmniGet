@@ -4,7 +4,7 @@
 // 与视频同目录——配合设置 → 下载「按类型自动归档」的目录结构可被 Jellyfin 直接扫描。
 // 纯函数（单测）：XML 构建 + 转义；落盘封装 exportNfoForVideo / maybeExportNfo。
 
-import { copyFile, writeFile } from 'fs/promises'
+import { copyFile, writeFile, stat } from 'fs/promises'
 import { extname } from 'path'
 import { getSettingParsed } from '../db'
 import { createLogger } from '../logger'
@@ -23,7 +23,6 @@ export function escapeXml(value: string): string {
 export interface NfoInput {
   title: string
   platform?: string | null
-  size?: number
   durationSec?: number | null
   date?: number
 }
@@ -59,21 +58,33 @@ export interface NfoExportResult {
 
 async function exportNfo(
   video: { path: string; title: string; platform: string | null; size: number; duration_sec: number | null; cover_path: string | null },
-  broadcast: boolean
+  broadcast: boolean,
+  overwrite: boolean
 ): Promise<NfoExportResult> {
   const base = video.path.slice(0, video.path.length - extname(video.path).length) || video.path
   const nfoPath = `${base}.nfo`
+  // 第九轮审查（C8）：自动入库钩子不得覆盖同目录已有的 .nfo/-poster.jpg——
+  // Jellyfin/tinyMediaManager 等工具或用户手写的元数据信息量更高（plot/rating），
+  // 被低信息量的 OmniGet 版本静默覆盖不可接受；手动导出保留覆盖语义（用户显式意图）
+  if (!overwrite && (await stat(nfoPath).then(() => true).catch(() => false))) {
+    log.info(`nfo auto-export skipped (existing): ${nfoPath}`)
+    return { nfoPath, posterPath: null }
+  }
   await writeFile(nfoPath, buildMovieNfo({
     title: video.title,
     platform: video.platform,
-    size: video.size,
     durationSec: video.duration_sec
   }), 'utf8')
   // 海报：复用库封面抽帧产物（cover 存在才拷贝）；命名 <视频名>-poster.jpg（Jellyfin/Emby 均识别）
   let posterPath: string | null = null
   if (video.cover_path) {
     posterPath = `${base}-poster.jpg`
-    await copyFile(video.cover_path, posterPath)
+    if (!overwrite && (await stat(posterPath).then(() => true).catch(() => false))) {
+      log.info(`nfo poster auto-export skipped (existing): ${posterPath}`)
+      posterPath = null
+    } else {
+      await copyFile(video.cover_path, posterPath)
+    }
   }
   if (broadcast) {
     // 动态引入（同 manager 口径）：ipc 模块拉起 electron 主模块，测试环境只测纯函数
@@ -93,7 +104,7 @@ export async function exportNfoForVideo(videoId: string): Promise<NfoExportResul
     | { path: string; title: string; platform: string | null; size: number; duration_sec: number | null; cover_path: string | null }
     | undefined
   if (!video) throw new Error('条目不存在或已被移除')
-  return exportNfo(video, true)
+  return exportNfo(video, true, true)
 }
 
 /** 自动入库钩子：设置 video.nfoExport 开启时随封面就绪落 NFO；失败仅留痕不阻断 */
@@ -105,7 +116,7 @@ export async function maybeExportNfo(videoId: string): Promise<void> {
       | { path: string; title: string; platform: string | null; size: number; duration_sec: number | null; cover_path: string | null }
       | undefined
     if (!video) return
-    await exportNfo(video, false)
+    await exportNfo(video, false, false)
   } catch (err) {
     log.warn(`nfo auto-export failed for ${videoId}: ${err instanceof Error ? err.message : String(err)}`)
   }

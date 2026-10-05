@@ -9,6 +9,7 @@
 // Electron 33 内置 Node 20.18 加载即崩（App threw an error during load）。
 // 升级 undici 前必须先核对 Electron 内置 Node 版本（ELECTRON_RUN_AS_NODE=1 npx electron -p process.version）。
 import { Agent, fetch as undiciFetch, type RequestInit as UndiciRequestInit } from 'undici'
+import { randomUUID } from 'crypto'
 import { createLogger } from '../logger'
 
 const log = createLogger('music-http')
@@ -364,7 +365,11 @@ export async function fetchToFile(
   url = rewriteUrl(url)
   const { mkdir, rename, unlink } = await import('fs/promises')
   const { dirname } = await import('path')
-  const tmp = `${dest}.part`
+  // 第九轮审查：part 名掺随机后缀——QQ/酷狗/咪咕/汽水链路此前共用固定
+  // `${dest}.part`，同名歌曲并发任务（skip_existing 仅 tryAllPlatforms 开头
+  // 判定一次）交错写入产生损坏产物。M2 修复只落在网易云链路，此处下沉到
+  // fetchToFile 全链路生效
+  const tmp = `${dest}.${randomUUID().slice(0, 8)}.part`
   // R5 修复同源：文件链路同样固定 Accept-Encoding——咪咕等 CDN 返回 brotli 时
   // undici 不会解压，写盘的是压缩字节流 = 播放不了的「假成功」音频
   const reqHeaders = new Headers(opts.headers ?? { 'User-Agent': 'Mozilla/5.0' })
@@ -501,11 +506,39 @@ export async function openStream(
   }
   let res: Awaited<ReturnType<typeof undiciFetch>>
   try {
-    res = await undiciFetch(url, {
-      method: 'GET',
-      headers,
-      dispatcher: streamingDispatcherFor(url)
-    })
+    // 第九轮审查（SSRF）：undici 默认 follow 重定向——公网 302 跳内网（127.0.0.1/
+    // 169.254.169.254 等）会被自动跟随并把响应体原样回显，击穿 net-guard 防线。
+    // 改手动重定向逐跳校验（保留镜像 CDN 302 直链的合法场景，上限 3 跳）
+    const { isInternalUrl } = await import('../net-guard')
+    let current = url
+    for (let hop = 0; ; hop++) {
+      res = await undiciFetch(current, {
+        method: 'GET',
+        headers,
+        redirect: 'manual',
+        dispatcher: streamingDispatcherFor(current)
+      })
+      const location = res.headers.get('location')
+      if (res.status >= 300 && res.status < 400 && location) {
+        await res.body?.cancel().catch(() => {})
+        if (hop >= 3) throw new Error('重定向次数超限')
+        let next: URL
+        try {
+          next = new URL(location, current)
+        } catch {
+          throw new Error(`重定向地址无效：${location}`)
+        }
+        if (next.protocol !== 'https:' && next.protocol !== 'http:') {
+          throw new Error(`重定向协议不允许：${next.protocol}`)
+        }
+        if (await isInternalUrl(next.toString())) {
+          throw new Error('重定向目标为内网地址，已拦截')
+        }
+        current = next.toString()
+        continue
+      }
+      break
+    }
   } catch (err) {
     logHttpFailure(url, err)
     throw new Error(humanizeNetworkError(err, url))

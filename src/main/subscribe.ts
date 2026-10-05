@@ -187,10 +187,15 @@ export function updateSubscription(input: SubscriptionUpdateInput): Subscription
   const dup = listSubscriptions().find((s) => s.id !== sub.id && archiveKey(s.url) === norm)
   if (dup) throw new Error(`该地址已订阅为「${dup.name}」`)
   const extra = normalizeExtra(input)
+  // 第九轮审查（E6）：URL 或源类型变更时重置检查状态——旧地址的 last_error/
+  // last_checked_at 残留会让修好的源仍挂红色错误，且旧检查时间可能让 tick
+  // 迟迟不做首轮检查
+  const sourceChanged = archiveKey(sub.url) !== norm || sub.sourceKind !== extra.sourceKind
   getDb()
     .prepare(
       `UPDATE subscriptions SET name = ?, url = ?, interval_min = ?, source_kind = ?, save_dir = ?,
-        preset_id = ?, template = ?, filter_min_sec = ?, filter_keywords = ? WHERE id = ?`
+        preset_id = ?, template = ?, filter_min_sec = ?, filter_keywords = ?,
+        last_checked_at = ?, last_error = ? WHERE id = ?`
     )
     .run(
       name,
@@ -202,6 +207,8 @@ export function updateSubscription(input: SubscriptionUpdateInput): Subscription
       extra.template,
       extra.filterMinSec,
       extra.filterKeywords,
+      sourceChanged ? null : sub.lastCheckedAt ?? null,
+      sourceChanged ? null : sub.lastError ?? null,
       sub.id
     )
   log.info(`subscription updated: ${name} (${extra.sourceKind})`)
@@ -257,11 +264,12 @@ function presetToVideo(sub: Subscription): ConfirmSelectionInput['video'] | unde
   }
 }
 
-/** 单次检查：抓条目（ytdlp/RSS 双路）→ 条目过滤 → 档案差集 → 自动入队；返回新增条数 */
+/** 单次检查：抓条目（ytdlp/RSS 双路）→ 条目过滤 → 档案差集 → 自动入队；
+ * 返回新增条数与首个条目级失败（部分成功也要落 lastError 公示，第九轮审查 E5） */
 export async function checkSubscription(
   sub: Subscription,
   host: SubscriptionHost
-): Promise<number> {
+): Promise<{ added: number; firstError: string | null }> {
   const raw = sub.sourceKind === 'rss' ? await rssParseEntries(sub.url) : await flatParseEntries(sub.url)
   // 三期：条目级过滤（最短时长/关键词；时长下限对无时长信息的 RSS 条目视为通过）
   const entries = filterEntries(
@@ -307,7 +315,9 @@ export async function checkSubscription(
   // 审查修复：全军覆没（如保存目录未配置）不能伪装成「暂无新内容」——
   // 上抛首个错误由 checkById 落 lastError 公示
   if (added === 0 && attempted > 0 && firstError) throw new Error(firstError)
-  return added
+  // 第九轮审查：部分成功部分失败时 firstError 随返回值上交——此前 last_error
+  // 被清空，被熔断拉黑的失败条目对用户完全不可见
+  return { added, firstError }
 }
 
 async function checkById(id: string, host: SubscriptionHost): Promise<{ added: number }> {
@@ -321,7 +331,10 @@ async function checkById(id: string, host: SubscriptionHost): Promise<{ added: n
     let added = 0
     let error: string | null = null
     try {
-      added = await checkSubscription(sub, host)
+      const result = await checkSubscription(sub, host)
+      added = result.added
+      // 第九轮审查：部分条目失败也落 lastError（此前 added>0 时被清空）
+      error = result.firstError
     } catch (err) {
       error = err instanceof Error ? err.message : String(err)
     }

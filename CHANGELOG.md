@@ -3,6 +3,28 @@
 > OmniGet 产品变更记录。版本号遵循 `0.x.y` 约定：**x（中间版本号）随功能里程碑递增**，y 为里程碑内的小修/加固版本。初始版本 0.1.0。
 > 格式参考 Keep a Changelog；日期为里程碑完成时间。里程碑与验收口径溯源至《OmniGet-产品技术设计文档》§10。
 
+## [0.11.1] - 2026-10-05
+
+### 第九轮全面审查修复（五域子代理并行：主进程编排 / 渲染层 UX / 音乐·工具箱·热更 / IPC·安全 / 三四期新功能；P1×1 / P2×13 / P3×25）
+
+- **P1 批量转码**：mp4 目标遇纯音频输入、音频目标遇无声视频输入时硬 `-map` 落空是初始化期致命错误，多输出单命令原子语义下**整批产物全失**——改 async build 逐输入 ffprobe 探流，无可提取流的输入参数期剔除（全剔除则抛错走 failed 事件），map 全部加 `?` 容忍缺流
+- **P2 主进程编排**：①音乐 POST 在途删除（入回收站）补偿检查漏 `isTrashed`——status 仍 queued 条件不命中，引擎照常下载且产物永不进 task_files；②aria2 崩溃重启链**端口永不重探**（被占即无限重启循环，`ENGINE_PORT_OCCUPIED`「自动换端口」承诺仅 bootstrap 兑现）——每次 spawn 前重探顺延；③重启链完全绕过 TOFU 指纹闸门——`checkBinary` 移入 spawnAndConnect；④在途去重未豁免直播（与已下载去重预检口径矛盾，且解析后 source 改写为清单直链、互斥键漂移）；⑤RE 缺席时抖音直播漏进 sidecar 兜底链，伪造「风控」假归因
+- **P2 渲染层**：⑥任务视图 load 失败后数据源守卫卡死**永久骨架屏**（错误态在守卫之后永不可达）；⑦音乐库/视频库加载失败伪装成「空库」空态（三态缺错误态，HealthPage 同型问题复发）；⑧新建对话框预设保存/删除乐观更新失败不回滚（UI 说谎）；⑨音乐/视频库「打开所在目录」失败零反馈（unhandled rejection）；⑩歌词模式持久化失败静默（写操作无反馈 + UI 不回滚）
+- **P2 音乐/热更**：⑪QQ/酷狗/咪咕/汽水下载链 `.part` 临时文件名固定——同名歌曲并发任务交错写入损坏产物（M2 修复只落在网易云，随机后缀下沉 `fetchToFile` 全链路）；⑫preview://remote 封面代理 SSRF 防线不覆盖重定向——undici 默认 follow，公网 302 跳内网自动跟随回显，`openStream` 改手动重定向逐跳 `isInternalUrl` 校验；⑬CSP `img-src https:` 通配与「封面走主进程代理防 IP 暴露」设计矛盾（渲染层已零直连使用，收敛为 `'self' data: omniget-preview:`）
+- **P3 要点**（全清单见 git 历史）：启动在途暂停补偿补 `merger.drop`（aria2 分支与 ytdlp 对称，防暂停被回放撤销）；启动失败清 gid 前先 remove 引擎侧残留条目（磁力 parse 期暂停态 gid 会话孤儿）；磁力查重命中 failed 任务给出可读出口（此前裸 IllegalTransitionError）；直播清单直链不入去重档案/失败不做无意义熔断记账；engine-fetch 206 Content-Range 错位丢弃响应体重发（此前消费错位残段必然 SHA 失败）；yt-dlp 热更下载失败自清 `.new.tmp` 残片 + 256MB 体积硬上限；音乐库补标签改 `.bak` 回滚替换 + ffmpeg 60s 兜底超时；弹幕压制 6h 兜底超时；OpenSubtitles 明文回退键 JSON 编码（纯数字 Key 被吞）+ HTTP 429 专属文案；NFO 自动钩子不覆盖已有 `.nfo/-poster.jpg`（手动导出保留覆盖）+ 缺失条目禁用导出按钮；订阅部分失败也落 `last_error`（此前被清空）+ 改 URL/源类型重置检查状态；弹幕压制勾选框排除合集任务（误导文案）；demucs 指纹校验移入 acquireSlot（校验窗口可取消不空占槽）；`toolReveal` 拒 `..` 段 + realpath 失败即拒绝；`ensureVerified` 快速指纹失败不再命中缓存；旧库迁移补拷 `-wal`；netdiskDownload 路径黑名单与 listWebdav 口径对齐；MediaLibrary 汇总加 seq 守卫 + 缺失文件不计体积；音乐 started 分支主动重载；脚本启停双 toast 去重；HelpOverlay 键位说明补全；Inspector 显式 `withFiles:false`；NFO 死参数 `size` 移除
+
+### 遗留清账（同日第二批，backlog 〇-E 观察项）
+
+- **A6 删除含文件补清残片**：yt-dlp 未完成下载的 `.part`/`.part-FragN`/`.ytdlp` 残片不在 task_files 登记体系内，删除运行中任务永久残留磁盘——remove 前捕获适配器产物追踪，按产物名前缀清理（N_m3u8DL-RE 临时分片无公开命名契约，不猜删，留注释备案）
+- **D7 sidecar 供应链加固（重）**：①**q3aql/aria2-static-build 仓库已从 GitHub 消失**（repo/releases 均 404，CI aria2 收集已断）——主源切继任仓库 dmesg00/aria2-static-builds（win 7z/ linux glibc，同资产命名风格，已实测 bsdtar 解 7z + digest 一致），abcfy2/aria2-static-build 作未覆盖平台兜底；darwin 现役源均无静态构建，缺失时给出手动放置出口的明确报错；②下载侧校验全量接入——BtbN 官方 checksums.sha256（已核实条目格式）+ GitHub API assets[].digest（官方 sha256）覆盖 aria2/deno/N_m3u8DL-RE；③顺带修复 `fetchFfmpeg` 的 ghLatest 双重路径 bug（拼出 /releases/latest/releases/latest → 404，该步骤此前必失败）
+- **D8 settingsGet 黑名单模式化**：精确键 + 命名模式双层（`*.token/secret/password/auth/credential` 段、`*.key(.enc)` 结尾）——凭据键历史上两次事后补漏，模式层让未来新增凭据键默认拒绝；已核对渲染层现有读取键无一命中（无误伤）
+- **D10 便携模式统一 Chromium profile**：新增 `adoptPortableUserData()`（锁判定后、ready 前）——`app.setPath('userData')` 把缓存/GPU cache/localStorage 一并收拢到应用数据目录，legacyDataDir 改用重定向前快照（迁移语义不纠缠）；enginesDir/preview 白名单/图标回退链等消费点已逐一核实不受影响；失败静默保留系统 userData 行为
+- **B11**：顶栏搜索注释口径修正（任务视图间保留 query 为有意行为）
+
+### 测试
+
+- 全量 165/165 回归通过，typecheck 双端通过（无新增测试——本轮以既有用例守边界）
+
 ## [0.11.0] - 2026-10-04
 
 ### 四期「统一内容管理与工具箱」（roadmap 四期四项落地；移动端提交维持条件触发不排入）

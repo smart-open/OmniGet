@@ -267,10 +267,13 @@ export async function ensureVerified(name: SidecarBinary): Promise<void> {
     })
   }
   const fp = await quickFingerprint(path, st.size).catch(() => 'unavailable')
+  // 第九轮审查：快速指纹失败（文件被占用/IO 异常，Windows 杀软扫描期常见）时
+  // 不得命中缓存——「本次与上次都读不到内容」不等于「内容未变」，恰好这类异常
+  // 窗口也是替换二进制的窗口，必须走 checkBinary 全量 SHA256
   const cached = verifiedCache.get(name)
-  if (cached && cached.m === st.mtimeMs && cached.size === st.size && cached.fp === fp) return
+  if (fp !== 'unavailable' && cached && cached.m === st.mtimeMs && cached.size === st.size && cached.fp === fp) return
   await checkBinary(name) // 指纹不符时内部抛 ENGINE_BINARY_TAMPERED
-  verifiedCache.set(name, { m: st.mtimeMs, size: st.size, fp })
+  if (fp !== 'unavailable') verifiedCache.set(name, { m: st.mtimeMs, size: st.size, fp })
 }
 
 /** M3-9：热更器复用的单文件 SHA256 */

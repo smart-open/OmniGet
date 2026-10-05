@@ -9,6 +9,7 @@ import { createLogger } from '../logger'
 import { binaryPath, checkBinary, type SidecarBinary } from './binaries'
 import { defaultGlobalOptions, toSpawnArgs } from '../aria2/options'
 import { spawnTreeAware, terminateTree } from './proc'
+import { reallocateRpcPort } from './ports'
 
 const log = createLogger('aria2')
 
@@ -150,7 +151,7 @@ export class Aria2Supervisor {
   private heartbeat: NodeJS.Timeout | null = null
   private restarting = false
 
-  readonly rpcPort: number
+  rpcPort: number
   readonly binaryName: SidecarBinary = 'aria2c'
 
   constructor(
@@ -181,6 +182,18 @@ export class Aria2Supervisor {
   }
 
   private async spawnAndConnect(): Promise<void> {
+    // 第九轮审查（TOFU）：重启链此前完全绕过指纹闸门——checkBinary 只在 start()
+    // 执行一次，进程退出与重 spawn 之间二进制被替换会被静默放行执行（aria2c 是
+    // 唯一带无限重启循环的引擎，必须每次 spawn 前过闸门；verifiedCache 命中时
+    // 开销仅一次 stat + 首/尾 64KB 短指纹）
+    const check = await checkBinary('aria2c')
+    if (!check.ok) {
+      throw new Error(`aria2c 不可用（${check.path}）：${check.error}`)
+    }
+    // 第九轮审查（端口）：每次 spawn 前重探 RPC 端口——崩溃重启窗口内端口被
+    // 第三方抢占时，同一端口无限重试只会循环失败（此前「自动换端口」承诺仅
+    // bootstrap 阶段兑现）
+    this.rpcPort = await reallocateRpcPort(this.rpcPort)
     // P3 加固：secret 写配置文件注入（--conf-path，不出现在命令行；aria2 启动后即读走）。
     // R5 修复：此前用的 --rpc-secret-file 是不存在的选项 → aria2c exit 28 无限重启，
     // BT/HTTP 引擎全挂。conf 文件只含 rpc-secret 一行

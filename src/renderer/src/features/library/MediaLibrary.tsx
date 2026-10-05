@@ -16,6 +16,8 @@ function formatTotalSize(bytes: number): string {
 
 type LibraryTab = 'music' | 'video'
 
+let loadSeq = 0
+
 export function MediaLibrary() {
   const [tab, setTab] = useState<LibraryTab>('music')
   const [summary, setSummary] = useState<{ tracks: number; videos: number; bytes: number } | null>(
@@ -23,16 +25,22 @@ export function MediaLibrary() {
   )
 
   const load = useCallback(async (): Promise<void> => {
+    const seq = ++loadSeq
     try {
       const [tracks, videos] = await Promise.all([
         window.omniget.musicLibrary(),
         window.omniget.videoLibrary()
       ])
+      // 第九轮审查：事件风暴下两个 IPC 在途时旧响应后到会覆盖新 summary（计数/
+      // 体积回跳）——seq 守卫丢弃过期响应（与 SettingsPage netdiskNav 同型）
+      if (seq !== loadSeq) return
       setSummary({
         tracks: tracks.length,
         videos: videos.length,
+        // 第九轮审查（E11）：缺失文件的 size 不计入汇总体积（与库内「缺失」标注一致）
         bytes:
-          tracks.reduce((a, t) => a + t.size, 0) + videos.reduce((a, v) => a + v.size, 0)
+          tracks.reduce((a, t) => a + (t.exists ? t.size : 0), 0) +
+          videos.reduce((a, v) => a + (v.exists ? v.size : 0), 0)
       })
     } catch {
       // 汇总条失败不打扰（两个子视图有各自的错误提示路径）

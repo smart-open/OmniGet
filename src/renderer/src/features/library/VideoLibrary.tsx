@@ -18,6 +18,7 @@ import {
 import type { VideoLibraryItem } from '@shared/types'
 import { Button, Input } from '../../components/ui'
 import { toast, toastError, confirmAction } from '../../lib/feedback'
+import { useModalGate } from '../../lib/modalGate'
 
 /** 本地媒体流协议（与音乐库/工具箱产物预览同源） */
 function localMediaUrl(path: string): string {
@@ -46,14 +47,22 @@ function formatDuration(sec: number | null): string {
 export function VideoLibrary() {
   const [items, setItems] = useState<VideoLibraryItem[]>([])
   const [loading, setLoading] = useState(true)
+  // 第九轮审查：加载失败此前伪装成「空库」空态（三态缺错误态）——失败必须可见
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [preview, setPreview] = useState<VideoLibraryItem | null>(null)
+  // 第九轮审查：预览弹层注册模态闸门（与 NewTaskDialog/HelpOverlay 同口径，
+  // 屏蔽全局快捷键穿透）
+  useModalGate(preview !== null)
 
   const load = useCallback(async (): Promise<void> => {
     try {
       setItems(await window.omniget.videoLibrary())
+      setLoadError(null)
     } catch (err) {
-      toastError('视频库加载失败', err)
+      // 第九轮审查：失败不再只 toast——items 保持空数组会被下方空态伪装成
+      // 「视频库还是空的」，置 loadError 渲染错误态
+      setLoadError(err instanceof Error ? err.message : '视频库加载失败')
     } finally {
       setLoading(false)
     }
@@ -90,7 +99,12 @@ export function VideoLibrary() {
   }, [items, query])
 
   async function reveal(v: VideoLibraryItem): Promise<void> {
-    await window.omniget.revealToolOutput(v.path)
+    // 第九轮审查（硬性标准 1）：失败必须可见反馈（此前 unhandled rejection 静默）
+    try {
+      await window.omniget.revealToolOutput(v.path)
+    } catch (err) {
+      toastError('打开所在目录', err)
+    }
   }
 
   /** 四期（0.11.x）：NFO/海报手动导出（写操作 → toast 反馈） */
@@ -159,7 +173,17 @@ export function VideoLibrary() {
           </div>
         )}
 
-        {!loading && total === 0 && (
+        {!loading && loadError && (
+          <div className="rounded-panel border border-border px-6 py-14 text-center">
+            <p className="text-sm text-danger">视频库加载失败</p>
+            <p className="mt-1 text-xs text-text-3">{loadError}</p>
+            <Button size="xs" variant="outline" className="mt-3" onClick={() => void load()}>
+              重试
+            </Button>
+          </div>
+        )}
+
+        {!loading && !loadError && total === 0 && (
           <div className="rounded-panel border border-border px-6 py-14 text-center text-sm text-text-3">
             视频库还是空的——下载完成的视频会自动登记到这里
             <br />
@@ -225,10 +249,11 @@ export function VideoLibrary() {
                       </span>
                     )}
                     <span className="ml-auto flex items-center gap-1">
-                      {/* 四期：NFO/海报导出（Jellyfin/Emby 归档口径） */}
+                      {/* 四期：NFO/海报导出（Jellyfin/Emby 归档口径）——文件缺失禁用
+                          （第九轮审查：此前缺失条目仍可点击，报底层 ENOENT） */}
                       <button
-                        title="导出 NFO/海报（Jellyfin/Emby）"
-                        disabled={exportingNfo === v.id}
+                        title={v.exists ? '导出 NFO/海报（Jellyfin/Emby）' : '文件缺失，无法导出 NFO'}
+                        disabled={exportingNfo === v.id || !v.exists}
                         className="press flex h-5 w-5 items-center justify-center rounded text-text-3 transition-colors hover:bg-surface-2 hover:text-text-1 disabled:opacity-50"
                         onClick={() => void exportNfo(v)}
                       >

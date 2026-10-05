@@ -95,7 +95,7 @@ export function HelpOverlay({ open, onClose }: { open: boolean; onClose: () => v
               </div>
             </div>
             <p className="mt-3 text-[10px] text-text-3">
-              键位可在 设置 → 快捷键 中自定义；平台健康 / 工具箱 / 回收站暂无键位，请点击侧栏进入
+              键位可在 设置 → 快捷键 中自定义；平台健康 / 工具箱 / 音乐 / 内容库 / 统计 / 回收站暂无键位，请点击侧栏进入
             </p>
           </motion.div>
         </motion.div>

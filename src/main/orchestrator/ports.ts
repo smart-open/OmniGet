@@ -23,3 +23,13 @@ export async function allocatePorts(): Promise<{ aria2RpcPort: number }> {
   }
   throw new Error(`端口分配失败：范围 [16800, ${MAX_PORT}] 内无可用端口`)
 }
+
+/** 第九轮审查：aria2 崩溃重启前重探端口——优先原端口，被占则向上顺延（不回卷，
+ * 避免与其它实例互抢）。全部占满时原样返回（由 spawn 侧按原口径失败退避） */
+export async function reallocateRpcPort(preferred: number): Promise<number> {
+  if (await probe(preferred)) return preferred
+  for (let p = preferred + 1; p <= MAX_PORT; p++) {
+    if (await probe(p)) return p
+  }
+  return preferred
+}

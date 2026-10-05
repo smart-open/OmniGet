@@ -121,7 +121,9 @@ export function Inspector({
       if (!ok) return false
     }
     try {
-      await window.omniget.controlTask({ taskId: task.id, action })
+      // 第九轮审查：显式 withFiles:false（与 TaskList 同操作口径一致，不依赖
+      // 主进程可缺省默认——默认值一旦变更会出现两处行为分叉）
+      await window.omniget.controlTask({ taskId: task.id, action, withFiles: false })
       onChanged()
       if (action === 'pause') toast('任务已暂停', 'success')
       else if (action === 'resume') toast('任务已继续下载', 'success')

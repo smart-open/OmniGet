@@ -38,8 +38,20 @@ export function saveOpensubtitlesKey(apiKey: string): void {
     return
   }
   log.warn('safeStorage 不可用，OpenSubtitles API Key 降级明文存储（仅本地 settings 表）')
-  setSetting(KEY_PLAIN, apiKey)
+  // 第九轮审查：明文回退同样 JSON 编码落库——纯数字/JSON 字面量 Key 在裸文本
+  // 形态会被 getSettingParsed 解析成 number/null 而被判「未配置」（与 netdisk
+  // 凭据通道口径对称）
+  setSetting(KEY_PLAIN, JSON.stringify(apiKey))
   setSetting(KEY_ENC, 'null')
+}
+
+/** 第九轮审查：兼容双形态——新版 JSON 编码 + 旧版裸文本（历史明文 Key）；
+ * 纯数字 Key 在裸文本形态解析为 number，按类型回收 */
+function readPlainKey(): string | null {
+  const v = getSettingParsed<unknown>(KEY_PLAIN)
+  if (typeof v === 'string') return v || null
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v)
+  return null
 }
 
 /** 读取 API Key；未配置/解密失败返回 null */
@@ -55,8 +67,7 @@ export function getOpensubtitlesKey(): string | null {
       return null
     }
   }
-  const plain = getSettingParsed<unknown>(KEY_PLAIN)
-  return typeof plain === 'string' && plain ? plain : null
+  return readPlainKey()
 }
 
 export function hasOpensubtitlesKey(): boolean {
@@ -75,6 +86,5 @@ export function keyStorageInfo(): { hasKey: boolean; encrypted: boolean } {
       // 解密失败按未配置处理（与 getOpensubtitlesKey 口径一致）
     }
   }
-  const plain = getSettingParsed<unknown>(KEY_PLAIN)
-  return { hasKey: typeof plain === 'string' && plain !== '', encrypted: false }
+  return { hasKey: readPlainKey() !== null, encrypted: false }
 }

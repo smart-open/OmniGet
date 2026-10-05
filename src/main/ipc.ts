@@ -319,6 +319,14 @@ export function registerIpcHandlers(): void {
       broadcastNotices([{ level: 'warning', message: '打开目录失败：产物路径无效' }])
       return
     }
+    // 第九轮审查（与 preview:// 同口径双闸）：①入口拒绝字面 `..`/`.` 段；
+    // ②realpath 失败直接拒绝——此前「保持原路径继续」会把含 `..` 的原始串
+    // 参与前缀比对（TOCTOU：竞态窗口内目标出现即定位任意位置），且目标不存在
+    // 时 showItemInFolder 本就无意义
+    if (p.split(/[\\/]+/).includes('..') || p.split(/[\\/]+/).includes('.')) {
+      broadcastNotices([{ level: 'warning', message: '打开目录失败：产物路径无效' }])
+      return
+    }
     // L-5 加固：仅允许高亮任务保存目录内的产物——被攻破的渲染层不得借
     // showItemInFolder 定位任意系统文件（隐藏/系统位置）。大小写口径随文件系统
     // P2 修复：先 realpath 规范化再比对——否则 `D:\任务\..\..\机密\x.txt`
@@ -327,11 +335,12 @@ export function registerIpcHandlers(): void {
     const { realpath } = await import('fs/promises')
     const norm = (x: string): string => x.replace(/\\/g, '/').replace(/\/+$/, '')
     const fold = (x: string): string => (process.platform === 'linux' ? norm(x) : norm(x).toLowerCase())
-    let real = p
+    let real: string
     try {
       real = await realpath(p)
     } catch {
-      // 文件不存在时保持原路径，后续 stat 仍会拒绝
+      broadcastNotices([{ level: 'warning', message: '打开目录失败：产物不存在或已被移动' }])
+      return
     }
     const target = fold(real)
     const inside = listTasks({}).some((t) => {
@@ -437,9 +446,17 @@ export function registerIpcHandlers(): void {
     const { getWebdavEndpoint, webdavUrlFor } = await import('./netdisk/webdav')
     const base = getWebdavEndpoint()
     if (!base) throw new Error('未配置网盘/WebDAV 地址（设置 → 下载 → 网盘聚合）')
+    // 第九轮审查：路径黑名单与 listWebdav 口径对齐（含 `.`/`..` 段、\0、反斜杠）——
+    // 同一信任面不得两套宽窄不一的过滤
     const entries = (Array.isArray(input?.entries) ? input.entries : []).filter(
       (e): e is NetdiskEntry =>
-        !!e && !e.isDir && typeof e.path === 'string' && e.path.startsWith('/') && !e.path.includes('..')
+        !!e &&
+        !e.isDir &&
+        typeof e.path === 'string' &&
+        e.path.startsWith('/') &&
+        !/(^|\/)\.\.?(\/|$)/.test(e.path) &&
+        !e.path.includes('\0') &&
+        !e.path.includes('\\')
     )
     if (entries.length === 0) throw new Error('请先勾选要下载的文件')
     if (entries.length > 50) throw new Error('单次最多提交 50 个文件，请分批下载')
@@ -606,9 +623,19 @@ export function registerIpcHandlers(): void {
       'opensubtitles.key'
     ]
   )
+  // 第九轮清账（D8）：黑名单升为「精确键 + 命名模式」双层——凭据键历史上已两次
+  // 事后补漏（netdisk/opensubtitles 均为泄露后加黑名单）；模式层让未来新增的
+  // 凭据类键（*.token/secret/password/auth/credential 段、*.key(.enc)）默认拒绝，
+  // 不再依赖人工记忆同步。已核对渲染层现有读取键无一命中模式（无误伤）
+  const RENDERER_READ_BLOCKED_PATTERNS: RegExp[] = [
+    /(^|\.)(token|secret|password|passwd|credential|auth)(\.|$)/i,
+    /(^|\.)key(\.enc)?$/i
+  ]
+  const isBlockedSettingKey = (k: string): boolean =>
+    RENDERER_READ_BLOCKED_SETTINGS.has(k) || RENDERER_READ_BLOCKED_PATTERNS.some((re) => re.test(k))
   ipcMain.handle(IPC_CHANNELS.settingsGet, (_e, key: string) => {
     const k = String(key ?? '')
-    if (RENDERER_READ_BLOCKED_SETTINGS.has(k)) {
+    if (isBlockedSettingKey(k)) {
       throw new Error(`设置项 ${k} 由系统管理，不可读取`)
     }
     const raw = getSetting(key)

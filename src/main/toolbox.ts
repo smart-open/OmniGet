@@ -180,7 +180,7 @@ export const TOOL_DEFS: ToolDef[] = [
       { key: 'format', label: '目标格式', type: 'select', options: ['mp3', 'm4a', 'opus', 'flac', 'wav', 'mp4'], default: 'mp3' },
       { key: 'bitrate', label: '码率', type: 'select', options: ['128k', '192k', '320k'], default: '320k' }
     ],
-    build: (input, outDir, params) => {
+    build: async (input, outDir, params) => {
       // 白名单同单文件 convert（format 防路径穿越 / bitrate 防选项注入）
       const fmt = ['mp3', 'm4a', 'opus', 'flac', 'wav', 'mp4'].includes(String(params.format))
         ? String(params.format)
@@ -190,9 +190,43 @@ export const TOOL_DEFS: ToolDef[] = [
         ? String(params.bitrate)
         : '320k'
       const files = parseFilesParam(input, params)
+      // 第九轮审查（P1）：逐输入 ffprobe 探流——多输出是单命令原子语义，任一
+      // 输入的硬 -map 落空（mp4 目标遇纯音频文件、音频目标遇无声视频）都是
+      // ffmpeg 初始化期致命错误，会拖死整批产物。无可用流的输入在参数期剔除
+      //（探测失败按「无法判定」放行，与 region-concat 降级口径一致）；全部被
+      // 剔除时抛错走 failed 事件，不静默产出
+      const usable: string[] = []
+      const skipped: string[] = []
+      for (const f of files) {
+        let streams: { codec_type?: string }[] | null = null
+        try {
+          streams = await probeStreams(f)
+        } catch {
+          streams = null
+        }
+        if (!streams) {
+          usable.push(f)
+          continue
+        }
+        const hasVideo = streams.some((s) => s.codec_type === 'video')
+        const hasAudio = streams.some((s) => s.codec_type === 'audio')
+        if (audio && !hasAudio && hasVideo) {
+          skipped.push(baseName(f))
+          continue
+        }
+        usable.push(f)
+      }
+      if (skipped.length > 0) {
+        log.info(`batch-convert: skipped ${skipped.length} file(s) without usable streams: ${skipped.join(', ')}`)
+      }
+      if (usable.length === 0) {
+        throw new Error(
+          `批内文件均无可${audio ? '提取的音轨（无声视频无法转音频格式）' : '用流'}。请检查所选文件，或改用 mp4 目标格式`
+        )
+      }
       // 产物名去重：不同目录同名文件（a/01.mp3 与 b/01.mp3）不得互相覆盖
       const used = new Set<string>()
-      const outputs = files.map((f) => {
+      const outputs = usable.map((f) => {
         const stem = baseName(f)
         let name = `${stem}_converted.${fmt}`
         for (let i = 2; used.has(name.toLowerCase()); i++) {
@@ -204,16 +238,18 @@ export const TOOL_DEFS: ToolDef[] = [
       return {
         args: [
           '-y',
-          ...files.flatMap((f) => ['-i', f]),
+          ...usable.flatMap((f) => ['-i', f]),
           // ⚠ ffmpeg 两条语义（审查修复）：①选项只作用于紧随的下一个输出——
           // 公共参数必须逐输出重复（voice-sep 同款先例），否则第 2+ 个产物拿默认参数；
           // ②默认流选择是「跨全部输入挑最优」而非「第 i 输入 → 第 i 输出」——
-          // 不显式 -map 时所有产物都会取 0 号输入的流
-          ...files.flatMap((_f, i) => [
+          // 不显式 -map 时所有产物都会取 0 号输入的流。
+          // 第九轮审查：map 全部带 ?——纯音频输入转 mp4（video map 落空）与
+          // 无声视频转 mp4（audio map 落空）都是合法诉求，不得致命
+          ...usable.flatMap((_f, i) => [
             ...(audio
               ? ['-vn', ...(['flac', 'wav'].includes(fmt) ? [] : ['-b:a', bitrate])]
               : ['-c:v', 'libx264', '-crf', '23', '-b:a', bitrate]),
-            ...(audio ? ['-map', `${i}:a?`] : ['-map', `${i}:v:0`, '-map', `${i}:a:0?`]),
+            ...(audio ? ['-map', `${i}:a?`] : ['-map', `${i}:v:0?`, '-map', `${i}:a:0?`]),
             outputs[i]!
           ])
         ],
@@ -1332,55 +1368,60 @@ export class ToolboxRunner {
       input.sourcePath
     ]
     // 安全校验：demucsPath 来自渲染层，basename 必须为 demucs（防渲染层借道执行任意二进制）
-    const exeRaw = String(input.params.demucsPath ?? '').trim()
-    // 第七轮：TOFU 指纹闸门收敛为单一路径——用户填路径与 PATH 解析（where/which
-    // 还原完整路径）走同一闸门，消除「填路径=受管、走 PATH=免检」的双标信任口径
-    const verifyDemucsFingerprint = async (exePath: string): Promise<void> => {
-      // 第六轮审查（P1）：basename 校验可被「改名 demucs.exe 的任意二进制」绕过，
-      // 是全 IPC 面唯一无信任锚的 spawn 入口。补 TOFU 指纹：首次使用登记 SHA256，
-      // 此后不一致即拒绝（合法升级需删除设置键 toolbox.demucs.fingerprint 重置）。
-      // 指纹键不进渲染层写白名单，渲染层无法篡改
-      const { createHash } = await import('crypto')
-      const { readFile } = await import('fs/promises')
-      let fingerprint: string
-      try {
-        fingerprint = createHash('sha256').update(await readFile(exePath)).digest('hex')
-      } catch (err) {
-        const message = `无法读取 demucs 可执行文件：${fsErrToChinese(err)}`
-        this.emit({ taskId, tool: input.tool, status: 'failed', message })
-        throw new Error(message)
-      }
-      const stored = getSettingParsed<string>('toolbox.demucs.fingerprint')
-      if (stored && stored !== fingerprint) {
-        const message =
-          'demucs 可执行文件与首次使用时登记的指纹不一致，已拦截执行。如确认是合法升级（非替换的恶意二进制），请在工具箱的「人声/伴奏分离」工具页点击「重置二进制信任」后重试'
-        this.emit({ taskId, tool: input.tool, status: 'failed', message })
-        throw new Error(message)
-      }
-      if (!stored) setSetting('toolbox.demucs.fingerprint', JSON.stringify(fingerprint))
-    }
+    // 第九轮审查：整段后移到 acquireSlot 之后——指纹校验含整文件 SHA256（数百 MB
+    // 的 conda demucs 可达秒级~分钟级），此前在信号量之前执行且窗口内 cancel 恒
+    // false（不在 procs/queuedTasks/building 任一登记表），校验通过后任务可能已被
+    // 用户删除却仍占槽起跑数小时级推理
     let exe = 'demucs'
-    if (exeRaw) {
-      if (!/^demucs(\.exe)?$/i.test(basename(exeRaw))) {
-        const message = 'demucs 可执行文件路径无效：文件名必须为 demucs 或 demucs.exe'
-        this.emit({ taskId, tool: input.tool, status: 'failed', message })
-        throw new Error(message)
-      }
-      await verifyDemucsFingerprint(exeRaw)
-      exe = exeRaw
-    } else {
-      // 留空走 PATH：解析出完整路径纳入同一 TOFU 闸门（解析失败保持原样，由
-      // runDemucs 的 spawn ENOENT 给出友好报错）
-      const resolved = resolveOnPath('demucs')
-      if (resolved) {
-        await verifyDemucsFingerprint(resolved)
-        exe = resolved
-      }
-    }
-
-    // 排队者额度由释放方同步移交（同 submit）
     if (!(await this.acquireSlot(taskId, input.tool))) throw new Error('任务已取消')
     try {
+      const exeRaw = String(input.params.demucsPath ?? '').trim()
+      // 第七轮：TOFU 指纹闸门收敛为单一路径——用户填路径与 PATH 解析（where/which
+      // 还原完整路径）走同一闸门，消除「填路径=受管、走 PATH=免检」的双标信任口径
+      const verifyDemucsFingerprint = async (exePath: string): Promise<void> => {
+        // 第六轮审查（P1）：basename 校验可被「改名 demucs.exe 的任意二进制」绕过，
+        // 是全 IPC 面唯一无信任锚的 spawn 入口。补 TOFU 指纹：首次使用登记 SHA256，
+        // 此后不一致即拒绝（合法升级需删除设置键 toolbox.demucs.fingerprint 重置）。
+        // 指纹键不进渲染层写白名单，渲染层无法篡改
+        const { createHash } = await import('crypto')
+        const { readFile } = await import('fs/promises')
+        let fingerprint: string
+        try {
+          fingerprint = createHash('sha256').update(await readFile(exePath)).digest('hex')
+        } catch (err) {
+          const message = `无法读取 demucs 可执行文件：${fsErrToChinese(err)}`
+          this.emit({ taskId, tool: input.tool, status: 'failed', message })
+          throw new Error(message)
+        }
+        const stored = getSettingParsed<string>('toolbox.demucs.fingerprint')
+        if (stored && stored !== fingerprint) {
+          const message =
+            'demucs 可执行文件与首次使用时登记的指纹不一致，已拦截执行。如确认是合法升级（非替换的恶意二进制），请在工具箱的「人声/伴奏分离」工具页点击「重置二进制信任」后重试'
+          this.emit({ taskId, tool: input.tool, status: 'failed', message })
+          throw new Error(message)
+        }
+        if (!stored) setSetting('toolbox.demucs.fingerprint', JSON.stringify(fingerprint))
+      }
+      if (exeRaw) {
+        if (!/^demucs(\.exe)?$/i.test(basename(exeRaw))) {
+          const message = 'demucs 可执行文件路径无效：文件名必须为 demucs 或 demucs.exe'
+          this.emit({ taskId, tool: input.tool, status: 'failed', message })
+          throw new Error(message)
+        }
+        await verifyDemucsFingerprint(exeRaw)
+        exe = exeRaw
+      } else {
+        // 留空走 PATH：解析出完整路径纳入同一 TOFU 闸门（解析失败保持原样，由
+        // runDemucs 的 spawn ENOENT 给出友好报错）
+        const resolved = resolveOnPath('demucs')
+        if (resolved) {
+          await verifyDemucsFingerprint(resolved)
+          exe = resolved
+        }
+      }
+      // 指纹校验（可达秒级~分钟级）期间任务可能已被取消——与 submit 的 cancelled
+      // 复核同口径，避免删除后仍起跑数小时级推理
+      if (this.cancelled.has(taskId)) throw new Error('任务已取消')
       const output = await this.runDemucs(
         exe,
         args,
@@ -1392,7 +1433,8 @@ export class ToolboxRunner {
       log.info(`stem-demucs completed: ${output}`)
       return { output, extraOutputs: [] }
     } catch (err) {
-      const message = fsErrToChinese(err)
+      this.cancelled.delete(taskId)
+      const message = err instanceof Error ? err.message : String(err)
       this.emit({ taskId, tool: input.tool, status: 'failed', message })
       log.error(`stem-demucs failed: ${message}`)
       throw new Error(message)

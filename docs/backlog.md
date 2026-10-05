@@ -55,6 +55,19 @@
 
 ---
 
+## 〇-E、第九轮全面审查（2026-10-05，五域并行，0.11.1）
+
+> P1×1 / P2×13 / P3×25 修复 + 同日「全部修复」指令清账观察项，明细见 CHANGELOG 0.11.1 与 git 历史。清账结果：
+> - ✅ **删除含文件补清 ytdlp `.part`/`.ytdlp` 残片**：remove 前捕获适配器产物追踪，按产物名前缀清理（saveDir 顶层；RE 临时分片无公开命名契约，注释备案不猜删）；
+> - ✅ **fetch-sidecars 供应链加固（重大）**：q3aql/aria2-static-build 仓库已消失（404，CI 已断）——主源切 dmesg00/aria2-static-builds + abcfy2 兜底；BtbN checksums.sha256 + GitHub API assets[].digest 全量接入下载侧校验；顺带修 ghLatest 双重路径 bug（ffmpeg 步骤此前必失败）；darwin 静态构建上游已绝迹，缺失时报错给手动放置出口；
+> - ✅ **settingsGet 黑名单模式化**：精确键 + 命名模式双层，未来凭据键默认拒绝（已核对现有键无误伤）；
+> - ✅ **便携模式统一 Chromium profile**：adoptPortableUserData + setPath（锁后/ready 前），legacyDataDir 用重定向前快照；enginesDir/preview 白名单/图标链核实不受影响；
+> - ✅ **顶栏搜索注释口径修正**；
+> - **MSI 目标不支持 magnet: 协议注册**（WiX 限制，代码侧无解）：运行时 `setAsDefaultProtocolClient` 部分兜底，发布说明标注即可；
+> - 遗留人工项：aria2 重启端口顺延/changeGlobalOption 重放多实例真机回归；`openStream` 手动重定向对镜像 CDN 多跳链路实测；dmesg00/abcfy2 源的三平台 fetch-sidecars 真跑（本机仅验证 win 7z 解包 + digest 一致 + API 资产清单）。
+
+---
+
 ### 1. 🔴 macOS 签名与公证（等待 Apple 证书）
 - **现状**：`electron-builder.yml` mac 段已有 `identity` / `notarize` / `hardenedRuntime` / `entitlements` 注释化占位；代码侧已就绪。
 - **待办**：

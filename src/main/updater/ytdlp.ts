@@ -4,7 +4,7 @@
 
 import { createWriteStream, existsSync } from 'fs'
 import { checksumFile, recordFingerprint, writableBinaryPath, enginesDir } from '../orchestrator/binaries'
-import { rename, unlink, copyFile, mkdir, chmod } from 'fs/promises'
+import { rename, unlink, copyFile, mkdir, chmod, rm } from 'fs/promises'
 import { createHash } from 'crypto'
 import { getSettingParsed, setSetting } from '../db'
 import { createLogger } from '../logger'
@@ -13,6 +13,10 @@ const log = createLogger('ytdlp-updater')
 
 const API_LATEST = 'https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest'
 const SUMS_ASSET = 'SHA2-256SUMS'
+
+/** 第九轮审查：下载体积硬上限——yt-dlp 单文件 ~15-20MB 量级，镜像被投毒/账号
+ * 异常返回超大 200 时，5min 总限时窗口内可灌满磁盘（SHA256 校验在完成后才发生） */
+const MAX_UPDATE_BYTES = 256 * 1024 * 1024
 
 /** 按平台/架构选择官方 release 资产（此前硬编码 yt-dlp.exe 会在 mac/linux 上用 Windows PE 覆盖引擎） */
 function platformAsset(): string {
@@ -39,31 +43,44 @@ async function downloadTo(url: string, dest: string): Promise<void> {
   const tmp = `${dest}.tmp`
   const reader = res.body.getReader()
   const file = createWriteStream(tmp)
-  await new Promise<void>((resolve, reject) => {
-    // 立即挂监听：open/写入错误（如目录缺失、磁盘满）必须中断流程，不能静默
-    file.on('error', reject)
-    void (async () => {
-      try {
-        for (;;) {
-          const { done, value } = await reader.read()
-          if (done) break
-          if (!file.write(Buffer.from(value))) {
-            await new Promise<void>((r) => file.once('drain', r))
+  try {
+    await new Promise<void>((resolve, reject) => {
+      // 立即挂监听：open/写入错误（如目录缺失、磁盘满）必须中断流程，不能静默
+      file.on('error', reject)
+      void (async () => {
+        try {
+          let total = 0
+          for (;;) {
+            const { done, value } = await reader.read()
+            if (done) break
+            total += value.byteLength
+            // 第九轮审查（C9）：超限即中止（SHA256 在完成后才发生，磁盘代价已付出）
+            if (total > MAX_UPDATE_BYTES) {
+              throw new Error('下载体积超过上限，疑似异常响应，已中止')
+            }
+            if (!file.write(Buffer.from(value))) {
+              await new Promise<void>((r) => file.once('drain', r))
+            }
           }
+          file.end()
+          resolve()
+        } catch (err) {
+          file.destroy(err as Error)
+          reject(err)
         }
-        file.end()
-        resolve()
-      } catch (err) {
-        file.destroy(err as Error)
-        reject(err)
-      }
-    })()
-  })
-  await new Promise<void>((resolve, reject) => {
-    file.close(() => resolve())
-    file.on('error', reject)
-  })
-  await rename(tmp, dest)
+      })()
+    })
+    await new Promise<void>((resolve, reject) => {
+      file.close(() => resolve())
+      file.on('error', reject)
+    })
+    await rename(tmp, dest)
+  } catch (err) {
+    // 第九轮审查（C2）：失败自清 tmp——runUpdateYtDlp 的 catch 只清 tmpExe/tmpSums，
+    // 不感知 downloadTo 内部的 .tmp 层（*.new.tmp），每次失败更新都留残片
+    await rm(tmp, { force: true }).catch(() => {})
+    throw err
+  }
 }
 
 export async function updateYtDlp(): Promise<UpdateResult> {

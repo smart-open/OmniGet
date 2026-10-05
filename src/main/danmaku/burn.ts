@@ -92,14 +92,31 @@ export async function burnDanmaku(
       ['-y', '-i', videoPath, '-vf', filter, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-c:a', 'copy', out],
       { stdio: 'ignore' }
     )
+    // 第九轮审查：压制兜底超时（与 runDemucs/retag 同口径，6 小时宽限——压制
+    // 时长与源视频成正比）——坏输入/网络盘卡死此前会永久挂住任务完成链
     const code = await new Promise<number | null>((resolve, reject) => {
-      proc.once('error', reject)
-      proc.once('exit', (c) => resolve(c))
+      const timer = setTimeout(() => {
+        terminateTree(proc, 1000)
+        resolve(-1)
+      }, 6 * 60 * 60 * 1000)
+      timer.unref?.()
+      proc.once('error', (err) => {
+        clearTimeout(timer)
+        reject(err)
+      })
+      proc.once('exit', (c) => {
+        clearTimeout(timer)
+        resolve(c)
+      })
     })
     if (code !== 0) {
       await unlink(out).catch(() => {})
       if (code === null) terminateTree(proc, 1000)
-      throw new Error(`ffmpeg 弹幕压制失败（exit ${code ?? 'signal'}）`)
+      throw new Error(
+        code === -1
+          ? 'ffmpeg 弹幕压制超时（6 小时），任务已终止'
+          : `ffmpeg 弹幕压制失败（exit ${code ?? 'signal'}）`
+      )
     }
   } finally {
     await unlink(assPath).catch(() => {})

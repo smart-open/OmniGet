@@ -11,6 +11,13 @@
 //   darwin-x64:   ffmpeg/ffprobe 改用 ffbinaries——BtbN 不发布 macOS x64 构建，
 //                 此前该平台 fetch 必失败（mac x64 dmg 出包链路走不通，P2 修复）
 // 全部经官方/高星发布源；aria2/ffmpeg 的镜像源失效时会明确报错而非静默出空包。
+// 第九轮清账（D7）：①aria2 源迁移——q3aql/aria2-static-build 已从 GitHub 消失
+//（repo 与 releases 均 404，此步在 CI 已必失败），主源切继任仓库
+// dmesg00/aria2-static-builds（同资产命名风格），abcfy2/aria2-static-build 作
+// 未覆盖平台兜底；②下载侧校验全量接入——BtbN 有官方 checksums.sha256 资产，
+// 其余源走 GitHub API assets[].digest（发布侧官方 sha256）。
+// ⚠ darwin 无现役静态构建源（dmesg00/abcfy2/Elypha 均不发 darwin 资产），
+// mac 出包需手动放置 aria2c（明确报错提示，不再静默）。
 
 import { mkdir, chmod, copyFile, rename, unlink } from 'node:fs/promises'
 import { existsSync, readdirSync, readFileSync, unlinkSync } from 'node:fs'
@@ -64,6 +71,25 @@ function download(url, dest) {
  * 中途损坏直接进包」的缺口（此前下载侧零校验，仅运行时 TOFU 兜底） */
 function sha256File(file) {
   return createHash('sha256').update(readFileSync(file)).digest('hex')
+}
+
+/** 第九轮清账（D7）：GitHub API assets[].digest（发布侧官方 sha256，形如
+ * "sha256:<hex>"）下载侧校验——与 yt-dlp 的 SUMS 同目的：资产投毒/下载损坏
+ * 不进包。API 未返回 digest 时降级告警（与 SUMS 缺席口径一致，不强卡） */
+function verifyDigest(asset, file) {
+  const digest = typeof asset?.digest === 'string' ? asset.digest : ''
+  const m = /^sha256:([0-9a-f]{64})$/i.exec(digest)
+  if (!m) {
+    console.log('  ! 该资产未提供 sha256 digest，跳过预校验')
+    return
+  }
+  const actual = sha256File(file)
+  if (m[1].toLowerCase() !== actual) {
+    throw new Error(
+      `SHA256 预校验不符：${asset.name}（期望 ${m[1]}，实际 ${actual}）——拒绝安装`
+    )
+  }
+  console.log('  ✓ SHA256 digest 预校验通过')
 }
 
 function verifyChecksum(file, sumsUrl, entryName) {
@@ -188,24 +214,62 @@ async function fetchYtDlp() {
 async function fetchAria2() {
   const bin = plat === 'win32' ? 'aria2c.exe' : 'aria2c'
   if (!(await need(bin))) return
-  console.log('aria2 (q3aql/aria2-static-build) …')
-  const rel = ghLatest('q3aql/aria2-static-build')
-  const pat =
-    plat === 'win32'
-      ? /win.*64bit.*\.zip$/i
-      : plat === 'darwin'
-        ? /macos-darwin.*\.tar\.bz2$/i
-        : arch === 'arm64'
-          ? /linux-glibc.*arm64.*\.tar\.bz2$/i
-          : /linux-glibc.*x86_64.*\.tar\.bz2$/i
-  const asset = rel.assets?.find((a) => pat.test(a.name))
-  if (!asset) throw new Error(`aria2-static-build ${rel.tag_name} 无匹配平台资产`)
+  // 第九轮清账（D7）：q3aql 仓库已删除——主源切继任 dmesg00（win 7z / linux
+  // glibc tar.bz2），abcfy2（musl/mingw zip）作未覆盖平台兜底；darwin 现役源
+  // 均无资产，缺失时给出手动放置出口的明确报错
+  const sources = [
+    {
+      repo: 'dmesg00/aria2-static-builds',
+      pat:
+        plat === 'win32'
+          ? /win-(32|64)bit-build\d+\.(zip|7z)$/i
+          : plat === 'darwin'
+            ? /macos-darwin.*\.tar\.bz2$/i
+            : arch === 'arm64'
+              ? /linux-gnu-arm64.*\.tar\.bz2$/i
+              : /linux-gnu-64bit.*\.tar\.bz2$/i
+    },
+    {
+      repo: 'abcfy2/aria2-static-build',
+      pat:
+        plat === 'win32'
+          ? /x86_64-w64-mingw32_static\.zip$/i
+          : arch === 'arm64'
+            ? /aarch64-linux-musl_static\.zip$/i
+            : arch === 'arm'
+              ? /armv7-linux-musleabihf_static\.zip$/i
+              : /x86_64-linux-musl_static\.zip$/i
+    }
+  ]
+  let picked = null
+  const tried = []
+  for (const s of sources) {
+    const rel = ghLatest(s.repo)
+    const asset = rel.assets?.find((a) => s.pat.test(a.name))
+    if (asset) {
+      picked = { rel, asset }
+      break
+    }
+    tried.push(`${s.repo}(${rel.tag_name ?? 'unknown'})`)
+  }
+  if (!picked) {
+    throw new Error(
+      `aria2 静态构建无匹配平台资产（${plat}-${arch}，已尝试 ${tried.join('、')}）。` +
+        (plat === 'darwin'
+          ? 'macOS 静态构建上游已停发（q3aql 仓库已删除，现役仓库均不发布 darwin 资产）——请手动放置 aria2c 到引擎目录后重跑'
+          : '请检查源状态或手动放置 aria2c 到引擎目录')
+    )
+  }
+  const { rel, asset } = picked
+  console.log(`aria2 (${asset.name} @ ${rel.tag_name}) …`)
   const tmp = join(tmpdir(), asset.name)
   await unlink(tmp).catch(() => {})
   download(asset.browser_download_url, tmp)
+  verifyDigest(asset, tmp)
   const ex = join(tmpdir(), `aria2-x-${Date.now()}`)
   await mkdir(ex, { recursive: true })
-  if (asset.name.endsWith('.zip')) unzip(tmp, ex)
+  // .7z 由 Windows bsdtar（libarchive）解包（已实测）；zip 走 unzip 口径
+  if (asset.name.endsWith('.zip') || asset.name.endsWith('.7z')) unzip(tmp, ex)
   else untar(tmp, ex)
   const found = findFile(ex, plat === 'win32' ? /^aria2c\.exe$/i : /^aria2c$/)
   if (!found) throw new Error('解包后未找到 aria2c')
@@ -247,7 +311,9 @@ async function fetchFfmpeg() {
   const needFfprobe = await need(plat === 'win32' ? 'ffprobe.exe' : 'ffprobe')
   if (!needFfmpeg && !needFfprobe) return
   console.log('ffmpeg (BtbN/FFmpeg-Builds) …')
-  const rel = ghLatest('BtbN/FFmpeg-Builds/releases/latest')
+  // 第九轮清账（D7）：原传 'BtbN/FFmpeg-Builds/releases/latest' 会拼出双重路径
+  //（/releases/latest/releases/latest → 404）——该步骤此前在 CI 必失败，修正
+  const rel = ghLatest('BtbN/FFmpeg-Builds')
   const suffix =
     plat === 'win32'
       ? /win64-gpl-shared.*\.zip$/i
@@ -259,6 +325,11 @@ async function fetchFfmpeg() {
   const tmp = join(tmpdir(), asset.name)
   await unlink(tmp).catch(() => {})
   download(asset.browser_download_url, tmp)
+  // 第九轮清账（D7）：BtbN 官方随 release 发布 checksums.sha256（已核实条目
+  // 格式 `<sha256>  <归档名>`）——下载侧校验接入
+  const sums = rel.assets?.find((a) => a.name === 'checksums.sha256')
+  if (sums) verifyChecksum(tmp, sums.browser_download_url, asset.name)
+  else console.log('  ! 该 release 未提供校验和资产，跳过预校验')
   const ex = join(tmpdir(), `ff-x-${Date.now()}`)
   await mkdir(ex, { recursive: true })
   if (asset.name.endsWith('.zip')) unzip(tmp, ex)
@@ -294,6 +365,7 @@ async function fetchDeno() {
   const tmp = join(tmpdir(), assetName)
   await unlink(tmp).catch(() => {})
   download(asset.browser_download_url, tmp)
+  verifyDigest(asset, tmp)
   const ex = join(tmpdir(), `deno-x-${Date.now()}`)
   await mkdir(ex, { recursive: true })
   unzip(tmp, ex)
@@ -324,6 +396,7 @@ async function fetchNm3u8Re() {
   const tmp = join(tmpdir(), asset.name)
   await unlink(tmp).catch(() => {})
   download(asset.browser_download_url, tmp)
+  verifyDigest(asset, tmp)
   const ex = join(tmpdir(), `nre-x-${Date.now()}`)
   await mkdir(ex, { recursive: true })
   if (asset.name.endsWith('.zip')) unzip(tmp, ex)

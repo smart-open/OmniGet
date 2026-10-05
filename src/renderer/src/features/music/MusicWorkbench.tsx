@@ -275,8 +275,14 @@ export function MusicWorkbench({ onOpenTasks }: { onOpenTasks: () => void }) {
   }, [])
 
   function changeLyricsMode(m: 'original' | 'bilingual'): void {
+    const prev = lyricsMode
     setLyricsMode(m)
-    void window.omniget.settingsSet('music.lyrics', m).catch(() => {})
+    // 第九轮审查（硬性标准 1）：持久化失败必须有反馈并回滚（此前静默，重启后
+    // 歌词模式回退用户无感知）
+    void window.omniget.settingsSet('music.lyrics', m).catch((err) => {
+      setLyricsMode(prev)
+      toastError('保存歌词设置', err)
+    })
   }
 
   /** 二期：歌单/专辑 URL → 曲目列表（主进程解析网易云公开 API） */

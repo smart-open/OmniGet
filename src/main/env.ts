@@ -10,6 +10,7 @@ import { dirname, join } from 'path'
 
 type ElectronApp = {
   getPath?: (name: string) => string
+  setPath?: (name: string, path: string) => void
   getAppPath?: () => string
   isPackaged?: boolean
 }
@@ -26,6 +27,33 @@ function electronApp(): ElectronApp | null {
 }
 
 let cachedDataDir: string | null = null
+
+/** 系统默认 userData 快照（adoptPortableUserData 重定向前捕获——迁移来源判定依据） */
+let originalUserData: string | null = null
+
+/**
+ * 第九轮清账（D10）：把 Chromium 自身 profile（缓存/GPU cache/localStorage）也
+ * 收拢进应用数据目录——此前仅应用数据落 runtimeBase/data，Chromium 侧仍写系统
+ * %APPDATA%/OmniGet，「便携」承诺不完整（换机丢 Chromium 侧状态），且
+ * legacyDataDir 恰好返回同一目录、迁移语义与 Chromium 活动目录纠缠。
+ * 必须在单实例锁判定后、ready 前调用（Electron 要求 userData 重定位于 ready 前）；
+ * 测试环境（OMNIGET_TEST_DATA_DIR）不重定向。
+ */
+export function adoptPortableUserData(): void {
+  const app = electronApp()
+  if (!app || process.env.OMNIGET_TEST_DATA_DIR) return
+  try {
+    if (!originalUserData && app.getPath) originalUserData = app.getPath('userData')
+    // userDataDir() 会完成目录创建/写探测/旧数据迁移；不可写时其内部已回退
+    // 系统 userData——此时 target === originalUserData，跳过重定向（自洽）
+    const target = userDataDir()
+    if (originalUserData !== target && typeof app.setPath === 'function') {
+      app.setPath('userData', target)
+    }
+  } catch {
+    // 早期阶段 logger 未必就绪且不宜阻塞启动——重定向失败保留系统 userData 行为
+  }
+}
 
 /** 运行基目录：Windows 打包态 = exe 所在目录（便携口径）；dev = 项目根；纯 Node = cwd */
 export function runtimeBase(): string {
@@ -52,7 +80,9 @@ function legacyDataDir(): string | null {
   const app = electronApp()
   try {
     if (app?.getPath) {
-      const legacy = app.getPath('userData')
+      // 第九轮清账（D10）：userData 可能已被 adoptPortableUserData 重定向到应用
+      // 数据目录——迁移来源必须用重定向前捕获的原始路径，否则迁移逻辑失明
+      const legacy = originalUserData ?? app.getPath('userData')
       // 与新目录相同则视为无旧数据
       return legacy
     }
@@ -71,7 +101,10 @@ export const legacyMigrationErrors: string[] = []
  * 杀软锁定）会留残缺目标文件，下次启动 existsSync(to) 为真即永久跳过迁移，
  * 用户数据"消失"且不再告警 */
 function migrateFromLegacy(legacy: string, target: string): void {
-  const items = ['omniget.db', 'dht.dat', 'dht6.dat']
+  // 第九轮审查：-wal 一并迁移——better-sqlite3 WAL 模式下未 checkpoint 的事务
+  // 只在 -wal 里，只拷主库会丢最近写入；且旧目录残留 -wal 会让下次启动的
+  // 「目标缺失才拷」重试拿到陈旧主库（不可自愈）。-shm 可由 SQLite 重建不拷
+  const items = ['omniget.db', 'omniget.db-wal', 'dht.dat', 'dht6.dat']
   for (const name of items) {
     const from = join(legacy, name)
     const to = join(target, name)

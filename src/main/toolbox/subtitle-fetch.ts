@@ -122,6 +122,8 @@ export async function fetchSubtitleForVideo(
   }
   if (searchRes.status === 401) throw new Error('API Key 无效（HTTP 401）：请到 api.opensubtitles.com 检查')
   if (searchRes.status === 406) throw new Error('配额已用尽（HTTP 406）：免费账号每日下载/查询次数有限，明日再试')
+  // 第九轮审查：429 限流是免费账号高频正常态，必须给出可操作文案（与 406 同口径）
+  if (searchRes.status === 429) throw new Error('查询过于频繁（HTTP 429）：免费账号有速率限制，请稍后再试')
   if (!searchRes.ok) throw new Error(`OpenSubtitles 查询失败（HTTP ${searchRes.status}）`)
   const found = (await searchRes.json()) as {
     data?: Array<{ attributes?: { files?: Array<{ file_id?: number }>; release?: string } }>
@@ -138,6 +140,7 @@ export async function fetchSubtitleForVideo(
     signal: AbortSignal.timeout(15_000)
   })
   if (dlRes.status === 406) throw new Error('每日下载配额已用尽（HTTP 406），明日再试')
+  if (dlRes.status === 429) throw new Error('下载过于频繁（HTTP 429）：免费账号有速率限制，请稍后再试')
   if (!dlRes.ok) throw new Error(`字幕下载授权失败（HTTP ${dlRes.status}）`)
   const dl = (await dlRes.json()) as { link?: string; file_name?: string }
   if (!dl.link) throw new Error('OpenSubtitles 未返回下载链接')

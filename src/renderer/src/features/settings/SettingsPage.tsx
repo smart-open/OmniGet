@@ -657,8 +657,8 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
       .reloadAdapterScripts()
       .then((list) => {
         setScripts(list)
-        // UX 硬性标准：写操作成功也要可见反馈（此前仅失败有提示）
-        toast('适配脚本已重新加载', 'success')
+        // 第九轮审查：默认不 toast——启停脚本链路复用本函数会连发两条语义重叠
+        // 提示；「重新加载」按钮自己补反馈
       })
       .catch((err) => toastError('重新加载适配脚本', err))
 
@@ -1955,7 +1955,14 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
               </div>
             )}
             <div className="flex items-center gap-2">
-              <Button size="xs" variant="outline" icon={<ArrowClockwise size={11} />} onClick={() => void reloadScripts()}>
+              <Button
+                size="xs"
+                variant="outline"
+                icon={<ArrowClockwise size={11} />}
+                onClick={() =>
+                  void reloadScripts().then(() => toast('适配脚本已重新加载', 'success'))
+                }
+              >
                 重新加载
               </Button>
             </div>

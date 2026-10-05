@@ -38,6 +38,8 @@ interface AlbumGroup {
 export function MusicLibrary() {
   const [tracks, setTracks] = useState<MusicLibraryTrack[]>([])
   const [loading, setLoading] = useState(true)
+  // 第九轮审查：加载失败此前伪装成「空库」空态（三态缺错误态）——失败必须可见
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [playingId, setPlayingId] = useState<string | null>(null)
   const [retagging, setRetagging] = useState<string | null>(null)
@@ -47,8 +49,11 @@ export function MusicLibrary() {
     try {
       const rows = await window.omniget.musicLibrary()
       setTracks(rows)
+      setLoadError(null)
     } catch (err) {
-      toastError('音乐库加载失败', err)
+      // 第九轮审查：失败不再只 toast——tracks 保持空数组会被下方空态伪装成
+      // 「音乐库还是空的」，置 loadError 渲染错误态（重试=刷新按钮）
+      setLoadError(err instanceof Error ? err.message : '音乐库加载失败')
     } finally {
       setLoading(false)
     }
@@ -119,7 +124,12 @@ export function MusicLibrary() {
   }
 
   async function reveal(t: MusicLibraryTrack): Promise<void> {
-    await window.omniget.revealToolOutput(t.path)
+    // 第九轮审查（硬性标准 1）：失败必须可见反馈（此前 unhandled rejection 静默）
+    try {
+      await window.omniget.revealToolOutput(t.path)
+    } catch (err) {
+      toastError('打开所在目录', err)
+    }
   }
 
   async function retag(t: MusicLibraryTrack): Promise<void> {
@@ -197,7 +207,17 @@ export function MusicLibrary() {
           </div>
         )}
 
-        {!loading && total === 0 && (
+        {!loading && loadError && (
+          <div className="rounded-panel border border-border px-6 py-14 text-center">
+            <p className="text-sm text-danger">音乐库加载失败</p>
+            <p className="mt-1 text-xs text-text-3">{loadError}</p>
+            <Button size="xs" variant="outline" className="mt-3" onClick={() => void load()}>
+              重试
+            </Button>
+          </div>
+        )}
+
+        {!loading && !loadError && total === 0 && (
           <div className="rounded-panel border border-border px-6 py-14 text-center text-sm text-text-3">
             音乐库还是空的——下载完成的音乐会自动登记到这里
             <br />

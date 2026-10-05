@@ -179,7 +179,9 @@ export class TaskManager {
         // 条目级由 yt-dlp --download-archive 负责）
         // 审查修复：sidecar 改道任务的 task.source 已被换成时效直链——必须登记
         // 原分享链接（params.originUrl），否则同链接重复下载
-        if (task.type === 'video' && !this.isPlaylistTask(task)) {
+        // 第九轮审查：直播任务 task.source 已改写为清单直链——直链时效极短，入
+        // 档案只会造成无意义查重键（对齐「直播 URL 不入去重档案」三期口径）
+        if (task.type === 'video' && !this.isPlaylistTask(task) && !parseParamsJson(task.params).roomUrl) {
           // 审查修复：sidecar 改道任务的 task.source 已换成时效直链——登记原分享
           // 链接（params.originUrl），否则与创建期预检键不一致、去重失效
           addArchiveKey(readTaskOriginUrl(task) ?? task.source)
@@ -189,7 +191,7 @@ export class TaskManager {
           if (origin) addArchiveKey(origin)
         }
       }
-      if (e.status === 'failed' && task.type === 'video' && !this.isPlaylistTask(task)) {
+      if (e.status === 'failed' && task.type === 'video' && !this.isPlaylistTask(task) && !parseParamsJson(task.params).roomUrl) {
         // 审查修复：订阅侧「入队即登记档案」，下载失败必须回滚——否则失败条目被
         // 永久拉黑（订阅追更从此跳过该视频，唯一解法是手删 download.archive）。
         // 第六轮审查：回滚+下轮重建的循环对永久失败条目（下架/地区受限）是无限
@@ -436,6 +438,12 @@ export class TaskManager {
                   status: 'failed',
                   error: '引擎侧任务已被移除。请点击重试。'
                 })
+              } else if (outcome === 'ok') {
+                // 第九轮审查：补偿成功也要 drop——此 await 期间 pollOnce 可能已
+                // 对新 gid 回了一帧 running（进 250ms 合并窗），flush 时 paused→
+                // running 合法转移会静默撤销暂停（与 ytdlp 分支的 drop 口径对称）
+                this.merger.drop(fresh.id)
+                this.pushEvent({ taskId: fresh.id, status: 'paused' })
               }
               return
             }
@@ -473,7 +481,13 @@ export class TaskManager {
             // 已是 failed
           }
           // 第六轮审查：启动失败后旧 gid 无轮询无清理（磁力确认失败时指向 parse
-          // 期 paused gid）——随失败一并清空，重试走全新句柄
+          // 期 paused gid）——随失败一并清空，重试走全新句柄。
+          // 第九轮审查：清空前先移除引擎侧残留条目——磁力快速通道失败回落再失败
+          // 时 engineGid 仍指向 parse 期暂停态 gid，只置 null 不 remove 会留会话
+          // 孤儿（不可暂停不可删，其元数据目录只能等清扫）
+          if (fresh.engine === 'aria2' && fresh.engineGid) {
+            void this.aria2.remove({ ...fresh }).catch(() => {})
+          }
           updateTaskFields(taskId, { error: message, engineGid: null })
           this.pushEvent({ taskId, status: 'failed', error: message })
         } finally {
@@ -563,7 +577,10 @@ export class TaskManager {
     // 审查修复：在途去重——同一视频链接进行中（解析/待确认/排队/运行）时拒绝重复创建。
     // 此前无互斥：对话框、Web 面板、订阅多入口可对同一 URL 双开 yt-dlp 并发写同名产物
     //（NewTaskDialog 的 submitting 只防单对话框双击）
-    if (s.type === 'video') {
+    if (s.type === 'video' && !s.liveRoom) {
+      // 第九轮审查：在途去重豁免直播——同一直播间多次/并发录制是常态（与上方
+      // 已下载去重预检的豁免口径一致），且解析后 source 会改写为清单直链，
+      // 以直播间页 URL 做在途互斥键只会造成「窗口期报错、过后放行」的漂移
       const dupSource = s.source
       const dup = listTasks({ status: ['parsing', 'awaiting', 'queued', 'running'] }).find(
         (t) => t.type === 'video' && (t.source === dupSource || readTaskOriginUrl(t) === dupSource)
@@ -613,6 +630,14 @@ export class TaskManager {
             return {
               kind: 'failed',
               error: `该磁力/种子已有任务在进行中（${existing.name}，当前状态：${existing.status}）。请在任务列表中操作原任务，或等其结束后再试`
+            }
+          }
+          // 第九轮审查：命中 failed 任务时不能复用文件树走 awaiting 通道——
+          // confirmSelection 的状态守卫会抛裸 IllegalTransitionError（无出口动作）
+          if (existing.status === 'failed') {
+            return {
+              kind: 'failed',
+              error: `该磁力/种子已有失败任务（${existing.name}）。请在任务列表对原任务点击重试，或删除原任务后重新创建`
             }
           }
           const files = getTaskFiles(existing.id)
@@ -824,6 +849,9 @@ export class TaskManager {
     isAborted: () => boolean
   ): Promise<ParseOutput | null> {
     if (task.engine !== 'ytdlp' || s.type !== 'video' || !s.platform) return null
+    // 第九轮审查：直播间 URL 不走解析服务兜底——解析服务只覆盖短视频页，
+    // 直播页必然失败并伪造「风控」假归因（健康页误导）；失败应原样暴露
+    if (s.liveRoom) return null
     if (!SIDECAR_PLATFORMS.includes(s.platform)) return null
     if (!getVideoSidecarBase()) return null
     const platform = s.platform
@@ -1273,6 +1301,9 @@ export class TaskManager {
         // 按引擎分派移除：aria2 走 RPC；ytdlp 杀进程；
         // music 无取消端点（仅解除 gid 关联，服务侧任务自然结束）；
         // tool 杀 ffmpeg 进程（取消后任务记录按 withFiles 语义处理）
+        // 第九轮清账（A6）：先捕获适配器产物追踪（remove 后 250ms 延迟注销窗口
+        // 内仍可读）——「删除（含文件）」时连同未完成的 .part 残片一并清理
+        const trackedForParts = task.engine === 'ytdlp' ? (this.ytdlp?.getOutputFiles(task.id) ?? []) : []
         if (task.engine === 'ytdlp') {
           this.ytdlp?.remove(task)
         } else if (task.engine === 'nm3u8') {
@@ -1303,6 +1334,7 @@ export class TaskManager {
             log.warn(`purge library rows failed for ${task.id}`, { error: String(err) })
           )
           await this.deleteTaskFiles(task, files)
+          await this.deleteEnginePartFiles(task, trackedForParts)
         } else {
           softDeleteTask(task.id) // 回收站：默认保留文件（§4.5）
         }
@@ -1358,6 +1390,29 @@ export class TaskManager {
       } catch {
         // 目录不存在或非空，忽略
       }
+    }
+  }
+
+  /** 第九轮清账（A6）：yt-dlp 未完成下载的磁盘残片——`<产物>.part`（主文件）/
+   * `.part-FragN`（HLS 分段）/ `.ytdlp`（续传控制文件）不在 task_files 登记
+   * 体系内（产物未完成），「删除（含文件）」此前会永久残留。按产物名前缀匹配
+   * （仅 saveDir 顶层；自定义模板带子目录的边缘场景由空目录清扫兜底）。
+   * N_m3u8DL-RE 的临时分片由其自身 tmp 目录管理，无公开命名契约，不在此猜删 */
+  private async deleteEnginePartFiles(task: Task, tracked: string[]): Promise<void> {
+    if (task.engine !== 'ytdlp' || tracked.length === 0) return
+    const { readdir, rm } = await import('fs/promises')
+    const { basename, join } = await import('path')
+    const bases = tracked.map((p) => basename(p))
+    const entries = await readdir(task.saveDir, { withFileTypes: true }).catch(() => [])
+    for (const e of entries) {
+      if (e.isDirectory()) continue
+      if (!bases.some((b) => b && (e.name.startsWith(`${b}.part`) || e.name.startsWith(`${b}.ytdlp`)))) {
+        continue
+      }
+      const abs = join(task.saveDir, e.name)
+      await rm(abs, { force: true }).catch((err) =>
+        log.warn(`清理下载残片失败（残留磁盘）: ${abs}`, { error: String(err) })
+      )
     }
   }
 
@@ -2007,12 +2062,16 @@ export class TaskManager {
         }
       }
       const serviceTaskId = await this.music.download(req)
-      updateTaskFields(task.id, { engineGid: serviceTaskId })
+      // 第九轮审查：POST 在途删除（入回收站）时 status 仍是 queued——补偿检查
+      // 只看状态会漏掉 isTrashed（引擎照常下载落盘且产物不进 task_files，
+      // 回收站「删除（含文件）」永远够不到）。与 catch 路径口径对齐
+      const trashed = isTrashed(task.id)
+      if (!trashed) updateTaskFields(task.id, { engineGid: serviceTaskId })
       // P2 加固：POST 在途期间用户可能已暂停/删除任务（此前 pause 只对已有 gid
       // 调 cancel，此窗口内取消失效 → 引擎照常下载落盘"已取消"的完整音频）。
       // 返回后补偿检查：任务已离开排队/运行态则立即取消引擎侧任务。
       const fresh = getTask(task.id) as TaskExt | null
-      if (!fresh || (fresh.status !== 'queued' && fresh.status !== 'running')) {
+      if (trashed || !fresh || (fresh.status !== 'queued' && fresh.status !== 'running')) {
         void this.music.cancel(serviceTaskId).catch(() => {})
       }
     } catch (err) {

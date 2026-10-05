@@ -242,7 +242,12 @@ async function downloadAndVerify(url: string, sha256: string, dest: string, onPr
         log.warn(
           `content-range mismatch (expect offset ${offset}, got "${res.headers.get('content-range') ?? ''}")，回退整包重下`
         )
+        // 第九轮审查：错位 206 的响应体从服务端实际偏移开始——继续消费会把任意
+        // 中段残段写进 0 偏移文件（看似正常，最终必然 SHA 失败整包重来）。与
+        // 下方 416 同口径：丢弃响应体后重新发起无 Range 请求
+        await res.body?.cancel().catch(() => {})
         offset = 0
+        res = await undiciFetch(url, { signal: controller.signal })
       }
     }
     if (res.status === 416 && offset > 0) {

@@ -235,6 +235,22 @@ export function TaskList({
 
   // ── 骨架屏（与行同形，§7.1 原则 4）─────────────────────────────────
   if (loading || !trashDataReady) {
+    // 第九轮审查：load 失败时 loadedFilter 停留旧值、守卫 effect 依赖不变不再
+    // 重试——此前渲染进永久骨架屏（下方错误态只在 trashDataReady 之后可达，
+    // 永远不可达）。失败即降级渲染错误态 + 重试入口
+    if (loadError && !loading) {
+      return (
+        <main className="h-full overflow-y-auto">
+          <div className="flex h-full flex-col items-center justify-center gap-3">
+            <p className="text-sm text-text-2">任务列表加载失败</p>
+            <p className="text-xs text-text-3">{loadError}</p>
+            <Button size="xs" variant="outline" onClick={() => void load(active)}>
+              重试
+            </Button>
+          </div>
+        </main>
+      )
+    }
     return (
       <main ref={parentRef} className="h-full overflow-y-auto">
         {Array.from({ length: 7 }, (_, i) => (
