@@ -4,7 +4,7 @@
 
 import { execFileSync, type ChildProcess } from 'child_process'
 import { mkdir, rm, stat, writeFile } from 'fs/promises'
-import { basename, dirname, extname, join } from 'path'
+import { basename, extname, join } from 'path'
 import type { ToolCreateInput, ToolEvent } from '@shared/types'
 import { createLogger } from './logger'
 import { getSettingParsed, setSetting } from './db'
@@ -169,6 +169,60 @@ export const TOOL_DEFS: ToolDef[] = [
     }
   },
   {
+    // 四期（0.11.x，roadmap「音频处理族」）：批量转码队列——多文件单任务一次提交，
+    // 复用 T4 multi 通道（渲染层零增量），失败/取消逐产物清理（extraOutputs 口径）
+    id: 'batch-convert',
+    label: '批量转码',
+    category: 'common',
+    multi: true,
+    desc: '多个音频/视频文件一次转码（mp3/m4a/opus/flac/wav/mp4），可选码率；每个文件独立产物落「工具箱输出」目录',
+    fields: [
+      { key: 'format', label: '目标格式', type: 'select', options: ['mp3', 'm4a', 'opus', 'flac', 'wav', 'mp4'], default: 'mp3' },
+      { key: 'bitrate', label: '码率', type: 'select', options: ['128k', '192k', '320k'], default: '320k' }
+    ],
+    build: (input, outDir, params) => {
+      // 白名单同单文件 convert（format 防路径穿越 / bitrate 防选项注入）
+      const fmt = ['mp3', 'm4a', 'opus', 'flac', 'wav', 'mp4'].includes(String(params.format))
+        ? String(params.format)
+        : 'mp3'
+      const audio = ['mp3', 'aac', 'm4a', 'opus', 'flac', 'wav'].includes(fmt)
+      const bitrate = ['128k', '192k', '320k'].includes(String(params.bitrate))
+        ? String(params.bitrate)
+        : '320k'
+      const files = parseFilesParam(input, params)
+      // 产物名去重：不同目录同名文件（a/01.mp3 与 b/01.mp3）不得互相覆盖
+      const used = new Set<string>()
+      const outputs = files.map((f) => {
+        const stem = baseName(f)
+        let name = `${stem}_converted.${fmt}`
+        for (let i = 2; used.has(name.toLowerCase()); i++) {
+          name = `${stem}_converted_${i}.${fmt}`
+        }
+        used.add(name.toLowerCase())
+        return join(outDir, name)
+      })
+      return {
+        args: [
+          '-y',
+          ...files.flatMap((f) => ['-i', f]),
+          // ⚠ ffmpeg 两条语义（审查修复）：①选项只作用于紧随的下一个输出——
+          // 公共参数必须逐输出重复（voice-sep 同款先例），否则第 2+ 个产物拿默认参数；
+          // ②默认流选择是「跨全部输入挑最优」而非「第 i 输入 → 第 i 输出」——
+          // 不显式 -map 时所有产物都会取 0 号输入的流
+          ...files.flatMap((_f, i) => [
+            ...(audio
+              ? ['-vn', ...(['flac', 'wav'].includes(fmt) ? [] : ['-b:a', bitrate])]
+              : ['-c:v', 'libx264', '-crf', '23', '-b:a', bitrate]),
+            ...(audio ? ['-map', `${i}:a?`] : ['-map', `${i}:v:0`, '-map', `${i}:a:0?`]),
+            outputs[i]!
+          ])
+        ],
+        output: outputs[0]!,
+        extraOutputs: outputs.slice(1)
+      }
+    }
+  },
+  {
     id: 'trim',
     label: '音频裁剪',
     category: 'audio',
@@ -223,17 +277,29 @@ export const TOOL_DEFS: ToolDef[] = [
     }
   },
   {
+    // 四期（0.11.x）：单遍 → 两遍 EBU R128（先测量后应用，linear=true 不做二次动态压缩）
     id: 'loudnorm',
     label: '响度标准化',
     category: 'audio',
-    desc: 'EBU R128 响度归一到 -14 LUFS + 峰值限制（母带轻量替代）',
+    desc: 'EBU R128 响度归一到 -14 LUFS（两遍法：先完整解码测量，再 linear 模式应用，无二次动态压缩失真）。测量失败自动回退单遍动态模式',
     fields: [],
-    build: (input, outDir) => {
+    // async build（backlog #28 范式）：第一遍测量耗时与音频时长成正比（宽限 15 分钟）
+    build: async (input, outDir) => {
       const out = join(outDir, `${baseName(input)}_loudnorm.mp3`)
+      const { measureLoudnorm, buildLoudnormFilter, LOUDNORM_TARGET } = await import(
+        './toolbox/loudnorm-plan'
+      )
+      const measured = await measureLoudnorm(input)
       // -vn：渲染层 accept 含 video/*，视频源输入时 ffmpeg 默认流选择会把视频流
       // 塞进 mp3 容器 → Automatic encoder selection failed 必失败（对齐 trim 口径）
+      const filter = measured
+        ? buildLoudnormFilter(measured)
+        : `loudnorm=I=${LOUDNORM_TARGET.I}:TP=${LOUDNORM_TARGET.TP}:LRA=${LOUDNORM_TARGET.LRA}`
+      if (measured) {
+        log.info(`loudnorm two-pass measured I=${measured.input_i.toFixed(2)} LUFS`)
+      }
       return {
-        args: ['-y', '-i', input, '-af', 'loudnorm=I=-14:TP=-1.5:LRA=11', '-vn', '-b:a', '320k', out],
+        args: ['-y', '-i', input, '-af', filter, '-vn', '-b:a', '320k', out],
         output: out
       }
     }
@@ -263,6 +329,49 @@ export const TOOL_DEFS: ToolDef[] = [
         return { args: ['-y', '-i', input, ...meta, '-b:a', '320k', out], output: out }
       }
       return { args: ['-y', '-i', input, ...meta, '-c', 'copy', out], output: out }
+    }
+  },
+  {
+    // 四期（0.11.x，roadmap「音频处理族」）：有声书章节标记——时间轴文本 →
+    // FFMETADATA → mp3（ID3v2 CHAP）/ m4a·m4b（MP4 chapter track），流拷贝秒级
+    id: 'audio-chapters',
+    label: '音频章节标记',
+    category: 'audio',
+    desc: '为有声书/长音频写入章节标记（mp3/m4a/m4b 容器）。选择时间轴文本（每行「时:分:秒 标题」，如 00:01:23 序章）；其余容器请先用格式转换转 mp3/m4a',
+    extraFile: { key: 'chapters', label: '章节时间轴文本', accept: '.txt' },
+    fields: [],
+    // async build（backlog #28 范式）：末章 END 需 ffprobe 真实时长
+    build: async (input, outDir, params) => {
+      const ext = extname(input).toLowerCase()
+      if (!['.mp3', '.m4a', '.m4b'].includes(ext)) {
+        throw new Error('章节标记需 mp3/m4a/m4b 容器（ID3v2/MP4 章节才可写）：请先用「格式转换」转出后再标记')
+      }
+      const { readFile } = await import('fs/promises')
+      const { parseChapterText, buildFfmetadata } = await import('./toolbox/chapter-plan')
+      const text = await readFile(String(params.chapters ?? ''), 'utf8').catch(() => {
+        throw new Error('无法读取章节文本文件（可能已被移动或删除）')
+      })
+      const chapters = parseChapterText(text)
+      if (chapters.length === 0) {
+        throw new Error('章节文本未解析到任何章节：每行需为「时:分:秒 标题」（如 00:01:23 序章），# 开头为注释')
+      }
+      // 末章 END：ffprobe 时长；探测失败回退起点+1h（封装侧按文件时长截断）
+      const { probeDurationSec } = await import('./toolbox/ffprobe')
+      const durMs = (await probeDurationSec(input).catch(() => null)) ?? null
+      const metaPath = join(outDir, `${baseName(input)}_chapters.ffmeta.txt`)
+      const out = join(outDir, `${baseName(input)}_章节${ext}`)
+      return {
+        args: [
+          '-y', '-i', input, '-i', metaPath,
+          // 审查修复：元数据保留原音频（-map_metadata 1 会用无标签的 ffmetadata
+          // 覆盖 title/artist 等）；章节独立经 -map_chapters 从 ffmetadata 导入
+          '-map_metadata', '0', '-map_chapters', '1',
+          '-c', 'copy',
+          out
+        ],
+        output: out,
+        prewrite: { path: metaPath, content: buildFfmetadata(chapters, durMs ? Math.round(durMs * 1000) : null) }
+      }
     }
   },
   {
@@ -865,15 +974,20 @@ export const TOOL_DEFS: ToolDef[] = [
     runtime: 'node',
     build: () => ({ args: [], output: '' }),
     compute: async (inputPath, _outDir, params) => {
-      const apiKey = String(params.apiKey ?? '').trim()
+      // 四期（0.11.x）：参数留空回退 safeStorage 凭据通道（设置页保存，同 #26 口径）
+      let apiKey = String(params.apiKey ?? '').trim()
       if (!apiKey) {
-        throw new Error('请先填写 OpenSubtitles API Key（api.opensubtitles.com 免费注册获取）')
+        const creds = await import('./opensubtitles/credentials')
+        apiKey = creds.getOpensubtitlesKey() ?? ''
+      }
+      if (!apiKey) {
+        throw new Error('未配置 OpenSubtitles API Key：请在 设置 → 下载 →「OpenSubtitles 字幕匹配」保存（api.opensubtitles.com 免费注册），或在本参数中填写')
       }
       const languages = /^[a-z]{2,3}(,[a-z]{2,3})*$/i.test(String(params.languages ?? '').trim())
         ? String(params.languages).trim().toLowerCase()
         : 'zh'
-      const { stat, open, writeFile } = await import('fs/promises')
-      const { fetchSubtitleForVideo } = await import('./toolbox/subtitle-fetch')
+      const { stat, open } = await import('fs/promises')
+      const { fetchSubtitleForVideo, saveSubtitleBesideVideo } = await import('./toolbox/subtitle-fetch')
       const size = (await stat(inputPath)).size
       // 首/尾各 64KB（官方哈希口径；小文件允许头尾重叠）
       const CHUNK = 65536
@@ -888,13 +1002,7 @@ export const TOOL_DEFS: ToolDef[] = [
       }
       const sub = await fetchSubtitleForVideo(size, head, tail, apiKey, languages)
       // 落盘到视频同目录（播放器可自动加载）；重名不覆盖，追加序号
-      const lang0 = languages.split(',')[0]
-      const contentExt = sub.body.slice(0, 13).toString('utf8').startsWith('[Script Info]') ? 'ass' : 'srt'
-      let out = join(dirname(inputPath), `${baseName(inputPath)}.${lang0}.${contentExt}`)
-      for (let i = 1; await stat(out).then(() => true).catch(() => false); i++) {
-        out = join(dirname(inputPath), `${baseName(inputPath)}.${lang0}.${i}.${contentExt}`)
-      }
-      await writeFile(out, sub.body)
+      const out = await saveSubtitleBesideVideo(inputPath, sub.body, languages.split(',')[0] ?? 'zh')
       log.info(`subtitle-fetch: saved ${out} (release=${sub.release ?? 'unknown'})`)
       return out
     }
@@ -975,6 +1083,10 @@ export class ToolboxRunner {
   /** P1 修复：排队中（等待信号量）的任务登记——此前 cancel 对排队任务恒 false，
    * 删除任务后 ffmpeg/node 照常执行，软删任务还会被"复活"为 completed */
   private queuedTasks = new Map<string, { tool: string; cancelled: boolean }>()
+  /** 四期审查：构建期（async build，如两遍响度测量的完整解码/ffprobe 时长探测，
+   * 可达数分钟）任务登记——此窗口内任务不在 procs/queuedTasks，cancel 恒 false
+   * 且无法中断测量，任务记录已删但 ffmpeg 照跑 */
+  private building = new Set<string>()
 
   onEvent(cb: (e: ToolEvent) => void): () => void {
     this.listeners.add(cb)
@@ -1037,6 +1149,12 @@ export class ToolboxRunner {
       log.info(`tool task ${taskId} cancelled while queued`)
       return true
     }
+    // 四期审查：构建期任务——标记取消，submit 在 build 返回后复核放弃（spawn 前）
+    if (taskId && this.building.has(taskId)) {
+      this.cancelled.add(taskId)
+      log.info(`tool task ${taskId} cancelled while building`)
+      return true
+    }
     return false
   }
 
@@ -1071,7 +1189,10 @@ export class ToolboxRunner {
     return true
   }
 
-  async submit(input: ToolCreateInput, taskId = ''): Promise<string> {
+  async submit(
+    input: ToolCreateInput,
+    taskId = ''
+  ): Promise<{ output: string; extraOutputs: string[] }> {
     // Backlog：神经网络分离走独立执行器（demucs CLI，非 ffmpeg）
     if (input.tool === 'stem-demucs') return this.submitDemucs(input, taskId)
     const def = TOOL_DEFS.find((d) => d.id === input.tool)
@@ -1107,7 +1228,7 @@ export class ToolboxRunner {
         nodeEntry.output = output
         const size = await stat(output).then((s) => s.size).catch(() => 0)
         this.emit({ taskId, tool: input.tool, status: 'completed', message: output, bytes: size })
-        return output
+        return { output, extraOutputs: [] }
       } catch (err) {
         if (!nodeEntry.cancelled) {
           const message = fsErrToChinese(err)
@@ -1127,30 +1248,33 @@ export class ToolboxRunner {
         }
       }
     }
-    // 参数构建失败（如多区域剪辑无有效区域）也必须广播 failed 事件，不静默
-    let built: Awaited<ReturnType<ToolDef['build']>>
-    try {
-      built = await def.build(input.sourcePath, outDir, input.params)
-    } catch (err) {
-      this.emit({
-        taskId,
-        tool: input.tool,
-        status: 'failed',
-        message: err instanceof Error ? err.message : String(err)
-      })
-      throw err
-    }
-    const { args, output, prewrite, extraOutputs } = built
-    log.info(`tool ${input.tool} → ${output}`)
-
-    // 信号量：≤2 并发（§4.7，不计入下载并发）；排队者额度由释放方同步移交
+    // 信号量：≤2 并发（§4.7，不计入下载并发）；排队者额度由释放方同步移交。
+    // 四期审查修复：acquireSlot 前移到 build 之前——async build（两遍响度测量的
+    // 完整解码，可达数分钟）此前不受 MAX_TOOL_CONCURRENT 约束，N 个 loudnorm
+    // 任务 = N 路并发 ffmpeg 全量解码
     if (!(await this.acquireSlot(taskId, input.tool))) throw new Error('任务已取消')
-    // R4-P3：prewrite 移到 acquireSlot 之后——排队中被取消的任务此前已把
-    // concat 清单写盘且无人清理（与「取消不留半成品」承诺不符）
-    if (prewrite) {
-      await writeFile(prewrite.path, prewrite.content, 'utf8')
-    }
+    let prewrite: { path: string; content: string } | undefined
     try {
+      // 参数构建失败（如多区域剪辑无有效区域）也必须广播 failed 事件，不静默
+      let built: Awaited<ReturnType<ToolDef['build']>>
+      if (taskId) this.building.add(taskId)
+      try {
+        built = await def.build(input.sourcePath, outDir, input.params)
+      } finally {
+        if (taskId) this.building.delete(taskId)
+      }
+      // 四期审查：构建期被取消（如两遍响度测量进行中删除任务）——spawn 前复核放弃，
+      // 不再为已删任务白跑数分钟转码（测量进程本身有 15min 兜底超时，自然终止）
+      if (taskId && this.cancelled.delete(taskId)) throw new Error('任务已取消')
+      const { args, output, extraOutputs } = built
+      prewrite = built.prewrite
+      log.info(`tool ${input.tool} → ${output}`)
+      // R4-P3：prewrite 在 acquireSlot 之后写——排队中被取消的任务不再留下
+      // 无人清理的 concat 清单；审查修复：写盘入 try——磁盘满/EACCES 此前会
+      // 直接逃逸跳过 finally → 并发信号量泄漏，两次即令工具队列永久卡死
+      if (prewrite) {
+        await writeFile(prewrite.path, prewrite.content, 'utf8')
+      }
       // 第六轮审查：emit running 与 procs.set 的实际顺序相反（spawn 在 runFfmpeg
       // 内部才发生）——窗口内 cancel 恒 false 但进程照跑。改为 spawn 登记后回调 emit
       await this.runFfmpeg(args, output, taskId, input.tool, extraOutputs ?? [], () =>
@@ -1159,8 +1283,11 @@ export class ToolboxRunner {
       const size = await stat(output).then((s) => s.size).catch(() => 0)
       this.emit({ taskId, tool: input.tool, status: 'completed', message: output, bytes: size })
       log.info(`tool ${input.tool} completed: ${output} (${size} bytes)`)
-      return output
+      // 四期审查：全产物返回——多产物工具（批量转码/voice-sep）的第 2..N 产物
+      // 也须落 task_files，否则「彻底删除（含文件）」漏删
+      return { output, extraOutputs: extraOutputs ?? [] }
     } catch (err) {
+      this.cancelled.delete(taskId) // 取消标记随终态清理（防集合残留污染 exit 判定）
       const message = err instanceof Error ? err.message : String(err)
       this.emit({ taskId, tool: input.tool, status: 'failed', message })
       log.error(`tool ${input.tool} failed: ${message}`)
@@ -1182,7 +1309,10 @@ export class ToolboxRunner {
   }
 
   /** Backlog：Demucs 神经网络音轨分离（可选增强组件执行器） */
-  private async submitDemucs(input: ToolCreateInput, taskId: string): Promise<string> {
+  private async submitDemucs(
+    input: ToolCreateInput,
+    taskId: string
+  ): Promise<{ output: string; extraOutputs: string[] }> {
     const outDir = join(input.saveDir ?? '.', '工具箱输出', '音轨分离')
     try {
       await mkdir(outDir, { recursive: true })
@@ -1260,7 +1390,7 @@ export class ToolboxRunner {
       )
       this.emit({ taskId, tool: input.tool, status: 'completed', message: output })
       log.info(`stem-demucs completed: ${output}`)
-      return output
+      return { output, extraOutputs: [] }
     } catch (err) {
       const message = fsErrToChinese(err)
       this.emit({ taskId, tool: input.tool, status: 'failed', message })

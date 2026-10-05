@@ -198,6 +198,8 @@ export interface MusicLibraryTrack {
   quality: string | null
   source: string | null
   size: number
+  /** 四期：磁盘文件缺失（被移动/删除）——条目可见但禁播放/补标签 */
+  exists: boolean
   createdAt: number
 }
 
@@ -407,7 +409,15 @@ export interface VideoLibraryItem {
   durationSec: number | null
   /** 封面 jpg 绝对路径（userData/covers/；抽取失败为 null，前端占位图） */
   coverPath: string | null
+  /** 四期：磁盘文件缺失（被移动/删除）——条目可见但禁预览 */
+  exists: boolean
   createdAt: number
+}
+
+/** 四期（0.11.x）：NFO/海报导出结果（落视频同目录，Jellyfin/Emby 归档口径） */
+export interface NfoExportResult {
+  nfoPath: string
+  posterPath: string | null
 }
 
 /** backlog #26（2026-10-03）：网盘/WebDAV（OpenList）目录条目 */
@@ -535,6 +545,12 @@ export interface OmniGetBridge {
   videoLibrary(): Promise<VideoLibraryItem[]>
   /** 三期：从视频库移除条目（不删文件） */
   videoLibraryRemove(id: string): Promise<void>
+  /** 四期：NFO/海报手动导出（落视频同目录，Jellyfin/Emby 归档口径） */
+  videoExportNfo(id: string): Promise<NfoExportResult>
+  /** 四期：OpenSubtitles API Key（safeStorage 凭据通道；保存即生效，不回显） */
+  opensubtitlesSaveKey(apiKey: string): Promise<void>
+  /** 四期：OpenSubtitles Key 配置与存储形态（设置页状态展示，不回显 Key 本体） */
+  opensubtitlesStatus(): Promise<{ hasKey: boolean; encrypted: boolean }>
   /** BT 端口自检：检测 aria2 listen-port 本地是否在监听（外网可达性需用户自行放行防火墙） */
   diagBtPort(): Promise<{
     listening: boolean
@@ -656,6 +672,11 @@ export const IPC_CHANNELS = {
   /** 三期：视频媒体库（视频任务完成即登记，封面墙浏览） */
   videoLibrary: 'video:library',
   videoLibraryRemove: 'video:library:remove',
+  /** 四期（0.11.x）：NFO/海报手动导出 */
+  videoExportNfo: 'video:nfo',
+  /** 四期（0.11.x）：OpenSubtitles API Key（safeStorage 凭据通道，同 #26 口径） */
+  opensubtitlesSaveKey: 'opensubtitles:saveKey',
+  opensubtitlesStatus: 'opensubtitles:status',
   diagBtPort: 'diag:btPort',
   diagBtExternal: 'diag:btExternal',
   appCheckUpdate: 'app:checkUpdate',

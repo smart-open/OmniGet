@@ -37,6 +37,24 @@
 
 ---
 
+## 〇-D、四期统一内容管理批次（2026-10-04，roadmap 四期四项，0.11.0）
+
+> 四项全部落地：统一媒体库 / OpenSubtitles 入库钩子 / 音频处理族 / NFO 导出，明细见 CHANGELOG 0.11.0 与 git 历史。**接受不修项**（记录备查）：
+> - **入库钩子默认关**：OpenSubtitles 匹配依赖用户自备 API Key（免费配额），NFO/海报会在用户目录落盘——两者均 opt-in（`video.subtitleHook` / `video.nfoExport`），不改变既有默认行为；
+> - **钩子失败仅留痕**：字幕匹配/NFO 导出 fire-and-forget，失败 log.warn 不广播通知——配额耗尽（HTTP 406）是常态，逐次弹条会形成骚扰；成功路径经通知条公示；
+> - **合集产物不入库**（三期口径延续）：统一库/钩子仅覆盖单视频/直播录制产物；
+> - **DB 无新迁移**：统一视图只读两张既有表（music_tracks/videos），exists 为列表期 fs 标注不落库；
+> - **章节容器白名单**：仅 mp3/m4a/m4b 可写章节（ID3v2 CHAP/MP4 chapter），flac/wav 等报错给出「先格式转换」出口动作；
+> - 遗留人工项：OpenSubtitles 真机回归（API Key/配额/哈希命中率）、NFO 在 Jellyfin/Emby 的实际扫描效果、批量转码大文件队列实测。
+
+> **同日回归审查（独立子代理复核 + 修复）**：修 10 项——
+> - **P1×1** 入库钩子耦合：字幕步骤抛错（「未匹配到字幕」是最常见正常结果）会连带跳过 NFO 导出 → 字幕步骤独立 try/catch；
+> - **P2×4** ①批量转码 ffmpeg 双语义错：多输出时选项只作用于紧随的下一个输出（须逐输出重复）+ 默认流选择是「跨全部输入挑最优」而非「第 i 输入 → 第 i 输出」（须显式 `-map i:a`，缺流加 `?` 容忍）；②音频章节 `-map_metadata 1` 会用无标签 ffmetadata 覆盖原音频 title/artist → 改 `-map_metadata 0 -map_chapters 1`；③`prewrite` 写盘失败（磁盘满/EACCES）逃逸 finally → 工具并发信号量泄漏、两次即队列永久卡死 → 写盘入 try；④loudnorm async build 逃逸并发信号量（N 任务 = N 路并发全量解码）→ `acquireSlot` 前移到 build 之前（附带：构建期取消登记 building 集合，spawn 前复核放弃）；
+> - **P3×5** ①`existsSync` 同步跑主线程，断连网络盘冻结全应用 → 改异步 stat + Promise.all；②自动 NFO 与封面抽帧并发竞态（poster 几乎必然跳过）→ 钩子链 await generateCover（顺带去重原独立抽帧调用）；③库行注销/任务删除与钩子链的孤儿字幕窗口 → 链首 isTrashed 复核；④safeStorage 降级明文时 UI 谎称「加密存储」→ status 回传存储形态 + 保存后刷新；⑤字幕语言保存无校验（`Chinese` 落库但静默回退 zh）→ 保存前同口径正则校验。
+> - **接受不修项**：loudnorm 第一遍测量进程不登记进程表（cancel 只拦第二遍转码；测量有 15min 兜底超时自然终止，def.build 签名无 taskId 通道，改造性价比低）；MP4 档 `-map i:v:0` 对无视频流输入整批报错（缺流文件本就不该进转码批，错误信息可定位）。
+
+---
+
 ### 1. 🔴 macOS 签名与公证（等待 Apple 证书）
 - **现状**：`electron-builder.yml` mac 段已有 `identity` / `notarize` / `hardenedRuntime` / `entitlements` 注释化占位；代码侧已就绪。
 - **待办**：
@@ -251,6 +269,7 @@
 ### 30. ✅（2026-10-03）字幕库自动匹配（OpenSubtitles 单工具落地）
 - **依据**：Bazarr（30+ 字幕提供商哈希匹配，NAS 生态标配，活跃）。下载器场景 yt-dlp 已抓站内字幕（M3-5）；BT 影视外挂字幕匹配有价值，但需独立服务/Python 运行时。
 - **已完成（原触发条件兑现：OpenSubtitles API 单工具入工具箱，不引入 Bazarr 全家桶）**：工具箱「OpenSubtitles 字幕匹配」工具（`subtitle-fetch`，node 运行时）——官方文件哈希算法（size + 首/尾 64KB LE 求和，BigInt 64 位回绕，2 例手工向量单测）→ `api.opensubtitles.com` 哈希精确匹配（用户自备免费 API Key；401/406 配额/无命中全给出路）→ 下载授权 → zip（EOCD+central directory 最小解析，store/deflate，优先字幕扩展名）与 gzip 自动解包 → 落盘视频同目录（重名追加序号不覆盖；ass 内容按 `[Script Info]` 识别扩展名）。纯函数 6 例单测（`subtitle-hash.test.ts`）。**⚠ 安全口径**：API Key 经表单参数随任务 params 明文落本地任务库（免费个人 Key、库不出本机，与 cookieFile 路径同敏感级；如后续需升级可改走 safeStorage 凭据通道，同 #26）。
+**✅（2026-10-04，四期 0.11.0）升级为入库钩子**：API Key 迁移 safeStorage 凭据通道（`opensubtitles/credentials.ts`，键 `opensubtitles.key.enc`，读取黑名单 + 专用 IPC 写入，同 #26 口径）；工具参数留空自动回退凭据通道；设置 `video.subtitleHook` 开启后视频完成自动匹配（fire-and-forget，成功通知/失败留痕）。
 
 ### 31. ⏸ yt-dlp 外部插件目录（观察，不做内置入口——2026-10-03 复核维持）
 - **依据**：yt-dlp 原生插件机制（`yt_dlp_plugins` 包 / `--use-plugins`，社区 extractor 长尾，EJS 本身即插件形态）。允许用户向引擎目录自放插件包可解锁长尾站点且免热更主引擎，但等同「用户自带任意代码执行」，与适配脚本声明式热更的合规形态边界冲突（同 §四「开放社区脚本不做」判定）。

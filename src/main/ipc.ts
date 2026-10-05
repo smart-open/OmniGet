@@ -220,19 +220,24 @@ export function registerIpcHandlers(): void {
   // 二期（0.9.x 音乐库）：已完成曲目登记视图
   ipcMain.handle(IPC_CHANNELS.musicLibrary, async () => {
     const { listTracks } = await import('./music/library')
-    return listTracks().map((r) => ({
-      id: r.id,
-      taskId: r.task_id,
-      path: r.path,
-      lrcPath: r.lrc_path,
-      title: r.title,
-      artist: r.artist,
-      album: r.album,
-      quality: r.quality,
-      source: r.source,
-      size: r.size,
-      createdAt: r.created_at
-    }))
+    // 审查修复：exists 改异步 stat——existsSync 逐行同步跑在主线程，断连网络盘
+    // 单次可达数秒（整应用冻结，含托盘/悬浮窗）
+    return Promise.all(
+      listTracks().map(async (r) => ({
+        id: r.id,
+        taskId: r.task_id,
+        path: r.path,
+        lrcPath: r.lrc_path,
+        title: r.title,
+        artist: r.artist,
+        album: r.album,
+        quality: r.quality,
+        source: r.source,
+        size: r.size,
+        exists: await stat(r.path).then((s) => s.isFile()).catch(() => false),
+        createdAt: r.created_at
+      }))
+    )
   })
   ipcMain.handle(IPC_CHANNELS.musicLibraryRemove, async (_e, trackId: string) => {
     const { removeTrack } = await import('./music/library')
@@ -251,17 +256,21 @@ export function registerIpcHandlers(): void {
   // 三期（0.10.x）：视频媒体库（视频任务完成即登记，封面墙浏览）
   ipcMain.handle(IPC_CHANNELS.videoLibrary, async () => {
     const { listVideos } = await import('./video/library')
-    return listVideos().map((r) => ({
-      id: r.id,
-      taskId: r.task_id,
-      path: r.path,
-      title: r.title,
-      platform: r.platform,
-      size: r.size,
-      durationSec: r.duration_sec,
-      coverPath: r.cover_path,
-      createdAt: r.created_at
-    }))
+    // exists 异步 stat（同 musicLibrary 审查口径）
+    return Promise.all(
+      listVideos().map(async (r) => ({
+        id: r.id,
+        taskId: r.task_id,
+        path: r.path,
+        title: r.title,
+        platform: r.platform,
+        size: r.size,
+        durationSec: r.duration_sec,
+        coverPath: r.cover_path,
+        exists: await stat(r.path).then((s) => s.isFile()).catch(() => false),
+        createdAt: r.created_at
+      }))
+    )
   })
   ipcMain.handle(IPC_CHANNELS.videoLibraryRemove, async (_e, videoId: string) => {
     const { removeVideo } = await import('./video/library')
@@ -269,6 +278,26 @@ export function registerIpcHandlers(): void {
     if (!id) throw new Error('缺少条目 ID')
     const removed = removeVideo(id)
     if (!removed) throw new Error('条目不存在或已被移除')
+  })
+  // 四期（0.11.x）：NFO/海报手动导出（视频库行操作，Jellyfin/Emby 归档口径）
+  ipcMain.handle(IPC_CHANNELS.videoExportNfo, async (_e, videoId: string) => {
+    const { exportNfoForVideo } = await import('./video/nfo')
+    const id = typeof videoId === 'string' ? videoId.trim() : ''
+    if (!id) throw new Error('缺少条目 ID')
+    return exportNfoForVideo(id)
+  })
+  // 四期（0.11.x）：OpenSubtitles API Key（safeStorage 凭据通道，同 #26 口径——
+  // 专用 IPC 写入；读取黑名单不回显，写白名单不含）
+  ipcMain.handle(IPC_CHANNELS.opensubtitlesSaveKey, async (_e, apiKey: string) => {
+    const key = typeof apiKey === 'string' ? apiKey.trim() : ''
+    if (!key) throw new Error('API Key 不能为空')
+    if (key.length > 128) throw new Error('API Key 过长（上限 128 字符）')
+    const { saveOpensubtitlesKey } = await import('./opensubtitles/credentials')
+    saveOpensubtitlesKey(key)
+  })
+  ipcMain.handle(IPC_CHANNELS.opensubtitlesStatus, async () => {
+    const { keyStorageInfo } = await import('./opensubtitles/credentials')
+    return keyStorageInfo()
   })
 
   // engine（M3-9：yt-dlp 热更器）
@@ -568,7 +597,14 @@ export function registerIpcHandlers(): void {
   //（bridge.token 可驱动全部 Web API；凭据类路径由各自专用 IPC 按需返回）
   const RENDERER_READ_BLOCKED_SETTINGS = new Set<string>(
     // backlog #26：WebDAV 凭据密文/明文兜底键均不回显渲染层（凭据仅注入请求头）
-    ['bridge.token', 'netdisk.auth.enc', 'netdisk.auth']
+    // 四期（0.11.x）：OpenSubtitles API Key 走 safeStorage 凭据通道，同口径不回显
+    [
+      'bridge.token',
+      'netdisk.auth.enc',
+      'netdisk.auth',
+      'opensubtitles.key.enc',
+      'opensubtitles.key'
+    ]
   )
   ipcMain.handle(IPC_CHANNELS.settingsGet, (_e, key: string) => {
     const k = String(key ?? '')
@@ -617,7 +653,11 @@ export function registerIpcHandlers(): void {
     'sidecar.videoApiUrl',
     // backlog #26（2026-10-03）：网盘/WebDAV 端点（http 允许——OpenList 常部署在局域网/本机；
     // 凭据走专用 IPC，不在此白名单）
-    'netdisk.endpoint'
+    'netdisk.endpoint',
+    // 四期（0.11.x）：内容库入库钩子开关与语言偏好（OpenSubtitles API Key 走专用 IPC）
+    'video.subtitleHook',
+    'video.subtitleLanguages',
+    'video.nfoExport'
   ])
   ipcMain.handle(IPC_CHANNELS.settingsSet, (_e, key: string, value: unknown) => {
     const k = String(key ?? '')

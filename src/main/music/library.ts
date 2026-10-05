@@ -78,6 +78,12 @@ export function removeTrack(id: string): boolean {
   return r.changes > 0
 }
 
+/** 四期（0.11.x）：任务「彻底删除（含文件）」时随产物注销库行（文件已删，库行成死链）。
+ * 「删除·保留文件」不调用（库行保留，条目标注文件缺失）。 */
+export function removeTracksByTask(taskId: string): void {
+  getDb().prepare('DELETE FROM music_tracks WHERE task_id = ?').run(taskId)
+}
+
 /**
  * 一键补标签（库行入口串 #29 MusicBrainz 查询）：
  * 查询词优先用库行元数据，缺失时从文件名解析（'Artist - Title'）→

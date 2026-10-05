@@ -1,7 +1,10 @@
 // backlog #30（2026-10-03）：OpenSubtitles API 字幕匹配（工具箱过渡路线，不引入 Bazarr）
 // 用户自备免费 API Key（api.opensubtitles.com 注册）；文件哈希精确匹配 → 下载 → 落盘到视频旁
+// 四期（0.11.x）：落盘逻辑抽出为 saveSubtitleBesideVideo（工具 compute 与入库钩子共用）
 
 import { inflateRawSync, gunzipSync } from 'zlib'
+import { stat, writeFile } from 'fs/promises'
+import { basename, dirname, join } from 'path'
 
 // 第六轮审查：下载与解压上限——OpenSubtitles 下载链接内容不可信（30s 超时管不住
 // 1GB 慢流），zip/gzip 可被构造放大数千倍耗尽内存。口径对齐 bridge.readBody 1MB
@@ -146,4 +149,19 @@ export async function fetchSubtitleForVideo(
   const body = Buffer.from(await subRes.arrayBuffer())
   if (body.length > DOWNLOAD_LIMIT_BYTES) throw new Error('字幕文件过大（超过 32MB 上限），已取消下载')
   return { body: unwrapSubtitleBody(body), fileName: dl.file_name || 'subtitle.srt', release: entry?.attributes?.release }
+}
+
+/**
+ * 落盘到视频同目录（播放器可自动加载）；重名不覆盖，追加序号。
+ * 返回最终路径（工具 compute 与四期入库钩子共用）。
+ */
+export async function saveSubtitleBesideVideo(videoPath: string, body: Buffer, lang0: string): Promise<string> {
+  const contentExt = body.slice(0, 13).toString('utf8').startsWith('[Script Info]') ? 'ass' : 'srt'
+  const stem = basename(videoPath).replace(/\.\w+$/, '')
+  let out = join(dirname(videoPath), `${stem}.${lang0}.${contentExt}`)
+  for (let i = 1; await stat(out).then(() => true).catch(() => false); i++) {
+    out = join(dirname(videoPath), `${stem}.${lang0}.${i}.${contentExt}`)
+  }
+  await writeFile(out, body)
+  return out
 }

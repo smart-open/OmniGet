@@ -87,6 +87,22 @@ export function removeVideo(id: string): boolean {
   return true
 }
 
+/** 四期（0.11.x）：任务「彻底删除（含文件）」时随产物注销库行并清理封面文件。
+ * 「删除·保留文件」不调用（库行保留，条目标注文件缺失）。 */
+export function removeVideosByTask(taskId: string): void {
+  const db = getDb()
+  const rows = db
+    .prepare('SELECT cover_path FROM videos WHERE task_id = ?')
+    .all(taskId) as unknown as Array<{ cover_path: string | null }>
+  if (rows.length === 0) return
+  db.prepare('DELETE FROM videos WHERE task_id = ?').run(taskId)
+  for (const r of rows) {
+    if (r.cover_path) {
+      void import('fs/promises').then(({ unlink }) => unlink(r.cover_path!).catch(() => {}))
+    }
+  }
+}
+
 function coversDir(): string {
   const dir = join(userDataDir(), 'covers')
   mkdirSync(dir, { recursive: true })

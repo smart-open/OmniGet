@@ -285,7 +285,46 @@ export class TaskManager {
           size: fileSize
         })
         // 封面抽取 fire-and-forget（失败留痕不阻断；同路径重复完成由库内覆盖去重）
-        void generateCover(videoId, absPath)
+        // 四期（0.11.x）入库钩子（fire-and-forget，失败留痕不阻断完成链）：
+        // ① OpenSubtitles 字幕自动匹配（设置 video.subtitleHook，Key 走 safeStorage 凭据通道）
+        // ② NFO/海报 sidecar（设置 video.nfoExport，Jellyfin/Emby 归档口径）
+        // 审查修复：钩子链 await generateCover——NFO 海报复用封面产物，并发跑
+        // 首次完成时 cover_path 尚未落库，poster.jpg 几乎必然跳过
+        void (async () => {
+          await generateCover(videoId, absPath)
+          // 任务在钩子窗口内被删除（含文件）→ 不再写孤儿字幕/海报
+          if (isTrashed(task.id)) return
+          if (getSettingParsed<boolean>('video.subtitleHook') === true) {
+            // 审查修复：字幕步骤独立容错——「未匹配到字幕」是最常见的正常结果
+            // （fetchSubtitleForVideo 主动抛错），此前会连带跳过 NFO 导出
+            try {
+              const { autoFetchSubtitle, normalizeSubtitleLanguages } = await import(
+                '../toolbox/subtitle-hook'
+              )
+              const langs = normalizeSubtitleLanguages(
+                getSettingParsed<string>('video.subtitleLanguages') ?? 'zh'
+              )
+              const saved = await autoFetchSubtitle(absPath, langs)
+              if (saved) {
+                broadcastNotices([
+                  {
+                    level: 'info',
+                    message: `已自动匹配字幕：${saved.split(/[\\/]/).pop() ?? saved}`,
+                    taskId: task.id
+                  }
+                ])
+              }
+            } catch (err) {
+              log.warn(
+                `subtitle hook failed for ${task.id}: ${err instanceof Error ? err.message : String(err)}`
+              )
+            }
+          }
+          const { maybeExportNfo } = await import('../video/nfo')
+          await maybeExportNfo(videoId)
+        })().catch((err) => {
+          log.warn(`post-video library hooks failed for ${task.id}: ${err instanceof Error ? err.message : String(err)}`)
+        })
       }
     })().catch((err) => {
       // 修复：saveTaskFiles 同步异常（如退出阶段 DB 已关闭）不得逃逸为 unhandledRejection
@@ -1253,6 +1292,16 @@ export class TaskManager {
           // 而非「记录在但文件已删」的矛盾状态
           const files = getTaskFiles(task.id)
           purgeTask(task.id)
+          // 四期（0.11.x）：统一内容库与回收站口径打通——文件已删时库行随之注销，
+          // 不留死链；「删除·保留文件」（purgeRecord）不在此路径，库行保留
+          void (async () => {
+            const { removeTracksByTask } = await import('../music/library')
+            const { removeVideosByTask } = await import('../video/library')
+            removeTracksByTask(task.id)
+            removeVideosByTask(task.id)
+          })().catch((err) =>
+            log.warn(`purge library rows failed for ${task.id}`, { error: String(err) })
+          )
           await this.deleteTaskFiles(task, files)
         } else {
           softDeleteTask(task.id) // 回收站：默认保留文件（§4.5）
@@ -1667,7 +1716,7 @@ export class TaskManager {
       }
       this.transition(task, 'running')
       this.pushEvent({ taskId: task.id, status: 'running' })
-      const output = await toolbox.submit(
+      const { output, extraOutputs } = await toolbox.submit(
         {
           tool: input.tool,
           sourcePath: input.sourcePath,
@@ -1695,9 +1744,17 @@ export class TaskManager {
       // 字节数归零（统计口径漂移）；与 completion 增量同源回写
       updateTaskFields(task.id, { totalBytes: size })
       // M3 修复：产物落 task_files——否则「彻底删除（含文件）」对工具任务只删记录，
-      // 工具箱输出目录下的产物永久残留
+      // 工具箱输出目录下的产物永久残留。四期审查：多产物工具（批量转码/voice-sep）
+      // 的第 2..N 产物同样登记，B6 承诺才完整
+      const extraRows = await Promise.all(
+        extraOutputs.map(async (p) => {
+          const sz = await stat(p).then((s) => s.size).catch(() => 0)
+          return { path: basename(p), size: sz, selected: true, downloaded: sz }
+        })
+      )
       saveTaskFiles(task.id, [
-        { path: basename(output), size, selected: true, downloaded: size }
+        { path: basename(output), size, selected: true, downloaded: size },
+        ...extraRows
       ])
       this.recordCompletionBytes(size)
       this.pushEvent({ taskId: task.id, status: 'completed' })

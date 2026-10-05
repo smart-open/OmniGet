@@ -24,9 +24,8 @@ const zh: Dict = {
   'nav.music': '音乐',
   'nav.health': '平台健康',
   'nav.toolbox': '工具箱',
-  'nav.library': '音乐库',
-  // 三期：视频媒体库
-  'nav.videoLibrary': '视频库',
+  // 四期：统一内容库（音乐 + 视频汇合视图）
+  'nav.library': '内容库',
   'nav.trash': '回收站',
   'nav.stats': '统计',
   'nav.theme': '主题',
@@ -105,9 +104,7 @@ const en: Dict = {
   'nav.music': 'Music',
   'nav.health': 'Health',
   'nav.toolbox': 'Toolbox',
-  'nav.library': 'Music Library',
-  // 三期：视频媒体库
-  'nav.videoLibrary': 'Video Library',
+  'nav.library': 'Content Library',
   'nav.trash': 'Trash',
   'nav.stats': 'Stats',
   'nav.theme': 'Theme',

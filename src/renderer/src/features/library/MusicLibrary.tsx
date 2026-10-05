@@ -98,6 +98,11 @@ export function MusicLibrary() {
       setPlayingId(null)
       return
     }
+    // 四期：文件缺失（被移动/删除）直接提示，不拉空播放器
+    if (!t.exists) {
+      toast('文件已缺失（可能被移动或删除）', 'warning')
+      return
+    }
     audioRef.current?.pause()
     const audio = new Audio(localMediaUrl(t.path))
     audioRef.current = audio
@@ -241,12 +246,18 @@ export function MusicLibrary() {
                             <Warning size={11} /> 无歌词
                           </span>
                         )}
+                        {/* 四期：统一库与磁盘口径——文件缺失条目可见但不可播放/补标签 */}
+                        {!t.exists && (
+                          <span className="flex items-center gap-0.5 text-danger">
+                            <Warning size={11} /> 文件缺失
+                          </span>
+                        )}
                       </div>
                     </div>
                     <div className="flex shrink-0 items-center gap-1">
                       <button
                         title="MusicBrainz 补标签"
-                        disabled={retagging === t.id}
+                        disabled={retagging === t.id || !t.exists}
                         className="press flex h-6 w-6 items-center justify-center rounded text-text-3 transition-colors hover:bg-surface-2 hover:text-text-1 disabled:opacity-50"
                         onClick={() => void retag(t)}
                       >

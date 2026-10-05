@@ -82,3 +82,43 @@ export async function probeStreams(inputPath: string): Promise<StreamInfo[]> {
     )
   })
 }
+
+/** 四期（0.11.x）：媒体时长（秒）。失败返回 null——调用方按兜底值处理 */
+export async function probeDurationSec(inputPath: string): Promise<number | null> {
+  await ensureVerified('ffprobe')
+  return new Promise((resolve) => {
+    const args = ['-v', 'error', '-show_entries', 'format=duration', '-of', 'json', inputPath]
+    let proc: ReturnType<typeof spawnTreeAware>
+    try {
+      proc = spawnTreeAware(toolPath('ffprobe'), args)
+    } catch {
+      resolve(null)
+      return
+    }
+    let stdout = ''
+    proc.stdout?.on('data', (d: Buffer) => {
+      stdout += String(d)
+    })
+    const timer = setTimeout(() => {
+      terminateTree(proc, 1000)
+      resolve(null)
+    }, PROBE_TIMEOUT_MS)
+    proc.on('error', () => {
+      clearTimeout(timer)
+      resolve(null)
+    })
+    proc.on('exit', (code) => {
+      clearTimeout(timer)
+      if (code !== 0) {
+        resolve(null)
+        return
+      }
+      try {
+        const sec = Number((JSON.parse(stdout || '{}') as { format?: { duration?: string } }).format?.duration)
+        resolve(Number.isFinite(sec) && sec > 0 ? sec : null)
+      } catch {
+        resolve(null)
+      }
+    })
+  })
+}

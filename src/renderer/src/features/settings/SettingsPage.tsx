@@ -395,6 +395,13 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
   const [netdiskSaveDir, setNetdiskSaveDir] = useState('')
   const [netdiskDownloading, setNetdiskDownloading] = useState(false)
   const [netdiskCredBusy, setNetdiskCredBusy] = useState(false)
+  // 四期（0.11.x）：内容库入库钩子——OpenSubtitles 字幕自动匹配 + NFO/海报导出
+  const [subtitleHook, setSubtitleHook] = useState(false)
+  const [subtitleLangs, setSubtitleLangs] = useState('zh')
+  const [nfoExport, setNfoExport] = useState(false)
+  const [osKey, setOsKey] = useState('')
+  const [osInfo, setOsInfo] = useState<{ hasKey: boolean; encrypted: boolean } | null>(null)
+  const [osBusy, setOsBusy] = useState(false)
   const [saveDir, setSaveDir] = useState('')
   // R2/R7：并发上限与自动归档
   const [maxConcurrent, setMaxConcurrent] = useState('0')
@@ -531,6 +538,14 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
         .settingsGet('download.videoPresets')
         .then((v) => setVideoPresets(Array.isArray(v) ? (v as Array<{ id: number; name: string }>) : []))
         .catch(() => {})
+      // 四期：入库钩子开关与语言偏好（加载失败按默认关闭继续，同上兜底口径）
+      window.omniget.settingsGet('video.subtitleHook').then((v) => setSubtitleHook(v === true)).catch(() => {})
+      window.omniget
+        .settingsGet('video.subtitleLanguages')
+        .then((v) => setSubtitleLangs(typeof v === 'string' && v ? v : 'zh'))
+        .catch(() => {})
+      window.omniget.settingsGet('video.nfoExport').then((v) => setNfoExport(v === true)).catch(() => {})
+      window.omniget.opensubtitlesStatus().then((s) => setOsInfo(s)).catch(() => {})
       const [
         template, musicTemplate, cookieFile, sidecarUrl, netdiskUrl, netdiskSaveDir, saveDir,
         maxConcurrent, autoArchive, dedupe, ytdlpAria2c, upnp, btEncrypt,
@@ -1216,6 +1231,122 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
               >
                 保存
               </Button>
+            </Section>
+
+            {/* 四期（0.11.x）：内容库入库钩子——OpenSubtitles 字幕自动匹配 + NFO 导出 */}
+            <Section title="内容库入库钩子（可选）">
+              <p className="mb-2 text-[10px] leading-relaxed text-text-3">
+                视频下载完成入库后自动执行：字幕按文件哈希在 OpenSubtitles
+                内容级精确匹配并落盘视频旁；NFO/海报（Jellyfin/Emby 方言）落视频同目录。
+                配合「按类型自动归档」的目录结构可被媒体服务器直接扫描
+              </p>
+              <label className="flex cursor-pointer items-center gap-2 text-xs text-text-2">
+                <input
+                  type="checkbox"
+                  checked={subtitleHook}
+                  onChange={(e) => {
+                    const next = e.target.checked
+                    setSubtitleHook(next)
+                    window.omniget
+                      .settingsSet('video.subtitleHook', next)
+                      .then(() => flash('字幕自动匹配设置已保存'))
+                      .catch((err) => {
+                        setSubtitleHook(!next)
+                        toastError('保存字幕自动匹配设置', err)
+                      })
+                  }}
+                />
+                自动匹配字幕（OpenSubtitles，需配置 API Key）
+              </label>
+              <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs text-text-2">
+                <input
+                  type="checkbox"
+                  checked={nfoExport}
+                  onChange={(e) => {
+                    const next = e.target.checked
+                    setNfoExport(next)
+                    window.omniget
+                      .settingsSet('video.nfoExport', next)
+                      .then(() => flash('NFO 导出设置已保存'))
+                      .catch((err) => {
+                        setNfoExport(!next)
+                        toastError('保存 NFO 导出设置', err)
+                      })
+                  }}
+                />
+                自动导出 NFO 与海报（Jellyfin / Emby）
+              </label>
+              <div className="mt-3 border-t border-border pt-3">
+                <p className="num text-[10px] text-text-3">
+                  OpenSubtitles API Key：
+                  {osInfo?.hasKey
+                    ? `已配置（${osInfo.encrypted ? '加密存储' : '明文降级：系统安全存储不可用'}，不回显）`
+                    : '未配置'}
+                </p>
+                <p className="mt-1 text-[10px] text-text-3">
+                  api.opensubtitles.com 免费注册获取；Key 经系统安全存储加密保存，不写入日志。
+                  免费账号每日查询/下载配额有限
+                </p>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <input
+                    value={osKey}
+                    onChange={(e) => setOsKey(e.target.value)}
+                    placeholder="OpenSubtitles API Key"
+                    type="password"
+                    autoComplete="new-password"
+                    className="h-8 w-64 rounded-ctl border border-border bg-surface-2 px-2 text-xs outline-none focus:border-accent"
+                  />
+                  <Button
+                    size="sm"
+                    disabled={!osKey.trim() || osBusy}
+                    onClick={() => {
+                      setOsBusy(true)
+                      window.omniget
+                        .opensubtitlesSaveKey(osKey.trim())
+                        .then(() => {
+                          setOsKey('')
+                          // 审查修复：刷新存储形态——safeStorage 降级明文时不得谎称加密
+                          return window.omniget.opensubtitlesStatus()
+                        })
+                        .then((s) => {
+                          setOsInfo(s)
+                          flash(
+                            `OpenSubtitles API Key 已保存${s.encrypted ? '（加密存储）' : ''}`
+                          )
+                        })
+                        .catch((err) => toastError('保存 OpenSubtitles API Key', err))
+                        .finally(() => setOsBusy(false))
+                    }}
+                  >
+                    {osBusy ? '保存中…' : '保存 Key'}
+                  </Button>
+                  <input
+                    value={subtitleLangs}
+                    onChange={(e) => setSubtitleLangs(e.target.value)}
+                    placeholder="字幕语言（如 zh,en）"
+                    className="h-8 w-40 rounded-ctl border border-border bg-surface-2 px-2 text-xs outline-none focus:border-accent"
+                  />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      // 审查修复：保存前同口径校验——此前 `Chinese` 落库成功但消费端
+                      // 静默回退 zh，UI 值与实际行为脱节
+                      const v = subtitleLangs.trim() || 'zh'
+                      if (!/^[a-z]{2,3}(,[a-z]{2,3})*$/i.test(v)) {
+                        toast('字幕语言格式应为两/三字母语言代码，如 zh 或 zh,en', 'warning')
+                        return
+                      }
+                      window.omniget
+                        .settingsSet('video.subtitleLanguages', v)
+                        .then(() => flash('字幕语言偏好已保存'))
+                        .catch((err) => toastError('保存字幕语言偏好', err))
+                    }}
+                  >
+                    保存语言
+                  </Button>
+                </div>
+              </div>
             </Section>
 
             {/* R7 续（backlog #18）：订阅追更 */}

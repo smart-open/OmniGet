@@ -6,11 +6,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   ArrowsClockwise,
+  FileText,
   FolderOpen,
   MagnifyingGlass,
   MonitorPlay,
   Play,
   Trash,
+  Warning,
   X
 } from '@phosphor-icons/react'
 import type { VideoLibraryItem } from '@shared/types'
@@ -89,6 +91,20 @@ export function VideoLibrary() {
 
   async function reveal(v: VideoLibraryItem): Promise<void> {
     await window.omniget.revealToolOutput(v.path)
+  }
+
+  /** 四期（0.11.x）：NFO/海报手动导出（写操作 → toast 反馈） */
+  const [exportingNfo, setExportingNfo] = useState<string | null>(null)
+  async function exportNfo(v: VideoLibraryItem): Promise<void> {
+    setExportingNfo(v.id)
+    try {
+      const r = await window.omniget.videoExportNfo(v.id)
+      toast(`NFO${r.posterPath ? '/海报' : ''}已导出到视频同目录`, 'success')
+    } catch (err) {
+      toastError('导出 NFO 失败', err)
+    } finally {
+      setExportingNfo(null)
+    }
   }
 
   async function remove(v: VideoLibraryItem): Promise<void> {
@@ -180,8 +196,8 @@ export function VideoLibrary() {
                       }}
                     />
                   ) : null}
-                  {/* 悬浮预览按钮（仅 Chromium 可播放容器） */}
-                  {PLAYABLE.test(v.path) && (
+                  {/* 悬浮预览按钮（仅 Chromium 可播放容器；文件缺失禁用） */}
+                  {PLAYABLE.test(v.path) && v.exists && (
                     <button
                       title="预览播放"
                       onClick={() => setPreview(v)}
@@ -203,7 +219,21 @@ export function VideoLibrary() {
                   <div className="mt-1 flex items-center gap-2 text-[10px] text-text-3">
                     <span className="uppercase">{v.platform ?? 'video'}</span>
                     <span className="num">{formatSize(v.size)}</span>
+                    {!v.exists && (
+                      <span className="flex items-center gap-0.5 text-danger" title="文件已被移动或删除">
+                        <Warning size={11} /> 缺失
+                      </span>
+                    )}
                     <span className="ml-auto flex items-center gap-1">
+                      {/* 四期：NFO/海报导出（Jellyfin/Emby 归档口径） */}
+                      <button
+                        title="导出 NFO/海报（Jellyfin/Emby）"
+                        disabled={exportingNfo === v.id}
+                        className="press flex h-5 w-5 items-center justify-center rounded text-text-3 transition-colors hover:bg-surface-2 hover:text-text-1 disabled:opacity-50"
+                        onClick={() => void exportNfo(v)}
+                      >
+                        <FileText size={12} />
+                      </button>
                       <button
                         title="打开所在目录"
                         className="press flex h-5 w-5 items-center justify-center rounded text-text-3 transition-colors hover:bg-surface-2 hover:text-text-1"

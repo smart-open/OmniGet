@@ -40,6 +40,11 @@ const api: OmniGetBridge = {
   // 三期：视频媒体库
   videoLibrary: () => ipcRenderer.invoke(IPC_CHANNELS.videoLibrary),
   videoLibraryRemove: (videoId: string) => ipcRenderer.invoke(IPC_CHANNELS.videoLibraryRemove, videoId),
+  // 四期（0.11.x）：NFO/海报导出 + OpenSubtitles 凭据通道
+  videoExportNfo: (videoId: string) => ipcRenderer.invoke(IPC_CHANNELS.videoExportNfo, videoId),
+  opensubtitlesSaveKey: (apiKey: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.opensubtitlesSaveKey, apiKey),
+  opensubtitlesStatus: () => ipcRenderer.invoke(IPC_CHANNELS.opensubtitlesStatus),
   diagBtPort: () => ipcRenderer.invoke(IPC_CHANNELS.diagBtPort),
   diagBtExternal: () => ipcRenderer.invoke(IPC_CHANNELS.diagBtExternal),
   checkAppUpdate: () => ipcRenderer.invoke(IPC_CHANNELS.appCheckUpdate),

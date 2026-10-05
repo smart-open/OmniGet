@@ -58,6 +58,7 @@ resources/engines/ sidecar 按 <platform> 目录；构建经 extraResources
 - ✅ 产品化批次（R1–R7/T1–T6，0.5.x–0.6.0）+ R7 续/R4 续批次（0.7.0，backlog #4/#8/#11/#16–#22）：N_m3u8DL-RE 引擎 + 直播录制、订阅追更中心（DB v2）、双档案去重、SponsorBlock、短视频解析服务 sidecar、JS 运行时探测（jsruntime.ts）、迷你悬浮窗（?view=mini）、预设导入导出/命名模板、BT 树虚拟化、sanitize 平台差异化；typecheck + 93/93 单测（2026-10-02）
 - ✅ 一期「发布就绪」代码侧（0.8.0，2026-10-04，roadmap 一期）：Windows CI 签名开启 + EV 可选通道；release job tag 推送自动建 Release（安装包 + latest.yml/blockmap + 引擎资产 manifest.json 扁平化）；engine-fetch 目录式 404 回退扁平口径；SponsorBlock 跳过段（仅 YouTube 显示）；EJS 零包体 shim（ELECTRON_RUN_AS_NODE）；typecheck + 125/125 单测。关账余外部/人工项（macOS 证书、五平台真机回归、EJS 代理复测）
 - ✅ 三期「视频纵深」代码侧（0.10.0，2026-10-04，roadmap 三期四项）：直播间直录 #25（sniffer 分型 + live/resolve yt-dlp -J/B站公开 API 取流清单喂 RE + 平台 Referer 头 + 不入去重档案）；弹幕 #23（danmaku/convert xml→ass 纯函数 + 工具箱工具 + B站任务可选压制）；订阅升级 #18（DB v4 + RSS 源 + 每源目录/预设/模板 + 时长/关键词过滤 + 编辑模式）；视频媒体库 MVP（DB v4 videos 表 + ffmpeg 抽帧封面 + VideoLibrary 封面墙视图）；typecheck + 151/151 单测。遗留：直播间/弹幕真机回归、合集产物不入库
+- ✅ 四期「统一内容管理与工具箱」代码侧（0.11.0，2026-10-04，roadmap 四期四项）：统一媒体库（侧栏「内容库」MediaLibrary 分段切换 + exists 磁盘标注 + 彻底删除随产物注销库行）；OpenSubtitles 入库钩子（API Key 迁 safeStorage 凭据通道 opensubtitles/credentials.ts 同 #26 口径 + video.subtitleHook 开关默认关 + fire-and-forget）；音频处理族（loudnorm 升级两遍 EBU R128 linear / audio-chapters 有声书章节 FFMETADATA / batch-convert 批量转码 multi 通道，零渲染层增量）；NFO/海报导出（video/nfo.ts Jellyfin/Emby 方言 + video.nfoExport 开关默认关 + 视频库行手动导出）；typecheck + 165/165 单测。遗留：OpenSubtitles/Jellyfin 真机回归
 - ⬜ 收口演示（全部人工项）：磁力 `dc9e7581…` GUI、10k 60fps、mac/Linux 清单、五平台各一次成功、B 站 1080P+cookie / YouTube 4K / 抖音快手短链、light 走查、三态走查、NSIS 出包
 
 ## 5. 关键决策与约定（不可随意更改）
@@ -73,6 +74,7 @@ resources/engines/ sidecar 按 <platform> 目录；构建经 extraResources
 9. **合规红线**（§9）：不做资源站聚合；去水印仅取平台已有原始资源；音乐降级必须告警。
 10. **安全基线**：contextIsolation+sandbox+nodeIntegration:false；aria2 RPC 仅绑 127.0.0.1；CSP 在 `src/renderer/index.html`。
 11. **三期口径（0.10.0）**：直播间任务的 `task.source` 在 parse 后被改写为流清单直链（原直播间页 URL 存 `params.roomUrl`，live/resolve 的 `liveHeaderArgs` 据此注入平台 Referer 头）——重启恢复的直播任务凭过期清单失败属预期；直播 URL 不入去重档案；弹幕/直播取数只走 B站公开 API（`web-interface/view`/`dm/listsoa`/`room_playing`），不自研签名；视频库登记唯一入口 manager.persistCliProduct → `registerVideo`（同路径复用行保留封面，封面抽帧 fire-and-forget 落 `userData/covers/`）。
+12. **四期口径（0.11.0）**：①统一内容库 = 侧栏「内容库」（MediaLibrary 分段切换音乐/视频，复用 MusicLibrary/VideoLibrary 子视图）；库行 `exists` 为列表期 fs 标注不落库；任务「彻底删除（含文件）」调 `removeTracksByTask/removeVideosByTask` 注销库行，「删除·保留文件」保留；②OpenSubtitles API Key 走 safeStorage 凭据通道（键 `opensubtitles.key.enc`/`opensubtitles.key`，读取黑名单 + 专用 IPC，同 #26 netdisk 口径），工具与入库钩子共用 `getOpensubtitlesKey()`；入库钩子（字幕 `video.subtitleHook` / NFO `video.nfoExport`，均默认关）挂在 persistCliProduct 的 fire-and-forget 链，失败仅留痕；③NFO/海报命名 `<视频名>.nfo` + `<视频名>-poster.jpg`（Jellyfin/Emby 识别，不抢占 poster.jpg）；④新工具 build 期报错（如章节容器不支持/无有效章节）必须抛错走 failed 事件，不静默产出。
 
 ## 6. 环境（Windows 11，PowerShell；本机无 MSVC）
 
