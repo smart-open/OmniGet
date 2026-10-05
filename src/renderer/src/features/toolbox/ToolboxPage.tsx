@@ -8,9 +8,11 @@ import {
   ArrowsIn,
   ArrowsLeftRight,
   Camera,
+  ChatCircleDots,
   DownloadSimple,
   Eye,
   FileVideo,
+  Files,
   Fingerprint,
   FolderOpen,
   FilmStrip,
@@ -21,6 +23,7 @@ import {
   Magnet,
   Microphone,
   MusicNotes,
+  ListNumbers,
   Rows,
   SpeakerHigh,
   SpeakerSlash,
@@ -218,7 +221,11 @@ const TOOL_ICONS: Record<string, Icon> = {
   'subtitle-mux': FileVideo,
   'musicbrainz-tag': MusicNotes,
   'subtitle-fetch': DownloadSimple,
-  'stem-demucs': Microphone
+  'stem-demucs': Microphone,
+  // 四期（0.11.x）：多文件批量转码 / B站弹幕 xml→ass / 有声书章节标记
+  'batch-convert': Files,
+  'danmaku-convert': ChatCircleDots,
+  'audio-chapters': ListNumbers
 }
 
 /** 按工具推导源文件 accept（无对应类型则不限制） */
