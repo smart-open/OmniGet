@@ -637,6 +637,10 @@ export function registerIpcHandlers(): void {
     'download.autoArchive',
     'download.videoPresets',
     'naming.template',
+    // 二期音乐双键（用户反馈：music.template 保存报「不存在或由系统管理」——
+    // 键随 0.9.0 引入但漏出白名单；music.lyrics 同型，工作台歌词模式此前静默失败）
+    'music.template',
+    'music.lyrics',
     'engines.mirror',
     // engines.mirrorHosts 主进程独占（渲染层无 UI，仅配置文件/主进程可写）——
     // 信任锚不得与被保护对象同置于渲染层可写面，否则 SHA256 校验失去独立锚点
