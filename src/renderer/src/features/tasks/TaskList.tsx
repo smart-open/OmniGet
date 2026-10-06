@@ -558,6 +558,15 @@ const TaskRow = memo(function TaskRow({
         >
           {task.name || task.source}
         </motion.span>
+        {/* 五期（0.12.x）：订阅源队列分组角标（订阅创建的任务携带源名） */}
+        {task.queueGroup && (
+          <span
+            className="shrink-0 rounded-ctl border border-border bg-surface-2 px-1.5 text-[10px] leading-4 text-text-3"
+            title={`订阅队列分组：${task.queueGroup}`}
+          >
+            {task.queueGroup}
+          </span>
+        )}
         {task.error && (
           <span className="min-w-0 max-w-48 shrink truncate text-[11px] text-danger">
             {task.error}

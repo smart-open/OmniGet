@@ -515,7 +515,12 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
     port: number
     token: string
     running: boolean
+    lan: boolean
+    lanAddresses: string[]
   } | null>(null)
+  // 五期（0.12.x）：局域网远程访问开关
+  const [bridgeLan, setBridgeLan] = useState(false)
+  const [bridgeLanBusy, setBridgeLanBusy] = useState(false)
   // R6：引擎按需下载
   const [engineList, setEngineList] = useState<
     Array<{ name: string; file: string; installed: boolean; size?: number }>
@@ -596,6 +601,8 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
       setTrackers(trackers)
       setScripts(scripts)
       setBridgeInfo(bridge ?? null)
+      // 五期：LAN 开关当前态（读取失败按关继续）
+      window.omniget.settingsGet('bridge.lan').then((v) => setBridgeLan(v === true)).catch(() => {})
       if (typeof engineList === 'string') {
         // 加载失败哨兵值（见上方 getEngineStatus().catch）
         setEngineLoadFailed(true)
@@ -1567,44 +1574,99 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
               </p>
             </Section>
 
-            <Section title="定时限速计划">
-              {rules.map((r, i) => (
-                <div key={i} className="mb-2 flex items-center gap-2">
-                  <input
-                    value={r.from}
-                    onChange={(e) =>
-                      setRules(rules.map((x, j) => (j === i ? { ...x, from: e.target.value } : x)))
-                    }
-                    className="num h-7 w-20 rounded-ctl border border-border bg-surface-2 px-2 text-xs"
-                  />
-                  <span className="text-text-3">–</span>
-                  <input
-                    value={r.to}
-                    onChange={(e) =>
-                      setRules(rules.map((x, j) => (j === i ? { ...x, to: e.target.value } : x)))
-                    }
-                    className="num h-7 w-20 rounded-ctl border border-border bg-surface-2 px-2 text-xs"
-                  />
-                  <input
-                    value={r.limit}
-                    onChange={(e) =>
-                      setRules(rules.map((x, j) => (j === i ? { ...x, limit: e.target.value } : x)))
-                    }
-                    className="num h-7 w-24 rounded-ctl border border-border bg-surface-2 px-2 text-xs"
-                  />
-                  <Button
-                    size="xs"
-                    variant="danger"
-                    icon={<Trash size={11} />}
-                    onClick={() => {
-                      setRules(rules.filter((_, j) => j !== i))
-                      flash('时段已移除（点「保存计划」生效）')
-                    }}
-                  >
-                    删除
-                  </Button>
+            <Section title="定时限速 / 停运计划（合并编排）">
+              {rules.map((r, i) => {
+                const isPause = r.mode === 'pause'
+                const days = r.days ?? []
+                const DAY_LABELS = ['日', '一', '二', '三', '四', '五', '六']
+                return (
+                <div key={i} className="mb-2">
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={r.mode ?? 'limit'}
+                      onChange={(e) =>
+                        setRules(
+                          rules.map((x, j) =>
+                            j === i
+                              ? { ...x, mode: e.target.value as 'limit' | 'pause' }
+                              : x
+                          )
+                        )
+                      }
+                      className="h-7 rounded-ctl border border-border bg-surface-2 px-1 text-xs"
+                    >
+                      <option value="limit">限速</option>
+                      <option value="pause">停运</option>
+                    </select>
+                    <input
+                      value={r.from}
+                      onChange={(e) =>
+                        setRules(rules.map((x, j) => (j === i ? { ...x, from: e.target.value } : x)))
+                      }
+                      className="num h-7 w-20 rounded-ctl border border-border bg-surface-2 px-2 text-xs"
+                    />
+                    <span className="text-text-3">–</span>
+                    <input
+                      value={r.to}
+                      onChange={(e) =>
+                        setRules(rules.map((x, j) => (j === i ? { ...x, to: e.target.value } : x)))
+                      }
+                      className="num h-7 w-20 rounded-ctl border border-border bg-surface-2 px-2 text-xs"
+                    />
+                    <input
+                      value={isPause ? '—' : r.limit}
+                      disabled={isPause}
+                      onChange={(e) =>
+                        setRules(rules.map((x, j) => (j === i ? { ...x, limit: e.target.value } : x)))
+                      }
+                      className="num h-7 w-24 rounded-ctl border border-border bg-surface-2 px-2 text-xs disabled:opacity-40"
+                    />
+                    <Button
+                      size="xs"
+                      variant="danger"
+                      icon={<Trash size={11} />}
+                      onClick={() => {
+                        setRules(rules.filter((_, j) => j !== i))
+                        flash('时段已移除（点「保存计划」生效）')
+                      }}
+                    >
+                      删除
+                    </Button>
+                  </div>
+                  <div className="mt-1 flex items-center gap-1 pl-1">
+                    {DAY_LABELS.map((lbl, d) => (
+                      <button
+                        key={d}
+                        className={
+                          'press h-5 w-5 rounded-ctl border text-[10px] ' +
+                          (days.includes(d)
+                            ? 'border-accent bg-accent/20 text-accent'
+                            : 'border-border bg-surface-2 text-text-3')
+                        }
+                        title={(days.length === 0 ? '每天（默认）· ' : '') + `周${lbl}`}
+                        onClick={() =>
+                          setRules(
+                            rules.map((x, j) => {
+                              if (j !== i) return x
+                              const cur = x.days ?? []
+                              const next = cur.includes(d)
+                                ? cur.filter((v) => v !== d)
+                                : [...cur, d].sort((a, b) => a - b)
+                              return { ...x, days: next }
+                            })
+                          )
+                        }
+                      >
+                        {lbl}
+                      </button>
+                    ))}
+                    <span className="ml-1 text-[10px] text-text-3">
+                      {days.length === 0 ? '每天' : `周${days.map((d) => DAY_LABELS[d]).join('、')}`}
+                    </span>
+                  </div>
                 </div>
-              ))}
+                )
+              })}
               <div className="flex gap-2">
                 <Button
                   size="xs"
@@ -1612,6 +1674,15 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                   onClick={() => setRules([...rules, { from: '09:00', to: '18:00', limit: '2M' }])}
                 >
                   + 添加时段
+                </Button>
+                <Button
+                  size="xs"
+                  variant="outline"
+                  onClick={() =>
+                    setRules([...rules, { from: '01:00', to: '07:00', limit: '0', mode: 'pause' as const }])
+                  }
+                >
+                  + 添加停运窗口
                 </Button>
                 <Button
                   size="xs"
@@ -1624,13 +1695,18 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                       return
                     }
                     // R4-P3：前端预校验时段格式（主进程 sanitize 会静默丢弃非法行，
-                    // 用户无感知；此处显式提示）
+                    // 用户无感知；此处显式提示）。停运窗口不消费限速档，限速校验豁免；
+                    // 限速档格式与主进程 LIMIT_RE 同口径（1G/2Mb 等会被静默丢行，审查 P3-7）
                     const TIME_RE = /^([01]?\d|2[0-3]):([0-5]\d)$/
+                    const LIMIT_RE = /^\d{1,7}[KM]?$/i
                     const bad = rules.find(
-                      (r) => !TIME_RE.test(r.from) || !TIME_RE.test(r.to) || !r.limit.trim()
+                      (r) =>
+                        !TIME_RE.test(r.from) ||
+                        !TIME_RE.test(r.to) ||
+                        (r.mode !== 'pause' && !LIMIT_RE.test(r.limit.trim()))
                     )
                     if (bad) {
-                      toastError('保存调度计划', new Error('存在格式非法的时段（应为 HH:MM 且限速非空），请修正后保存'))
+                      toastError('保存调度计划', new Error('存在格式非法的时段（时间应为 HH:MM，限速为数字 + 可选 K/M 单位，如 2M、500K），请修正后保存'))
                       return
                     }
                     setScheduleSaving(true)
@@ -1645,7 +1721,8 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                 </Button>
               </div>
               <p className="mt-1.5 text-[10px] text-text-3">
-                限速格式同 aria2（2M、500K、0=不限）；支持跨天时段（22:00–06:00），每分钟自动切换
+                限速格式同 aria2（2M、500K、0=不限）；支持跨天时段（22:00–06:00）与星期几（缺省每天），每分钟自动切换。
+                停运窗口内新任务保持排队、运行中任务自动暂停，窗口结束统一恢复（仅恢复窗口内被自动暂停的任务）。
               </p>
             </Section>
           </>
@@ -1692,6 +1769,58 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                       {bridgeInfo.token}
                     </span>
                   </div>
+                </div>
+                {/* ── 五期（0.12.x）：局域网远程访问（opt-in，令牌鉴权全端点强制）── */}
+                <div className="mb-3 rounded-panel border border-border bg-surface-2/40 px-3 py-2 text-xs">
+                  <label className="flex cursor-pointer items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={bridgeLan}
+                      disabled={bridgeLanBusy}
+                      onChange={(e) => {
+                        const on = e.target.checked
+                        setBridgeLanBusy(true)
+                        window.omniget
+                          .toggleBridgeLan(on)
+                          .then(() => {
+                            setBridgeLan(on)
+                            flash(
+                              on ? '局域网访问已开启（桥接服务已重启）' : '局域网访问已关闭，仅本机可访问'
+                            )
+                            // 信息刷新失败不影响开关状态回显（审查 P1-2：此前
+                            // getBridgeInfo 失败会把已生效的开关重置成相反态）
+                            return window.omniget.getBridgeInfo().catch(() => undefined)
+                          })
+                          .then((info) => {
+                            if (info) setBridgeInfo(info)
+                          })
+                          .catch((err) => {
+                            // toggle IPC 本身失败（重启桥接失败已回滚设置）→ 回显真实态
+                            setBridgeLan(!on)
+                            toastError('切换局域网访问', err)
+                          })
+                          .finally(() => setBridgeLanBusy(false))
+                      }}
+                    />
+                    <span className="text-text-2">允许局域网设备访问 Web 面板（手机/平板远程提交与管理任务）</span>
+                  </label>
+                  {bridgeLan && bridgeInfo?.running ? (
+                    <div className="mt-1.5 space-y-0.5 pl-6 text-[11px] text-text-3">
+                      <p>
+                        局域网地址（携带令牌访问）：
+                        {bridgeInfo.lanAddresses.length === 0 ? (
+                          <span className="text-warning">未检测到局域网网卡地址</span>
+                        ) : (
+                          bridgeInfo.lanAddresses.map((ip) => (
+                            <span key={ip} className="num mr-2 text-text-2">
+                              http://{ip}:{bridgeInfo.port}/?token={bridgeInfo.token}
+                            </span>
+                          ))
+                        )}
+                      </p>
+                      <p className="text-[10px]">注意：开启后同一局域网内的任何设备均可达本端口，务必保管好上方令牌。</p>
+                    </div>
+                  ) : null}
                 </div>
                 <div className="space-y-1 text-[11px] leading-relaxed text-text-3">
                   <p>

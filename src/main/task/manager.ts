@@ -46,6 +46,9 @@ import { platformLabel, SIDECAR_PLATFORMS } from '../sidecar/video-extract'
 import { assertTransition, IllegalTransitionError } from './state-machine'
 import { uuidv7 } from './id'
 import { TaskEventMerger } from './events'
+// 五期（0.12.x）：停运窗口编排 + 启动队列分组轮转
+import { isPausedWindow } from '../scheduler'
+import { interleaveByGroup } from './queue-order'
 import {
   findTaskByInfohash,
   getTask,
@@ -82,8 +85,12 @@ export class TaskManager {
   private merger: TaskEventMerger
   private pollTimer: NodeJS.Timeout | null = null
   private currentEvents = new Map<string, TaskEvent>()
-  /** R2：并发上限闸门的待启动队列（FIFO 闭包，run 内部自检任务状态） */
-  private startQueue: Array<() => void> = []
+  /** R2：并发上限闸门的待启动队列（run 内部自检任务状态）。
+   * 五期：条目带分组标签（订阅源名），派发时跨组轮转；停运窗口内持队不派发 */
+  private startQueue: Array<{ run: () => void; group?: string }> = []
+  /** 五期：停运窗口内由调度器暂停的任务（窗口结束只恢复这些任务，
+   * 用户手动暂停的不越权代恢复） */
+  private schedulePaused = new Set<string>()
   /** P2 加固：正在启动（引擎调用在途）的任务——DB 状态仍为 queued，但槽位已被真实占用 */
   private launching = new Set<string>()
   /** M2-6 信号量：进行中的音乐下载数 */
@@ -363,32 +370,42 @@ export class TaskManager {
     return dbRunning + this.launching.size
   }
 
-  /** 闸门：有空位（或不限）立即执行；否则入 FIFO 队列，槽位释放后由 pumpStarts 派发 */
-  private gateStart(run: () => void): void {
+  /** 闸门：有空位（或不限）立即执行；否则入 FIFO 队列，槽位释放后由 pumpStarts 派发。
+   * 五期：停运窗口内一律入队不启动；group 为队列分组（订阅源名），派发序跨组轮转 */
+  private gateStart(run: () => void, group?: string): void {
     const max = this.maxConcurrent()
-    if (max <= 0 || this.runningDownloads() + this.startQueue.length < max) {
+    if (
+      !isPausedWindow() &&
+      (max <= 0 || this.runningDownloads() + this.startQueue.length < max)
+    ) {
       run()
       return
     }
-    this.startQueue.push(run)
+    this.startQueue.push({ run, group })
   }
 
-  /** 槽位释放后派发排队任务；run 自检任务状态（已删除/取消则放弃） */
+  /** 槽位释放后派发排队任务；run 自检任务状态（已删除/取消则放弃）。
+   * 五期：停运窗口守卫（窗口内不派发，窗口结束由 resumeScheduledDownloads 补泵）；
+   * 派发序 = interleaveByGroup 分组轮转（同组 FIFO、跨组交替）。 */
   private pumpStarts(): void {
     if (this.startQueue.length === 0) return
+    if (isPausedWindow()) return
     const max = this.maxConcurrent()
     if (max <= 0) {
       const q = this.startQueue
       this.startQueue = []
-      for (const run of q) run()
+      for (const e of interleaveByGroup(q)) e.run()
       return
     }
     let running = this.runningDownloads()
-    while (this.startQueue.length > 0 && running < max) {
-      const run = this.startQueue.shift()!
+    const ordered = interleaveByGroup(this.startQueue)
+    let qi = 0
+    while (qi < ordered.length && running < max) {
+      const e = ordered[qi++]!
       running++ // 本批预占，防同批超发；任务被删/失败由后续 pump 修正
-      run()
+      e.run()
     }
+    this.startQueue = ordered.slice(qi)
   }
 
   /** 排队启动包装：执行时重读任务并校验仍为 queued（过期/删除即放弃）。
@@ -528,6 +545,8 @@ export class TaskManager {
     seedRatio?: number
     /** R7 P1：单任务限速（aria2 格式） */
     speedLimit?: string
+    /** 五期（0.12.x）：队列分组标签（订阅源创建的任务携带源名，启动泵跨组轮转） */
+    queueGroup?: string
   }): Promise<CreateTaskResult> {
     // P3 修复：文本含 ≥2 个 URL 且任一是视频域 → 多为不同视频（非同文件镜像），
     // 此前短链展开只取第一个、其余静默丢弃——显式报错引导分次/批量创建；
@@ -706,6 +725,8 @@ export class TaskManager {
         // 引擎无关（isLiveRecordingTask：roomUrl || liveRoom）
         ...(s.liveRoom ? { liveRoom: true } : {})
       }),
+      // 五期：队列分组标签随任务落库（空串归一为无分组）
+      ...(input.queueGroup?.trim() ? { queueGroup: input.queueGroup.trim().slice(0, 64) } : {}),
       createdAt: Date.now()
     }
     insertTask(task)
@@ -828,12 +849,14 @@ export class TaskManager {
       this.transition(task, skipAwaiting ? 'queued' : 'awaiting')
       if (skipAwaiting) {
         // R2：过并发闸门（排队时任务保持 queued，槽位释放后由 pumpStarts 启动）
+        // 五期：带队列分组（订阅源名）
         this.gateStart(
           this.runWhenQueued(task.id, async (cur) => {
             const gid = await this.aria2.start(cur)
             updateTaskFields(cur.id, { engineGid: gid })
             return gid
-          })
+          }),
+          input.queueGroup?.trim() || task.queueGroup
         )
       }
       // R7 续：http 直链任务已在本函数内直启（skipAwaiting），返回 started 让对话框
@@ -1095,7 +1118,8 @@ export class TaskManager {
           this.consumePendingCompletion(cur.id, task.totalBytes ?? 0)
           updateTaskFields(cur.id, { engineGid: gid })
           return gid
-        })
+        }),
+        task.queueGroup
       )
       return
     }
@@ -1107,7 +1131,8 @@ export class TaskManager {
     this.transition(task, 'queued')
     // R2：过并发闸门（排队时任务停在 queued；启动逻辑抽取到 startConfirmed，
     // 槽位释放后由 pumpStarts 派发执行）
-    this.gateStart(this.runWhenQueued(task.id, (cur) => this.startConfirmed(cur, input)))
+    // 五期：带队列分组（订阅源名）
+    this.gateStart(this.runWhenQueued(task.id, (cur) => this.startConfirmed(cur, input)), task.queueGroup)
   }
 
   /** awaiting→queued 后的引擎启动（磁力 changeOption+unpause / .torrent addTorrent / ytdlp spawn）。
@@ -1332,7 +1357,8 @@ export class TaskManager {
                   this.consumePendingCompletion(cur.id, cur.totalBytes ?? 0)
                   updateTaskFields(cur.id, { engineGid: gid })
                   return gid
-                })
+                }),
+                task.queueGroup
               )
               break
             }
@@ -1668,7 +1694,8 @@ export class TaskManager {
             this.pushEvent({ taskId: cur.id, status: 'running' })
           }
           log.info(`re-added task ${cur.id}`)
-        })
+        }),
+        t.queueGroup
       )
     }
   }
@@ -1757,8 +1784,95 @@ export class TaskManager {
           this.transition(fresh, 'running')
           this.pushEvent({ taskId: cur.id, status: 'running' })
         }
-      })
+      }),
+      task.queueGroup
     )
+  }
+
+  /** 五期：停运窗口进入——仅暂停「运行中」的下载引擎任务（aria2/ytdlp/nm3u8）。
+   * queued 任务不暂停：启动闸门（isPausedWindow 守卫）已让它们持队不派发，
+   * 若转 paused，窗口结束的批量恢复会绕过并发闸门直接重 spawn（ytdlp/nm3u8
+   * resume 分支不经 gateStart），瞬间突破 maxConcurrent。
+   * 音乐/工具有独立信号量与专属暂停语义，不在停运编排范围（roadmap 备案）。
+   * 启动在途（launching/verifying，「任务正忙」）限时重试（磁力 metadata 窗口
+   * 最长 90s）；重试耗尽仍无法暂停的广播 warning 公示（UX 硬性标准）。 */
+  async pauseScheduledDownloads(): Promise<void> {
+    // 首轮目标快照；后续轮只追查仍 running 的（窗口期间可能自然完成/失败）
+    const initial = new Set(
+      listTasks({ status: ['running'] })
+        .filter((t) => t.engine === 'aria2' || t.engine === 'ytdlp' || t.engine === 'nm3u8')
+        .map((t) => t.id)
+    )
+    if (initial.size === 0) return
+    let paused = 0
+    const unpausable: string[] = []
+    for (let attempt = 0; attempt < 10; attempt++) {
+      if (attempt > 0) await new Promise((r) => setTimeout(r, 10_000))
+      // 窗口开启到重试之间可能已有任务完成/失败/被删——每轮重读
+      const pending = [...initial].filter((id) => !this.schedulePaused.has(id))
+      if (pending.length === 0) break
+      let stillBusy = false
+      for (const id of pending) {
+        const t = getTask(id) as TaskExt | null
+        if (!t || isTrashed(id) || (t.status !== 'running' && t.status !== 'verifying')) continue
+        if (t.status === 'verifying' && attempt < 9) {
+          // 校验中暂不能暂停（control 会拒绝）：留给下一轮重试
+          stillBusy = true
+          continue
+        }
+        try {
+          await this.control({ taskId: id, action: 'pause' })
+        } catch {
+          stillBusy = true
+          continue
+        }
+        const fresh = getTask(id) as TaskExt | null
+        if (fresh?.status === 'paused') {
+          this.schedulePaused.add(id)
+          paused++
+        } else {
+          stillBusy = true
+        }
+      }
+      if (!stillBusy) break
+      if (attempt === 9) {
+        unpausable.push(
+          ...[...initial]
+            .filter((id) => !this.schedulePaused.has(id))
+            .map((id) => (getTask(id) as TaskExt | null)?.name || id)
+        )
+      }
+    }
+    log.info(`schedule pause window: paused ${paused} task(s), unpausable ${unpausable.length}`)
+    if (unpausable.length > 0) {
+      broadcastNotices([
+        {
+          level: 'warning',
+          message: `停运窗口已开启，但 ${unpausable.length} 个任务正在启动/校验中无法立即暂停，本窗口内将继续下载：${unpausable.slice(0, 3).join('、')}${unpausable.length > 3 ? ' 等' : ''}`
+        }
+      ])
+    }
+  }
+
+  /** 五期：停运窗口结束——只恢复本调度暂停的任务（用户手动暂停的不越权代恢复），
+   * 然后补泵启动队列（窗口内新入队的任务此刻才真正起跑）。 */
+  async resumeScheduledDownloads(): Promise<void> {
+    const ids = [...this.schedulePaused]
+    this.schedulePaused.clear()
+    let resumed = 0
+    for (const id of ids) {
+      const t = getTask(id) as TaskExt | null
+      if (!t || t.status !== 'paused' || isTrashed(id)) continue
+      try {
+        await this.control({ taskId: id, action: 'resume' })
+        resumed++
+      } catch (err) {
+        // 恢复失败保持 paused（引擎侧异常等），用户可手动恢复；不阻断其余任务
+        log.warn(`schedule resume failed for ${id}`, err)
+      }
+    }
+    log.info(`schedule pause window ended: resumed ${resumed}/${ids.length}`)
+    this.pumpStarts()
   }
 
   /** M3-4：合集任务判定（params JSON 持久化，重启恢复可用） */

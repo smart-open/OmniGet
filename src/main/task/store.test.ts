@@ -52,10 +52,13 @@ after(() => {
   rmSync(tmp, { recursive: true, force: true })
 })
 
-test('迁移可重放：user_version=4 且全表就绪', () => {
+test('迁移可重放：user_version=5 且全表就绪', () => {
   const db = getDb()
   const v = db.pragma('user_version', { simple: true }) as number
-  assert.equal(v, 4)
+  assert.equal(v, 5)
+  // 五期（0.12.x）：v5 迁移——tasks.queue_group 列在位（订阅源队列分组）
+  const cols = db.prepare('PRAGMA table_info(tasks)').all() as Array<{ name: string }>
+  assert.ok(cols.some((c) => c.name === 'queue_group'), 'missing column tasks.queue_group')
   const tables = (
     db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]
   ).map((r) => r.name)

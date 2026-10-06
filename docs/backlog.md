@@ -68,7 +68,24 @@
 
 ---
 
-### 1. 🔴 macOS 签名与公证（等待 Apple 证书）
+## 〇-F、五期生态补齐批次（2026-10-05，roadmap 五期代码侧三项，0.12.0）
+
+> 三项全部落地：调度合并编排 + 订阅队列分组 / Web UI 远程强化 / i18n 扩展语种，明细见 CHANGELOG 0.12.0 与 git 历史。**口径与接受不修项**（记录备查）：
+> - **停运窗口不覆盖音乐/工具引擎**：两者有独立信号量与专属暂停语义（音乐=取消、工具=无暂停），纳入停运编排需逐引擎特判且收益低——停运窗口语义限定为「运行中的下载引擎任务」（aria2/ytdlp/nm3u8），设置页文案已明示；
+> - **停运窗口不暂停 queued 任务**（自审查 P1-1 修正）：queued 由启动闸门持队不派发即达成停运效果；若转 paused，窗口结束的批量恢复会绕过并发闸门直接重 spawn（ytdlp/nm3u8 resume 不经 gateStart）瞬间突破 maxConcurrent——审查后改为仅暂停 running，窗口结束恢复数 ≤ 窗口开始时运行数，无超发；
+> - **启动在途任务限时重试**（自审查 P3-8 修正）：「任务正忙」不再永久放弃——10s × 10 次重试覆盖磁力 metadata 最长 90s 窗口；耗尽仍失败广播 warning 公示（不再静默打破「停运」承诺）；
+> - **跨零点窗口星期按开始日判定**（自审查 P2-3 修正）：周五 22:00–06:00 的周六凌晨仍属周五窗口（此前逐分钟按当天 getDay() 重判会在零点提前掐断并恢复任务）；scheduler.test.ts 回归锁；
+> - **窗口结束仅恢复调度暂停的任务**：`schedulePaused` 集合记账——用户在停运窗口内手动恢复/暂停的任务不越权代管；手动恢复的任务在窗口内继续跑属用户意图优先；
+> - **旧调度规则零迁移**：days/mode 为可选字段，旧 `schedule.rules` 数据按「每天 + 分时限速」兼容解析（sanitize 缺省归一），DB 无新列；
+> - **LAN 模式 Host 白名单放行**：局域网设备以 IP:port 访问，Host 白名单会误杀；token 全端点强制（query token 仅页面 bootstrap 一处）+ DNS rebinding 拿不到 token 兜底，风险面与回环模式一致；
+> - **桥接生命周期串行化**（自审查 P1-2 修正）：startBridge/restartBridge/stopBridge 全量入队串行 + listen Promise 化 + 重启前等待端口释放——消除 listen 在途二次触发的双 server 泄漏与端口静默顺延；绑定失败回滚设置并上抛（UI 不再假报成功）；
+> - **`/api/task/:id/:action` remove = 软删入回收站**：远程面板不提供「彻底删除（含文件）」——误触破坏面控制在可恢复范围，物理删除回桌面端经 confirmAction 二次确认执行；
+> - **i18n 键位齐平靠单测锁定**（自审查 P2-4 修正为全键集逐键对比 + 空文案拦截）：后续新增键漏译/漏改会被测试拦截；zh-TW 混入简体「适」×3 已修正；主进程侧（托盘通知等）仍为硬编码中文，维持既有接受口径；
+> - **观察项（接受现状）**：①`/api/tasks` 关键词/分页仍在 JS 内存过滤（状态过滤已 SQL 下推），任务量数万级时轮询开销上升——量级触达再下沉 store 层；②LAN 模式对 `/?token=` 无速率限制（32 位 hex 熵足够，暴力枚举不现实；如需强加固可加失败退避）；③调度器测试依赖 `OMNIGET_TEST_DATA_DIR` 每文件注入（node:test 默认进程隔离成立，若未来改单进程隔离需改 db 单例注入方式）；
+> - 遗留人工项：停运窗口（跨窗口暂停/恢复/窗口内新建）/ LAN 面板多设备真机回归、任务列表 10k 60fps 实测、macOS/Linux 走查（#9/#10）、签名/公证（#1 外部资源）。
+
+---
+
 - **现状**：`electron-builder.yml` mac 段已有 `identity` / `notarize` / `hardenedRuntime` / `entitlements` 注释化占位；代码侧已就绪。
 - **待办**：
   - [ ] Apple Developer 账号 + 证书接入 CI（`CSC_LINK` / `CSC_KEY_PASSWORD` / `APPLE_ID` / `APPLE_APP_SPECIFIC_PASSWORD` / `APPLE_TEAM_ID`）

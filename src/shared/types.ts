@@ -31,6 +31,8 @@ export interface Task {
   engineGid?: string // aria2 gid / yt-dlp pid / music task id（§5 engine_gid）
   /** §5 params 列（JSON）：引擎扩展参数（如 video playlist 标记） */
   params?: string
+  /** 五期（0.12.x）：订阅源队列分组标签（订阅创建的任务自动携带源名） */
+  queueGroup?: string
   createdAt: number
   error?: string
 }
@@ -278,11 +280,16 @@ export interface DailyStat {
   peakSpeedBps: number
 }
 
-/** M4-15 调度规则 */
+/** M4-15 调度规则（五期 0.12.x 合并编排：分时限速 + 停运窗口 + 星期几） */
 export interface ScheduleRule {
   from: string
   to: string
+  /** 限速档：'0' 不限 / '2M' / '500K' 等 aria2 限速格式（mode='pause' 时忽略） */
   limit: string
+  /** 生效星期（0=周日…6=周六）；缺省/空数组 = 每天 */
+  days?: number[]
+  /** 'limit' 分时限速（缺省，向后兼容）；'pause' 停运窗口（不启新任务 + 暂停运行中） */
+  mode?: 'limit' | 'pause'
 }
 
 /** M4-16 Tracker 条目 */
@@ -603,8 +610,17 @@ export interface OmniGetBridge {
   listAdapterScripts(): Promise<AdapterScriptInfo[]>
   reloadAdapterScripts(): Promise<AdapterScriptInfo[]>
   toggleAdapterScript(id: string, enabled: boolean): Promise<void>
-  /** R1+R5：本地桥接信息（端口/token，浏览器扩展与 Web UI 配置用） */
-  getBridgeInfo(): Promise<{ port: number; token: string; running: boolean }>
+  /** R1+R5：本地桥接信息（端口/token，浏览器扩展与 Web UI 配置用）。
+   * 五期 0.12.x：lan=局域网监听开关；lanAddresses=本机局域网 IPv4（面板地址提示用） */
+  getBridgeInfo(): Promise<{
+    port: number
+    token: string
+    running: boolean
+    lan: boolean
+    lanAddresses: string[]
+  }>
+  /** 五期 0.12.x：局域网远程访问开关（保存后立即重启桥接服务生效） */
+  toggleBridgeLan(enabled: boolean): Promise<void>
   /** R6：引擎按需下载（状态查询 + 手动补齐缺失引擎） */
   getEngineStatus(): Promise<Array<{ name: string; file: string; installed: boolean; size?: number }>>
   fetchEngines(): Promise<{
@@ -697,6 +713,8 @@ export const IPC_CHANNELS = {
   scriptsToggle: 'scripts:toggle',
   /** R1+R5：本地桥接信息 */
   bridgeInfo: 'bridge:info',
+  /** 五期 0.12.x：局域网远程访问开关 */
+  bridgeSetLan: 'bridge:setLan',
   /** R6：引擎按需下载 */
   enginesStatus: 'engines:status',
   enginesFetch: 'engines:fetch',

@@ -26,6 +26,8 @@ interface TaskRow {
   created_at: number
   completed_at: number | null
   deleted_at: number | null
+  // 五期（0.12.x）：订阅源队列分组（可空 = 手动任务）
+  queue_group: string | null
 }
 
 function rowToTask(r: TaskRow): Task {
@@ -47,6 +49,7 @@ function rowToTask(r: TaskRow): Task {
     engineGid: r.engine_gid ?? undefined,
     quality: (r.quality as Task['quality']) ?? undefined,
     params: r.params ?? undefined,
+    queueGroup: r.queue_group ?? undefined,
     createdAt: r.created_at,
     error: r.error ?? undefined
   }
@@ -55,10 +58,12 @@ function rowToTask(r: TaskRow): Task {
 const INSERT = `
   INSERT INTO tasks (id, type, params, engine, source, name, status, save_dir,
     total_bytes, downloaded, threads, seed_ratio, infohash, format_id,
-    no_watermark, wm_level, quality, engine_gid, error, created_at, completed_at, deleted_at)
+    no_watermark, wm_level, quality, engine_gid, error, created_at, completed_at, deleted_at,
+    queue_group)
   VALUES (@id, @type, @params, @engine, @source, @name, @status, @saveDir,
     @totalBytes, @downloaded, @threads, @seedRatio, @infohash, @formatId,
-    @noWatermark, @wmLevel, @quality, @engineGid, @error, @createdAt, @completedAt, @deletedAt)
+    @noWatermark, @wmLevel, @quality, @engineGid, @error, @createdAt, @completedAt, @deletedAt,
+    @queueGroup)
 `
 
 export function insertTask(task: Task & { seedRatio?: number; infohash?: string; formatId?: string; wmLevel?: string; quality?: string; engineGid?: string }): void {
@@ -80,6 +85,7 @@ export function insertTask(task: Task & { seedRatio?: number; infohash?: string;
       createdAt: task.createdAt,
       completedAt: null,
       deletedAt: null,
+      queueGroup: task.queueGroup ?? null,
       totalBytes: task.totalBytes,
       downloaded: task.downloadedBytes,
       name: task.name,

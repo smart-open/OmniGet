@@ -145,6 +145,18 @@ const MIGRATIONS: Migration[] = [
         CREATE INDEX idx_videos_task ON videos(task_id);
       `)
     }
+  },
+  {
+    version: 5,
+    name: 'phase5-queue-group',
+    up: (db) => {
+      // 五期（0.12.x）：订阅源队列分组——订阅创建的任务落分组标签（订阅源名），
+      // 启动泵跨组轮转（防单订阅批量积压饿死手动任务）。可空列：手动任务无分组。
+      db.exec(`
+        ALTER TABLE tasks ADD COLUMN queue_group TEXT;
+        CREATE INDEX idx_tasks_queue_group ON tasks(queue_group) WHERE queue_group IS NOT NULL;
+      `)
+    }
   }
 ]
 

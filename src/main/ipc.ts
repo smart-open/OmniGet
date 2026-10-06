@@ -508,6 +508,25 @@ export function registerIpcHandlers(): void {
     return getBridgeInfo()
   })
 
+  // ── 五期（0.12.x）：局域网远程访问开关（专用 IPC + 立即重启桥接生效；
+  // 不走 settingsSet 白名单——绑定面变化属运行时行为，需主进程统一收口）。
+  // 重启失败回滚设置并上抛——渲染层 toast 真实原因（审查 P1-2：此前先写设置
+  // 且永不抛错，端口被占时 UI 假报成功）
+  ipcMain.handle(IPC_CHANNELS.bridgeSetLan, async (_e, enabled: unknown) => {
+    const on = enabled === true
+    const { getSettingParsed } = await import('./db')
+    const prev = getSettingParsed<boolean>('bridge.lan') === true
+    setSetting('bridge.lan', JSON.stringify(on))
+    const { restartBridge } = await import('./bridge')
+    try {
+      await restartBridge()
+    } catch (err) {
+      setSetting('bridge.lan', JSON.stringify(prev))
+      throw err instanceof Error ? err : new Error(String(err))
+    }
+    log.info(`bridge lan access ${on ? 'enabled' : 'disabled'}`)
+  })
+
   // ── R6：引擎按需下载（状态查询 + 手动补齐）───────────────────────────
   ipcMain.handle(IPC_CHANNELS.enginesStatus, async () => {
     const m = await import('./updater/engine-fetch')

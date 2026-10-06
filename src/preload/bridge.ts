@@ -80,6 +80,9 @@ const api: OmniGetBridge = {
     ipcRenderer.invoke(IPC_CHANNELS.scriptsToggle, id, enabled),
   // R1+R5：本地桥接信息
   getBridgeInfo: () => ipcRenderer.invoke(IPC_CHANNELS.bridgeInfo),
+  // 五期（0.12.x）：局域网远程访问开关（主进程保存设置并重启桥接服务）
+  toggleBridgeLan: (enabled: boolean) =>
+    ipcRenderer.invoke(IPC_CHANNELS.bridgeSetLan, enabled),
   // R6：引擎按需下载
   getEngineStatus: () => ipcRenderer.invoke(IPC_CHANNELS.enginesStatus),
   fetchEngines: () => ipcRenderer.invoke(IPC_CHANNELS.enginesFetch),

@@ -221,7 +221,13 @@ export function removeSubscription(id: string): void {
 
 /** 订阅宿主：manager 的最小依赖面（防循环依赖） */
 export interface SubscriptionHost {
-  createTask: (input: { source: string; threads: number; saveDir: string }) => Promise<unknown>
+  createTask: (input: {
+    source: string
+    threads: number
+    saveDir: string
+    /** 五期（0.12.x）：队列分组标签（订阅源名，启动泵跨组轮转） */
+    queueGroup?: string
+  }) => Promise<unknown>
   confirmSelection: (input: {
     taskId: string
     threads: number
@@ -291,7 +297,13 @@ export async function checkSubscription(
     if (isArchived(url) || isArchiveFused(url)) continue
     attempted++
     try {
-      const res = (await host.createTask({ source: url, threads: 16, saveDir })) as {
+      // 五期：订阅任务落队列分组（源名）——启动泵跨组轮转，批量追更不饿死手动任务
+      const res = (await host.createTask({
+        source: url,
+        threads: 16,
+        saveDir,
+        queueGroup: sub.name
+      })) as {
         kind?: string
         taskId?: string
         error?: string

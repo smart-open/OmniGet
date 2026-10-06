@@ -340,7 +340,14 @@ async function bootstrap(): Promise<void> {
   startAppUpdater()
   toolbox.onEvent((e) => broadcastToolEvents(e))
   // M4-15：调度器应用限速（aria2 changeGlobalOption）
-  startScheduler((limit) => supervisor.getClient().call('changeGlobalOption', { 'max-overall-download-limit': limit }))
+  // 五期（0.12.x）合并编排：停运窗口进入 → 暂停下载任务；结束 → 恢复 + 补泵启动队列
+  startScheduler(
+    (limit) => supervisor.getClient().call('changeGlobalOption', { 'max-overall-download-limit': limit }),
+    {
+      onWindowStart: () => manager.pauseScheduledDownloads(),
+      onWindowEnd: () => manager.resumeScheduledDownloads()
+    }
+  )
   // M4-16：Tracker 刷新（注入统一在 aria2 onOnline 后兜底执行，避免启动竞态告警）
   void refreshTrackers().catch((err) => log.warn('tracker refresh failed (使用缓存)', err))
   // R7 P0-4：每日定时刷新 tracker（原注释与实现不符——只有启动一次）+ 刷新后重注入。
