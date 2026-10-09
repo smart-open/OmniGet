@@ -17,7 +17,7 @@ import { app } from 'electron'
 import type { TaskManager } from './task/manager'
 import type { TaskStatus } from '@shared/types'
 import { getSettingParsed, setSetting } from './db'
-import { listTasks, taskCounts, getTask } from './task/store'
+import { listTasksPaged, taskCounts, getTask } from './task/store'
 import { createLogger } from './logger'
 
 const log = createLogger('bridge')
@@ -26,14 +26,16 @@ let server: http.Server | null = null
 let currentManager: TaskManager | null = null
 let info = { port: 0, token: '', running: false, lan: false }
 
-/** 探测从 start 起第一个可用回环端口 */
-async function probePort(start: number): Promise<number> {
+/** 探测从 start 起第一个可用端口。
+ * 第十一轮审查 P2：按目标绑定面探测——LAN 模式绑 0.0.0.0，此前用 127.0.0.1 探测，
+ * Windows 下某接口独占端口时回环空闲 ≠ 0.0.0.0 可绑，listen 直接 reject。 */
+async function probePort(start: number, bindHost = '127.0.0.1'): Promise<number> {
   for (let p = start; p < start + 20; p++) {
     const ok = await new Promise<boolean>((resolve) => {
       const s = createServer()
       s.once('error', () => resolve(false))
       s.once('listening', () => s.close(() => resolve(true)))
-      s.listen(p, '127.0.0.1')
+      s.listen(p, bindHost)
     })
     if (ok) return p
   }
@@ -52,22 +54,27 @@ function lanAddresses(): string[] {
 }
 
 function json(res: http.ServerResponse, code: number, req?: http.IncomingMessage, body?: unknown): void {
+  const cors: Record<string, string> = req?.headers.origin?.startsWith('chrome-extension://')
+    ? {
+        'Access-Control-Allow-Origin': req.headers.origin,
+        'Access-Control-Allow-Headers': 'content-type, x-omniget-token',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS'
+      }
+    : {}
   const headers: Record<string, string | number> = {
     'Content-Type': 'application/json; charset=utf-8',
     // M-3 收紧：不再通配 *。仅对浏览器扩展来源回显 Origin（扩展 fetch 需要 CORS 应答），
-    // 其余来源不携带 ACAO——任意网页即使拿到 token 也无法跨域读取响应
-    ...(req?.headers.origin?.startsWith('chrome-extension://')
-      ? { 'Access-Control-Allow-Origin': req.headers.origin }
-      : {}),
-    'Access-Control-Allow-Headers': 'content-type, x-omniget-token',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS'
+    // 其余来源不携带 ACAO——任意网页即使拿到 token 也无法跨域读取响应。
+    // 第十一轮审查 P3：ACAO 缺席时 Allow-Headers/Methods 无意义（对浏览器是纯噪音），
+    // 与 ACAO 一起仅在扩展分支携带
+    ...cors
   }
   res.writeHead(code, headers)
   res.end(JSON.stringify(body ?? null))
 }
 
 function readBody(req: http.IncomingMessage): Promise<string> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let data = ''
     let settled = false
     const done = (v: string): void => {
@@ -82,13 +89,23 @@ function readBody(req: http.IncomingMessage): Promise<string> {
         // P3 修复：超限后先摘除监听并 resolve，再销毁 socket——原实现 destroy 后
         // end/error 不保证触发，Promise 可能永不 settle（handler 挂起 + socket 泄漏）
         req.removeListener('data', handler)
-        done(data)
+        // 第十一轮审查 P3：超限改为 reject（调用方短路返回 413）——此前把超限
+        // 数据交给 JSON.parse 走 500，语义不精确且日志噪音
+        if (!settled) {
+          settled = true
+          reject(new Error('请求体超过 1MB 上限'))
+        }
         req.destroy()
       }
     }
     req.on('data', handler)
     req.on('end', () => done(data))
-    req.on('error', () => done(''))
+    req.on('error', () => {
+      if (!settled) {
+        settled = true
+        reject(new Error('请求体读取失败'))
+      }
+    })
   })
 }
 
@@ -113,6 +130,9 @@ function authed(req: http.IncomingMessage, token: string, lan: boolean): boolean
   // token 全端点强制兜底（rebinding 攻击者拿不到 token）
   if (!lan) {
     const rawHost = String(req.headers.host ?? '')
+    // 第十一轮审查 P3：Host 缺失此前 fail-open（跳过校验）——HTTP/1.1 本就要求
+    // Host，缺失只可能是非标准原始客户端，一律拒绝（fail-closed）
+    if (!rawHost) return false
     const host = rawHost.startsWith('[')
       ? (/\[[^\]]*\]/.exec(rawHost)?.[0] ?? rawHost)
       : rawHost.split(':')[0]
@@ -158,14 +178,14 @@ async function handle(
 ): Promise<void> {
   const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`)
   if (req.method === 'OPTIONS') {
-    res.writeHead(204, {
-      // 与 json() 同口径：仅扩展来源回显 Origin
-      ...(req.headers.origin?.startsWith('chrome-extension://')
-        ? { 'Access-Control-Allow-Origin': req.headers.origin }
-        : {}),
-      'Access-Control-Allow-Headers': 'content-type, x-omniget-token',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS'
-    })
+    const cors: Record<string, string> = req.headers.origin?.startsWith('chrome-extension://')
+      ? {
+          'Access-Control-Allow-Origin': req.headers.origin,
+          'Access-Control-Allow-Headers': 'content-type, x-omniget-token',
+          'Access-Control-Allow-Methods': 'GET, POST, OPTIONS'
+        }
+      : {}
+    res.writeHead(204, cors)
     res.end()
     return
   }
@@ -214,10 +234,14 @@ async function handle(
       const q = (url.searchParams.get('q') ?? '').trim().toLowerCase()
       const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 100))
       const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0)
-      let tasks = listTasks(status.length > 0 ? { status: status as TaskStatus[] } : {})
-      if (q) tasks = tasks.filter((t) => (t.name ?? '').toLowerCase().includes(q) || t.source.toLowerCase().includes(q))
-      const total = tasks.length
-      const rows = tasks.slice(offset, offset + limit).map(taskRow)
+      // 第十一轮审查 P3：过滤/分页下推 SQL（listTasksPaged），不再全表加载
+      const { rows: tasks, total } = listTasksPaged({
+        status: status.length > 0 ? (status as TaskStatus[]) : undefined,
+        q: q || undefined,
+        limit,
+        offset
+      })
+      const rows = tasks.map(taskRow)
       json(res, 200, req, { ok: true, counts, total, tasks: rows })
       return
     }
@@ -236,7 +260,15 @@ async function handle(
       return
     }
     if (req.method === 'POST' && url.pathname === '/api/download') {
-      const body = JSON.parse((await readBody(req)) || '{}') as { url?: string }
+      let rawBody = ''
+      try {
+        rawBody = await readBody(req)
+      } catch (err) {
+        // 第十一轮审查 P3：超限/读失败短路 413，不再落进外层 500
+        json(res, 413, req, { ok: false, error: err instanceof Error ? err.message : '请求体过大' })
+        return
+      }
+      const body = JSON.parse(rawBody || '{}') as { url?: string }
       const source = String(body.url ?? '').trim()
       if (!source) {
         json(res, 400, req, { ok: false, error: '缺少 url' })
@@ -427,7 +459,8 @@ let listening = false
  * listening 之后的 'error' 只记日志（如运行期端口被系统回收）。 */
 async function listen(manager: TaskManager, token: string): Promise<void> {
   const lan = readLanSetting()
-  const port = await probePort(16820)
+  // 第十一轮审查 P2：按实际绑定面探测端口（LAN=0.0.0.0），回环空闲不再误判
+  const port = await probePort(16820, lan ? '0.0.0.0' : '127.0.0.1')
   await new Promise<void>((resolve, reject) => {
     const s = http.createServer((req, res) => {
       void handle(req, res, manager, token, port, lan).catch((err) => {

@@ -3,11 +3,14 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { Warning } from '@phosphor-icons/react'
 import { useEffect } from 'react'
 import { useConfirm } from '../../lib/feedback'
+import { useI18n } from '../../i18n'
 import { Button } from './Button'
 
 export function ConfirmDialog() {
   const pending = useConfirm((s) => s.pending)
   const answer = useConfirm((s) => s.answer)
+  // 第十一轮审查：取消/确认按钮接入 i18n（高危文案优先迁移；存量页面按节奏跟进）
+  const t = useI18n((s) => s.t)
   const open = pending !== null
 
   // Esc = 取消；Enter = 确认（danger 级除外：删除类操作不得被 Enter 直通，必须显式点击）
@@ -57,7 +60,7 @@ export function ConfirmDialog() {
             <p className="text-xs leading-relaxed text-text-2">{pending.message}</p>
             <div className="mt-5 flex justify-end gap-2">
               <Button size="sm" variant="outline" onClick={() => answer(false)} autoFocus>
-                取消
+                {t('common.cancel')}
               </Button>
               <Button
                 size="sm"
@@ -65,7 +68,7 @@ export function ConfirmDialog() {
                 className={pending.danger ? '!bg-danger hover:!bg-danger/85' : undefined}
                 onClick={() => answer(true)}
               >
-                {pending.confirmLabel ?? '确认'}
+                {pending.confirmLabel ?? t('common.confirm')}
               </Button>
             </div>
           </motion.div>

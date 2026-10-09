@@ -105,7 +105,12 @@ function fsErrToChinese(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
-/** T4：多文件输入解析（params.__files 来自渲染层多选，JSON 串或数组；回退单输入） */
+/** T4：多文件输入解析（params.__files 来自渲染层多选，JSON 串或数组；回退单输入）。
+ * 第十一轮审查 P2：钳制条数上限——batch-convert 把全部文件拼进单条 ffmpeg argv，
+ * Windows CreateProcess 命令行上限 32767 字符，几十个长中文路径会让 spawn 直接
+ * 失败且报错晦涩（E2BIG 类英文原样透出）。32 个文件 × 平均 ~700 字符留足余量。 */
+const MAX_TOOL_FILES = 32
+
 function parseFilesParam(input: string, params: Record<string, unknown>): string[] {
   const raw = params.__files
   let list: unknown = raw
@@ -117,7 +122,7 @@ function parseFilesParam(input: string, params: Record<string, unknown>): string
     }
   }
   if (Array.isArray(list)) {
-    const files = list.map(String).filter((f) => f.trim())
+    const files = list.map(String).filter((f) => f.trim()).slice(0, MAX_TOOL_FILES)
     if (files.length > 0) return files
   }
   return [input]
@@ -128,7 +133,12 @@ function parseRegions(params: Record<string, unknown>): Array<{ start: number; e
   try {
     const raw = JSON.parse(String(params.regions ?? '[]')) as Array<{ start: number; end: number }>
     return (Array.isArray(raw) ? raw : [])
-      .map((r) => ({ start: Math.max(0, Number(r?.start) || 0), end: Number(r?.end) || 0 }))
+      // 第十一轮审查 P3：Number.isFinite 过滤——JSON.parse('1e999') 得 Infinity，
+      // `Infinity || 0` 为 truthy 穿透钳制，最终拼出 atrim=start=Infinity 滤镜报错
+      .map((r) => ({
+        start: Number.isFinite(Number(r?.start)) ? Math.max(0, Number(r?.start) || 0) : 0,
+        end: Number.isFinite(Number(r?.end)) ? Number(r?.end) || 0 : 0
+      }))
       .filter((r) => r.end - r.start >= 0.5)
       .sort((a, b) => a.start - b.start)
       .slice(0, 50)
@@ -1427,11 +1437,12 @@ export class ToolboxRunner {
         // 是全 IPC 面唯一无信任锚的 spawn 入口。补 TOFU 指纹：首次使用登记 SHA256，
         // 此后不一致即拒绝（合法升级需删除设置键 toolbox.demucs.fingerprint 重置）。
         // 指纹键不进渲染层写白名单，渲染层无法篡改
-        const { createHash } = await import('crypto')
-        const { readFile } = await import('fs/promises')
+        const { checksumFile } = await import('./orchestrator/binaries')
         let fingerprint: string
         try {
-          fingerprint = createHash('sha256').update(await readFile(exePath)).digest('hex')
+          // 第十一轮审查 P3：改用既有流式 sha256（checksumFile）——整文件 readFile
+          // 会把数百 MB 的 conda demucs 全量读入内存，现成实现未复用
+          fingerprint = await checksumFile(exePath)
         } catch (err) {
           const message = `无法读取 demucs 可执行文件：${fsErrToChinese(err)}`
           this.emit({ taskId, tool: input.tool, status: 'failed', message })

@@ -3,6 +3,25 @@
 > OmniGet 产品变更记录。版本号遵循 `0.x.y` 约定：**x（中间版本号）随功能里程碑递增**，y 为里程碑内的小修/加固版本。初始版本 0.1.0。
 > 格式参考 Keep a Changelog；日期为里程碑完成时间。里程碑与验收口径溯源至《OmniGet-产品技术设计文档》§10。
 
+## [0.12.1] - 2026-10-09
+
+### 第十一轮全面审查修复（六域并行：下载核心 / 音乐·视频·直播 / 工具箱·网盘·订阅·更新 / IPC·bridge·Web UI·DB / 渲染层 / 横切启动；P1×2 / P2×10 / P3×40+）
+
+- **P1 音乐（库兜底恒真）**：skip_existing 音乐库兜底在同步 `find` 回调里 `stat(...).then(...)` 返回 Promise 恒 truthy——文件存在性从未被判定，死链库行（文件被移动/删除）重复入队假 `cached` 成功（mp3Path 指向不存在文件）。改先同步筛候选再逐个 `await stat` 复核
+- **P1 横切（无窗僵尸进程）**：`window-all-closed` 空 handler——托盘创建失败的环境（Linux 无 AppIndicator 等）关窗后进程带 aria2/订阅定时器/bridge 成无 UI 无托盘僵尸。托盘缺失或非 macOS 时直接退出（走 before-quit 清理链）；顺带 `before-quit`/`window-all-closed` 注册提前到模块加载期（启动耗时窗口内 quit 不再绕过清理链）+ `uncaughtException`/`unhandledRejection` 全局兜底
+- **P2 停运窗口**：①`pauseScheduledDownloads` 重试循环不复核窗口状态——与窗口结束恢复竞态导致迟到暂停的任务永久卡 paused（每轮复核 + `schedulePaused.add` 后就地恢复）；②launching 任务（DB 恒 queued）不在首轮快照整窗口漏暂停（每轮重扫 running 补快照）；③批量恢复绕过 maxConcurrent 闸门（按运行预算，超额转 queued 交泵派发）；④**直播录制豁免停运窗口**（暂停直播流即内容永久丢失，恢复复用旧清单直链必败）；⑤托盘「全部继续」窗口内广播提示
+- **P2 局域网开关**：切换失败回滚只恢复设置不恢复服务（restartBridge 已 close 后 listen 失败，桥接全灭到重启）——回滚后按旧设置补一次重启恢复服务；`probePort` 改按目标绑定面探测（LAN 绑 0.0.0.0，此前回环空闲误判端口可用）
+- **P2 音乐（cached 语义漏网）**：汽水分享页兜底是五条链中唯一漏 `onForeign` 的——exists 兜底命中时取消清理误删既有/并发产物；`tryAllPlatforms.finish` foreign 时跳过 `alignAudioExt`（对齐 downloadById「foreign 产物不动」口径）
+- **P2 网盘**：`netdisk.endpoint` 内网地址落库前经 net-guard 复核并留审计日志（渲染层可写 + 主进程代发含 Authorization 头的信任边界收敛）
+- **P2 更新链路**：electron-builder mac 补 zip target（electron-updater MacUpdater 必需）；非 NSIS 安装形态（MSI/绿色解压）降级手动更新通道（防 NSIS 覆盖安装成双实例）；yt-dlp linux arm64 资产名对齐上游现行 `aarch64` 命名（候选双名兼容）
+- **P2 渲染层**：订阅列表加载失败伪装「尚无订阅」空态——错误横幅 + 重新加载；新建任务 awaiting 阶段关闭补二次确认（磁力解析 90s 内误按 Esc 丢失全部勾选）
+- **P2 IPC**：`task:control` 透传 `withFiles:true` 补 isTrashed 防线（彻底清除仅限回收站，与 task:purge 同口径）
+- **P3 要点**：retryTask 前置引擎可用性校验（nm3u8 缺失不再裸 aria2.start 拉清单文本）+ else 分支兜底；直播断流自动重连扩展到 yt-dlp 直录路径；`pumpStarts` 先替换队列防同步重入重复派发；`schedulePaused` 终态/删除清理；订阅 sidecar 兜底改道广播提示；Host 头缺失 fail-closed；CORS 头仅扩展分支携带；`/api/tasks` 过滤分页下推 SQL（`listTasksPaged` 参数化 LIKE + 通配符转义）；readBody 超限短路 413；数值设置键范围校验（maxConcurrent 0–64）；工具箱多文件钳 32 个（Windows 32K 命令行上限）；region-concat Infinity 过滤；trackers/manifest 响应体截断 + 引擎下载 2GB 硬顶；demucs TOFU 改流式哈希；ffbinaries 下载接入官方 checksums；引擎拉起超时补日志；OpenSubtitles dl.link 补 SSRF 逐跳校验；openStream 入口内网校验；弹幕 B站风控按 code 细分归因；音乐 applyNaming Windows 路径长度预算；scheduler 限速档先校验后归一 + 夏令时边缘备案；logger 本地日期文件名/单日 32MB 轮转/每日重跑 prune/敏感键脱敏；渲染进程崩溃恢复计数稳定 5 分钟清零；Inspector 操作防重入；notice success 级映射 + 超 3 条合并汇总；桥接未就绪补「重新检测」；订阅/网盘 URL 前端预校验；Onboarding 部分写失败给补救出口；回收站空态文案；ConfirmDialog 按钮接入 i18n（四语种同补）；`tsconfig.web` 隔离 `@types` + 排除 node 测试（Node 全局类型不再渗入渲染层编译）
+
+### 测试
+
+- typecheck 双端通过；185/185 单测全绿（i18n 键位齐平测试同步覆盖 common.cancel/common.confirm）
+
 ## [0.12.0] - 2026-10-05
 
 ### 五期（1.0-rc → 1.0）生态补齐——代码侧三项落地

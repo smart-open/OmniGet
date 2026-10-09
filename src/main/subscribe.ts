@@ -315,6 +315,16 @@ export async function checkSubscription(
       if (res.kind === 'awaiting' && res.taskId) {
         // 视频任务直通确认（复用 awaiting→queued 管线；三期带源参数）
         await host.confirmSelection({ taskId: res.taskId, threads: 16, video })
+      } else if (res.kind === 'started' && res.taskId) {
+        // 第十一轮审查 P3：sidecar 兜底改道 http 直链管线（创建即入队、无格式
+        // 选择）——用户为该订阅配置的预设/命名模板对兜底任务静默失效，
+        // 广播提示防「配了不生效」无归因
+        broadcastNotices([
+          {
+            level: 'info',
+            message: `订阅「${sub.name}」有条目经自托管解析服务兜底为直链下载（预设/格式选择对直链任务不适用）`
+          }
+        ])
       }
       added++
     } catch (err) {

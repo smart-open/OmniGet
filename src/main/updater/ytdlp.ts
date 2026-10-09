@@ -18,14 +18,17 @@ const SUMS_ASSET = 'SHA2-256SUMS'
  * 异常返回超大 200 时，5min 总限时窗口内可灌满磁盘（SHA256 校验在完成后才发生） */
 const MAX_UPDATE_BYTES = 256 * 1024 * 1024
 
-/** 按平台/架构选择官方 release 资产（此前硬编码 yt-dlp.exe 会在 mac/linux 上用 Windows PE 覆盖引擎） */
-function platformAsset(): string {
-  if (process.platform === 'win32') return 'yt-dlp.exe'
-  if (process.platform === 'darwin') return 'yt-dlp_macos' // 官方 macOS 通用二进制（x64/arm64 经 Rosetta 兼容）
-  if (process.arch === 'arm64') return 'yt-dlp_linux_arm64'
-  if (process.arch === 'arm') return 'yt-dlp_linux_armv7l'
-  if (process.arch === 'ia32') return 'yt-dlp_linux32'
-  return 'yt-dlp_linux'
+/** 按平台/架构选择官方 release 资产（此前硬编码 yt-dlp.exe 会在 mac/linux 上用 Windows PE 覆盖引擎）。
+ * 第十一轮审查 P3：linux arm64 官方现行资产名为 yt-dlp_linux_aarch64（scripts/
+ * fetch-sidecars.mjs 已同步），旧名 yt-dlp_linux_arm64 已弃用——按候选序尝试，
+ * 兼容上游改名前后的历史 release。 */
+function platformAssets(): string[] {
+  if (process.platform === 'win32') return ['yt-dlp.exe']
+  if (process.platform === 'darwin') return ['yt-dlp_macos'] // 官方 macOS 通用二进制（x64/arm64 经 Rosetta 兼容）
+  if (process.arch === 'arm64') return ['yt-dlp_linux_aarch64', 'yt-dlp_linux_arm64']
+  if (process.arch === 'arm') return ['yt-dlp_linux_armv7l']
+  if (process.arch === 'ia32') return ['yt-dlp_linux32']
+  return ['yt-dlp_linux']
 }
 
 export interface UpdateResult {
@@ -115,8 +118,8 @@ async function runUpdateYtDlp(): Promise<UpdateResult> {
       tag_name: string
       assets: { name: string; browser_download_url: string }[]
     }
-    const assetName = platformAsset()
-    const exe = release.assets.find((a) => a.name === assetName)
+    const assetNames = platformAssets()
+    const exe = release.assets.find((a) => assetNames.includes(a.name))
     const sums = release.assets.find((a) => a.name === SUMS_ASSET)
     if (!exe || !sums) throw new Error('最新发布中缺少 yt-dlp 资产，请稍后重试')
 
@@ -138,8 +141,10 @@ async function runUpdateYtDlp(): Promise<UpdateResult> {
 
     // 3. SHA256 校验（官方 SUMS 清单，TOFU 供应链口径 §9）
     const sumsBody = await import('fs/promises').then((m) => m.readFile(tmpSums, 'utf8'))
-    // assetName 含 '.'（yt-dlp.exe），需转义防正则误匹配
-    const expected = new RegExp(`^([a-f0-9]{64})\\s+\\*?${assetName.replace(/\./g, '\\.')}$`, 'mi').exec(sumsBody)?.[1]
+    // 资产名含 '.'（yt-dlp.exe），需转义防正则误匹配；多候选名任一命中即可
+    const expected = assetNames
+      .map((n) => new RegExp(`^([a-f0-9]{64})\\s+\\*?${n.replace(/\./g, '\\.')}$`, 'mi').exec(sumsBody)?.[1])
+      .find(Boolean)
     if (!expected) throw new Error('校验清单中缺少对应条目')
     const actual = await import('fs/promises').then((m) =>
       m.readFile(tmpExe).then((buf) => createHash('sha256').update(buf).digest('hex'))

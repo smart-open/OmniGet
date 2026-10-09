@@ -12,11 +12,17 @@ const MAX_FILENAME_LEN = 200 // 预留目录层级与扩展名余量（MAX_PATH 
  * 清洗单段文件名（不含路径分隔符）。
  * Windows：非法字符替换为 `_`；POSIX：仅替换 `/`，其余合法字符原样保留。
  * `platform` 供测试注入；默认跟随当前运行平台。
+ * 第十一轮审查：platform 以不依赖 @types/node 的形态读取（tsconfig.web 已隔离
+ * @types——渲染层不再渗入 Node 全局类型）
  */
-export function sanitizeFilename(
-  name: string,
-  platform: NodeJS.Platform = process.platform
-): string {
+type PlatformId = 'win32' | 'darwin' | 'linux' | string
+
+function currentPlatform(): PlatformId {
+  const p = (globalThis as { process?: { platform?: string } }).process?.platform
+  return p ?? 'linux'
+}
+
+export function sanitizeFilename(name: string, platform: PlatformId = currentPlatform()): string {
   let out = name.replace(CONTROL_CHARS, '')
   if (platform === 'win32') {
     out = out

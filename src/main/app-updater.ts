@@ -2,6 +2,8 @@
 // 差分更新 + 校验由 electron-updater 内建；失败事件降级为通知，不阻断应用。
 // dev / 未配置发布仓库时静默跳过；Linux 走手动通道（设置 → 更新 → 检查新版本）。
 
+import { existsSync } from 'fs'
+import { dirname, join } from 'path'
 import { createLogger } from './logger'
 
 const log = createLogger('app-updater')
@@ -25,6 +27,18 @@ export function startAppUpdater(): void {
   if (process.platform === 'linux') {
     log.info('linux platform: manual update channel (check in settings)')
     return
+  }
+  // 第十一轮审查 P2：electron-updater 仅支持 NSIS 安装形态——MSI/zip 用户触发
+  // 自动更新会把 NSIS 包装到 %LOCALAPPDATA%，与现有安装并存成双实例。
+  // NSIS 判定 = 安装目录存在其卸载器（NSIS 安装必写 Uninstall <name>.exe）；
+  // 非命中（MSI/绿色解压）降级手动通道，与 linux 同口径
+  if (process.platform === 'win32') {
+    const nsisUninstaller = 'Uninstall OmniGet.exe'
+    const isNsis = existsSync(join(dirname(process.execPath), nsisUninstaller))
+    if (!isNsis) {
+      log.info('non-NSIS install (msi/portable): manual update channel (check in settings)')
+      return
+    }
   }
   void (async () => {
     try {

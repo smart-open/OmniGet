@@ -62,7 +62,10 @@ const EMPTY_COPY: Record<string, { title: string; hint: string }> = {
   all: { title: '还没有任务', hint: '从剪贴板粘贴链接，或拖入 .torrent 开始' },
   downloading: { title: '当前没有进行中的任务', hint: '新建任务后将在这里排队与下载' },
   completed: { title: '还没有完成的任务', hint: '完成的任务会折叠收敛到这里' },
-  failed: { title: '没有失败的任务', hint: '下载失败的任务会出现在这里，可一键重试' }
+  failed: { title: '没有失败的任务', hint: '下载失败的任务会出现在这里，可一键重试' },
+  // 第十一轮审查 P3：回收站空态此前走兜底文案（「该分组下的任务会显示在这里」），
+  // 未传达「可恢复」语义
+  trash: { title: '回收站是空的', hint: '删除的任务会先移入这里，可随时恢复' }
 }
 
 export function TaskList({

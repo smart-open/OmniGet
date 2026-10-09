@@ -20,10 +20,10 @@ import { registerIpcHandlers, setTaskManager, setMusicAdapter } from './ipc'
 import { createLogger } from './logger'
 import { adoptPortableUserData, runtimeBase } from './env'
 import { startStatsScheduler, stopStatsScheduler } from './stats'
-import { startScheduler, stopScheduler, invalidateSchedule } from './scheduler'
+import { startScheduler, stopScheduler, invalidateSchedule, isPausedWindow } from './scheduler'
 import { startBridge, stopBridge } from './bridge'
 import { toolbox } from './toolbox'
-import { broadcastToolEvents } from './ipc'
+import { broadcastNotices, broadcastToolEvents } from './ipc'
 import { refreshTrackers, joinedTrackers } from './trackers'
 import { seedPlatforms } from './health'
 import { defaultGlobalOptions } from './aria2/options'
@@ -167,6 +167,98 @@ const managerRef: { current: import('./task/manager').TaskManager | null } = { c
 
 let trackerRefreshTimer: ReturnType<typeof setInterval> | null = null
 
+// ── 生命周期与全局兜底（第十一轮审查 P1/P2/P3）──────────────────────────
+// 此前 before-quit/window-all-closed 注册在 bootstrap 尾部——启动耗时窗口
+// （大库迁移/端口分配/任务恢复）内 quit 完全绕过清理链，aria2c 成孤儿。
+// 注册提前到模块加载期；清理段全部经 managerRef/supervisorRef 判空，
+// bootstrap 未完成时安全跳过。
+let trayAvailable = true
+let quitCleanupStarted = false
+
+app.on('before-quit', (e) => {
+  // L5 修复：标志在异步清理完成后才落位——二次触发 quit（before-quit 再入）
+  // 期间若已置 done 会跳过 preventDefault，supervisor.shutdown() 未完成即退出
+  if (quitCleanupStarted) {
+    e.preventDefault() // 清理链在跑：拦住，由 app.exit(0) 收尾
+    return
+  }
+  quitCleanupStarted = true
+  e.preventDefault()
+  markQuitting()
+  // P2 修复：同步清理段包 try/catch——任一抛错会让本函数中断，
+  // 而 quitCleanupStarted 已置位，后续 before-quit 恒走 preventDefault，
+  // supervisor.shutdown().finally(app.exit) 链不会启动 → 应用永久无法退出
+  try {
+    managerRef.current?.stopPolling()
+    stopStatsScheduler()
+    // 第十轮审查 P3：补停三个周期任务——supervisor.shutdown() 最长约 12s，
+    // 期间 10min 订阅 tick 到期会 createTask 落库甚至重新 spawn yt-dlp
+    stopSubscriptionTimer()
+    stopScheduler()
+    if (trackerRefreshTimer) {
+      clearInterval(trackerRefreshTimer)
+      trackerRefreshTimer = null
+    }
+    getYtDlpSupervisor().killAll()
+    // 音乐任务 abort 全部网络请求，避免遗留 .part 文件
+    getMusicEngine().shutdown()
+    stopAppUpdaterTimer()
+    stopBridge()
+    // R7 P0-1：撤销 NAT 端口映射（fire-and-forget；未及撤销由 TTL 过期兜底）
+    clearNatMapping()
+  } catch (err) {
+    log.error('before-quit 同步清理失败（继续退出）', { error: String(err) })
+  }
+  void (supervisorRef.current
+    ? supervisorRef.current.shutdown().catch(() => {})
+    : Promise.resolve()
+  ).finally(() => {
+    try {
+      closeDb()
+    } catch {
+      // ignore
+    }
+    app.exit(0)
+  })
+})
+
+app.on('window-all-closed', () => {
+  // 第十一轮审查 P1：托盘创建失败的环境（Linux 无 AppIndicator 等）关窗后
+  // 此前无任何出口——进程带 aria2/订阅定时器/bridge 成无 UI 无托盘僵尸进程，
+  // 强杀还会绕过 before-quit 清理链。托盘缺失或非 macOS（macOS 惯例保 dock
+  // 常驻）时直接退出（quit 会走上述 before-quit 清理链）
+  if (process.platform !== 'darwin' || !trayAvailable) app.quit()
+})
+
+// 第十一轮审查 P3：全局兜底——打包态未捕获异常此前弹 Electron 原生错误框且无
+// 统一留痕。记日志；uncaughtException 60s 窗口内高频出现视为不可恢复，
+// 走 before-quit 清理链受控退出（单发异常只留痕不退出，避免误杀可恢复状态）
+let fatalCount = 0
+let fatalWindowStart = 0
+process.on('uncaughtException', (err) => {
+  try {
+    log.error('uncaughtException', err)
+  } catch {
+    // 日志系统不可用时忽略
+  }
+  const now = Date.now()
+  if (now - fatalWindowStart > 60_000) {
+    fatalWindowStart = now
+    fatalCount = 0
+  }
+  if (++fatalCount >= 10) {
+    log.error('uncaughtException x10 in 60s window, controlled quit')
+    app.quit()
+  }
+})
+process.on('unhandledRejection', (reason) => {
+  try {
+    log.error('unhandledRejection', reason)
+  } catch {
+    // 日志系统不可用时忽略
+  }
+})
+
 async function bootstrap(): Promise<void> {
   // 去掉原生菜单栏（应用内导航 + 自绘标题栏承担全部入口）
   Menu.setApplicationMenu(null)
@@ -209,7 +301,12 @@ async function bootstrap(): Promise<void> {
               await new Promise((res) => setTimeout(res, 500))
             }
             const sup = supervisorRef.current
-            if (!sup) return
+            // 第十一轮审查 P3：15s 等待超时不再静默放弃——静默路径会退回「重启链
+            // 无触发点」的原 P2 场景且无任何留痕
+            if (!sup) {
+              log.warn('engine auto-fetch: supervisor not initialized within 15s, skip auto-start')
+              return
+            }
             try {
               await sup.start()
               log.info('aria2 supervisor started after engine auto-fetch')
@@ -387,7 +484,20 @@ async function bootstrap(): Promise<void> {
   // 此前会以 unhandledRejection 收场（「全部继续」恒可点后暴露面变大）
   setBulkControlHandlers(
     () => adapter.pauseAll().catch((err) => log.warn('tray pauseAll failed', err)),
-    () => adapter.resumeAll().catch((err) => log.warn('tray resumeAll failed', err))
+    () =>
+      adapter
+        .resumeAll()
+        .then(() => {
+          // 第十一轮审查 P3：停运窗口内托盘「全部继续」此前无任何窗口守卫——
+          // 调度暂停的任务会被静默越权恢复并在窗口内继续下载。不拦截用户显式
+          // 动作（用户优先），但广播提示让窗口语义可感知
+          if (isPausedWindow()) {
+            broadcastNotices([
+              { level: 'warning', message: '当前处于停运窗口内，「全部继续」恢复的任务将在本窗口内继续下载' }
+            ])
+          }
+        })
+        .catch((err) => log.warn('tray resumeAll failed', err))
   )
   app
     .whenReady()
@@ -404,6 +514,7 @@ async function bootstrap(): Promise<void> {
           createTray()
         } catch (err) {
           trayOk = false
+          trayAvailable = false // 同步模块级标记：window-all-closed 据此放行退出
           log.error('tray creation failed (关窗将直接退出，不最小化到托盘)', err)
         }
         if (trayOk) interceptCloseToTray(win)
@@ -412,60 +523,8 @@ async function bootstrap(): Promise<void> {
     })
     .catch((err) => log.error('whenReady handler failed', err))
 
-  app.on('window-all-closed', () => {
-    // 关窗已最小化到托盘（interceptCloseToTray），此处仅托盘退出时触发
-  })
-
-  // P2 修复：before-quit 必须等待 supervisor.shutdown() 完成——原 void 直调时
-  // Electron 可能在 taskkill 兜底执行前就退出，aria2c 孤儿进程占端口/继续上传。
-  // preventDefault + 显式 app.exit(0) 保证清理链跑完再退。
-  let quitCleanupStarted = false
-  app.on('before-quit', (e) => {
-    // L5 修复：标志在异步清理完成后才落位——二次触发 quit（before-quit 再入）
-    // 期间若已置 done 会跳过 preventDefault，supervisor.shutdown() 未完成即退出
-    if (quitCleanupStarted) {
-      e.preventDefault() // 清理链在跑：拦住，由 app.exit(0) 收尾
-      return
-    }
-    quitCleanupStarted = true
-    e.preventDefault()
-    markQuitting()
-    // P2 修复：同步清理段包 try/catch——任一抛错会让本函数中断，
-    // 而 quitCleanupStarted 已置位，后续 before-quit 恒走 preventDefault，
-    // supervisor.shutdown().finally(app.exit) 链不会启动 → 应用永久无法退出
-    try {
-      manager.stopPolling()
-      stopStatsScheduler()
-      // 第十轮审查 P3：补停三个周期任务——supervisor.shutdown() 最长约 12s，
-      // 期间 10min 订阅 tick 到期会 createTask 落库甚至重新 spawn yt-dlp
-      stopSubscriptionTimer()
-      stopScheduler()
-      if (trackerRefreshTimer) {
-        clearInterval(trackerRefreshTimer)
-        trackerRefreshTimer = null
-      }
-      getYtDlpSupervisor().killAll()
-      // 音乐任务 abort 全部网络请求，避免遗留 .part 文件
-      getMusicEngine().shutdown()
-      stopAppUpdaterTimer()
-      stopBridge()
-      // R7 P0-1：撤销 NAT 端口映射（fire-and-forget；未及撤销由 TTL 过期兜底）
-      clearNatMapping()
-    } catch (err) {
-      log.error('before-quit 同步清理失败（继续退出）', { error: String(err) })
-    }
-    void supervisor
-      .shutdown()
-      .catch(() => {})
-      .finally(() => {
-        try {
-          closeDb()
-        } catch {
-          // ignore
-        }
-        app.exit(0)
-      })
-  })
+  // 第十一轮审查：before-quit / window-all-closed 已提前到模块加载期注册
+  //（见文件头部模块级生命周期块）——启动耗时窗口内 quit 不再绕过清理链
 
   app.on('activate', () => {
     // 仅迷你悬浮窗存活时也要重建主窗
@@ -518,6 +577,17 @@ function createWindow(): void {
         )
         .catch(() => {})
     }, 1000)
+  })
+
+  // 第十一轮审查 P3：连续崩溃计数在稳定运行后清零——托盘常驻型应用长期运行，
+  // 此前进程终身累计第 4 次崩溃起永久失去自动恢复。稳定存活 5 分钟即视为恢复
+  let stableTimer: ReturnType<typeof setTimeout> | null = null
+  win.webContents.on('did-finish-load', () => {
+    if (stableTimer) clearTimeout(stableTimer)
+    stableTimer = setTimeout(() => {
+      rendererReloads = 0
+    }, 5 * 60_000)
+    stableTimer.unref?.()
   })
 
   // 自绘窗口控件：最小化 / 最大化切换 / 关闭（关闭走托盘拦截 → 隐藏）

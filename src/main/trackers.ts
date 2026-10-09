@@ -81,7 +81,11 @@ async function fetchSource(url: string): Promise<string[]> {
     signal: AbortSignal.timeout(20_000)
   })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
-  return (await res.text())
+  // 第十一轮审查 P3：响应体截断（2MB）——被投毒订阅源可回超大 body 撑内存
+  //（music/http 与 webdav 同类问题已有 readBodyCapped/readCappedText 口径）
+  const buf = await res.arrayBuffer()
+  const text = new TextDecoder().decode(buf.byteLength > 2 * 1024 * 1024 ? buf.slice(0, 2 * 1024 * 1024) : buf)
+  return text
     .split('\n')
     .map((l) => l.trim())
     .filter((l) => l && !l.startsWith('#') && /^[a-z]+:\/\//i.test(l))

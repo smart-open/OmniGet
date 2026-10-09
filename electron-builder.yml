@@ -60,8 +60,14 @@ mac:
     - from: resources/icon.png
       to: icon.png
   # 两种 dmg：Intel(x64) / Apple Silicon(arm64)。universal 无法捆绑平台化 sidecar，不产出
+  # 第十一轮审查 P2：electron-updater 的 MacUpdater 要求发布物含 zip target
+  #（latest-mac.yml 需 zip 条目）——dmg-only 发布使 macOS 自动更新链路永不可达
   target:
     - target: dmg
+      arch:
+        - x64
+        - arm64
+    - target: zip
       arch:
         - x64
         - arm64
@@ -94,6 +100,6 @@ linux:
   category: Network;FileTransfer
   mimeTypes:
     - x-scheme-handler/magnet
-# 自动更新通道（electron-updater：win nsis / mac dmg 支持；linux deb 不支持在线更新属上游限制）
+# 自动更新通道（electron-updater：win 仅 NSIS 安装形态 / mac dmg+zip；linux 不支持在线更新属上游限制）
 publish:
   provider: github

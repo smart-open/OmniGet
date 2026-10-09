@@ -587,6 +587,12 @@ export async function openStream(
     // 169.254.169.254 等）会被自动跟随并把响应体原样回显，击穿 net-guard 防线。
     // 改手动重定向逐跳校验（保留镜像 CDN 302 直链的合法场景，上限 3 跳）
     const { isInternalUrl } = await import('../net-guard')
+    // 第十一轮审查 P3：入口 URL 同样过内网校验（此前仅逐跳 redirect 校验——
+    // 试听白名单域被 DNS rebinding 指向内网时入口请求可打内网，
+    // 对齐 fetchWithGuardedRedirects 的「入口即查」口径）
+    if (await isInternalUrl(url)) {
+      throw new Error('请求地址为内网地址，已拦截')
+    }
     let current = url
     for (let hop = 0; ; hop++) {
       res = await undiciFetch(current, {

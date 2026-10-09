@@ -203,6 +203,35 @@ export function listTasks(filter: {
   return rows.map(rowToTask)
 }
 
+/** 第十一轮审查 P3：bridge /api/tasks 分页查询下推 SQL——此前每请求全表加载后
+ * 内存过滤/分页，万级任务库 × 5s 轮询 × 多设备放大为持续 CPU/内存抖动
+ * （better-sqlite3 同步执行会阻塞 IPC tick）。q 为参数化 LIKE（通配符转义）。 */
+export function listTasksPaged(filter: {
+  status?: TaskStatus[]
+  q?: string
+  limit: number
+  offset: number
+}): { rows: Task[]; total: number } {
+  const conds: string[] = ['deleted_at IS NULL']
+  const args: Record<string, unknown> = {}
+  if (filter.status?.length) {
+    conds.push(`status IN (${filter.status.map((_, i) => `@st${i}`).join(',')})`)
+    filter.status.forEach((s, i) => (args[`st${i}`] = s))
+  }
+  if (filter.q) {
+    // LIKE 通配符与转义符本身转义，防用户输入放大匹配面
+    const like = filter.q.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_')
+    conds.push("(LOWER(name) LIKE @q ESCAPE '\\' OR LOWER(source) LIKE @q ESCAPE '\\')")
+    args.q = `%${like.toLowerCase()}%`
+  }
+  const where = conds.join(' AND ')
+  const total = (getDb().prepare(`SELECT COUNT(*) AS c FROM tasks WHERE ${where}`).get(args) as { c: number }).c
+  const rows = getDb()
+    .prepare(`SELECT * FROM tasks WHERE ${where} ORDER BY created_at DESC LIMIT @limit OFFSET @offset`)
+    .all({ ...args, limit: filter.limit, offset: filter.offset }) as TaskRow[]
+  return { rows: rows.map(rowToTask), total }
+}
+
 /** 侧栏角标计数（单条 SQL 全表口径，跨视图一致；10k 行内亚毫秒） */
 export function taskCounts(): {
   running: number

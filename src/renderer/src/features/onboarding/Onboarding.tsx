@@ -3,7 +3,7 @@ import { useState } from 'react'
 import { motion } from 'framer-motion'
 import { ArrowRight, Check, FolderOpen } from '@phosphor-icons/react'
 import { Button } from '../../components/ui'
-import { toastError } from '../../lib/feedback'
+import { toast, toastError } from '../../lib/feedback'
 import { THEMES, applyTheme, type ThemeId } from '../../theme'
 import { useI18n } from '../../i18n'
 
@@ -39,7 +39,12 @@ export function Onboarding({ open, onClose }: { open: boolean; onClose: () => vo
     // detail 形状与 SettingsPage 一致（直接传 ThemeId）
     window.dispatchEvent(new CustomEvent('app:theme-changed', { detail: theme }))
     onClose()
-    await Promise.all(writes).catch((err) => toastError('保存向导设置', err))
+    await Promise.all(writes).catch((err) => {
+      // 第十一轮审查 P3：部分写失败（如仅主题失败而 onboarded 成功）会留下
+      // 「向导已关但设置未落」混合态——文案给出补救出口，不再只报错无出路
+      toastError('保存向导设置', err)
+      toast('部分设置可能未保存，可到设置页重新配置', 'warning')
+    })
   }
 
   const steps = ['下载目录', '外观', '系统集成']

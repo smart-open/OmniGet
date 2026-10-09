@@ -40,7 +40,17 @@ async function fetchCid(id: { bvid?: string; aid?: string }): Promise<number> {
     'user-agent':
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
   })
-  if (json.code !== 0 || !json.data) throw new Error('B站视频信息获取失败（接口异常或视频不存在）')
+  if (json.code !== 0 || !json.data) {
+    // 第十一轮审查 P3：-352/-412 风控与「视频不存在」不区分会让用户无法归因，
+    // 按 code 细分文案（风控是最常见的失败态）
+    const reason =
+      json.code === -352 || json.code === -412
+        ? '触发B站风控拦截（请稍后重试或降低操作频率）'
+        : json.code === -404
+          ? '视频不存在（已删除或链接有误）'
+          : `接口异常（code ${json.code}）`
+    throw new Error(`B站视频信息获取失败：${reason}`)
+  }
   const cid = json.data.cid ?? json.data.pages?.[0]?.cid
   if (!cid) throw new Error('未获取到视频 cid（多P视频暂不支持弹幕压制）')
   return cid

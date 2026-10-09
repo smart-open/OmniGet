@@ -211,7 +211,13 @@ export class TaskManager {
       // 第十轮审查 P2：直播录制断流自动重连（有限次）——长时录制中 CDN 抖动/
       // 主播短暂断流此前直接落 failed 终态，录制止于断点需人工介入。30s 后凭
       // roomUrl 重解清单再试，上限 3 次，耗尽后维持 failed 给用户出口
-      if (e.status === 'failed' && task.engine === 'nm3u8' && this.isLiveRecordingTask(task)) {
+      // 第十一轮审查 P3：重连覆盖扩展到 yt-dlp 原生直录（RE 缺席回落路径）——
+      // 该路径 source 即房间 URL，yt-dlp 内部自行重解，无需清单刷新
+      if (
+        e.status === 'failed' &&
+        (task.engine === 'nm3u8' || task.engine === 'ytdlp') &&
+        this.isLiveRecordingTask(task)
+      ) {
         this.scheduleLiveRetry(task)
       }
       // 审查修复（P2-3 配套）：失败/暂停外的终态路径无人调用 persistCliProduct，
@@ -227,6 +233,9 @@ export class TaskManager {
       // P2 加固：终态事件后聚合速度表不再需要该条目，删除防 Map 无界增长
       if (e.status === 'completed' || e.status === 'failed') {
         this.currentEvents.delete(e.taskId)
+        // 第十一轮审查 P3：schedulePaused 集合同步清理（窗口内任务完成/失败后
+        // id 滞留至窗口结束，恢复时靠 status==='paused' 复核兜住——顺手清求整洁）
+        this.schedulePaused.delete(e.taskId)
       }
       notifyTaskEvent(e, task.name)
       out.push({ ...e, status: e.status ?? task.status })
@@ -399,6 +408,10 @@ export class TaskManager {
     }
     let running = this.runningDownloads()
     const ordered = interleaveByGroup(this.startQueue)
+    // 第十一轮审查 P3：先替换 startQueue 再逐个 run——e.run() 同步触发事件回调
+    // 再入 pumpStarts 时不会对旧 startQueue 重复派发（与 max<=0 分支同口径，
+    // 消除对「job 调用均异步」的隐式依赖）
+    this.startQueue = []
     let qi = 0
     while (qi < ordered.length && running < max) {
       const e = ordered[qi++]!
@@ -1377,6 +1390,13 @@ export class TaskManager {
         }
         break
       case 'remove': {
+        // 第十一轮审查 P2：withFiles（purge 记录+删文件）必须有回收站防线——
+        // task:purge 通道有 isTrashed 校验，而本通道原样透传 withFiles:true 会
+        // 绕过「仅回收站可彻底清除」约束（纵深缺口）。渲染层/bridge 现网调用
+        // 均为软删（withFiles 缺省 false），不受影响
+        if (input.withFiles && !isTrashed(task.id)) {
+          throw new Error('彻底清除仅限回收站中的任务：请先移入回收站，再执行「彻底删除」')
+        }
         // 按引擎分派移除：aria2 走 RPC；ytdlp 杀进程；
         // music 无取消端点（仅解除 gid 关联，服务侧任务自然结束）；
         // tool 杀 ffmpeg 进程（取消后任务记录按 withFiles 语义处理）
@@ -1442,6 +1462,8 @@ export class TaskManager {
         }
         // 产物登记随任务删除一并注销（remove 不产生 failed 事件，无人兜底清理）
         this.dropEngineOutputs(task.id)
+        // 第十一轮审查 P3：窗口内被删除的任务同步出 schedulePaused 集合
+        this.schedulePaused.delete(task.id)
         // P3 修复：删除运行中任务时速度快照表此前只增不减（removed→failed 事件
         // 被 isTrashed 守卫拦截，currentEvents.delete 永不执行）
         this.currentEvents.delete(task.id)
@@ -1704,6 +1726,12 @@ export class TaskManager {
   async retryTask(taskId: string): Promise<void> {
     const task = getTask(taskId) as TaskExt | null
     if (!task || task.status !== 'failed' || isTrashed(taskId)) return
+    // 第十一轮审查 P3：适配器可用性前置校验——此前 this.ytdlp! 非空断言 +
+    // nm3u8 适配器缺失时 else 分支无条件 aria2.start（把清单文本当 http 直链
+    // 下载）。对照 recoverEngineTasks 的安全写法，不可用时显式报错
+    if ((task.engine === 'ytdlp' && !this.ytdlp) || (task.engine === 'nm3u8' && !this.nm3u8)) {
+      throw new Error('所需引擎当前不可用，请到设置页检查引擎安装状态后重试')
+    }
     this.transition(task, 'queued')
     // 审查修复：失败任务的旧 engineGid 仍指向已终结的引擎条目——重试置回 queued 后
     // 1s 内的轮询会拿旧 gid 回一帧 failed 把任务打回 failed（并发槽满时 pumpStarts
@@ -1763,7 +1791,7 @@ export class TaskManager {
             >[1])
           }
           gid = await this.nm3u8.start(cur)
-        } else {
+        } else if (cur.engine === 'aria2') {
           // R7 续修复（backlog #11）：sidecar 兜底任务重试前刷新时效直链
           const fresh = await this.refreshSidecarLink(cur)
           // 回归审查 P2：增量补下任务失败重试同理——放行覆盖（第十轮：判据改
@@ -1775,6 +1803,10 @@ export class TaskManager {
           // 第七轮修复（双重记账）：失败任务若带未回撤的旧 completedAt（增量补下
           // 启动失败落入 failed），重试起跑成功后回撤
           this.consumePendingCompletion(cur.id, cur.totalBytes ?? 0)
+        } else {
+          // 第十一轮审查 P3：不再无条件落 aria2.start（防 nm3u8 引擎不可用时把
+          // 清单文本当 http 直链下载）——显式报错给出口
+          throw new Error(`引擎 ${cur.engine} 当前不可用，请检查引擎安装状态`)
         }
         updateTaskFields(cur.id, { engineGid: gid, error: null })
         if (cur.engine === 'aria2') return gid
@@ -1797,17 +1829,36 @@ export class TaskManager {
    * 启动在途（launching/verifying，「任务正忙」）限时重试（磁力 metadata 窗口
    * 最长 90s）；重试耗尽仍无法暂停的广播 warning 公示（UX 硬性标准）。 */
   async pauseScheduledDownloads(): Promise<void> {
-    // 首轮目标快照；后续轮只追查仍 running 的（窗口期间可能自然完成/失败）
+    // 停运目标判据：下载引擎 + 非直播录制。
+    // 第十一轮审查 P3：直播录制豁免停运窗口——暂停直播流即内容永久丢失，
+    // 窗口结束的恢复复用旧清单直链基本必败（scheduleLiveRetry 只兜断流，不兜
+    // 人为暂停），Windows 硬杀下 moov 缺失文件更不可播
+    const engineOf = (t: { engine: string; params?: string }): boolean =>
+      (t.engine === 'aria2' || t.engine === 'ytdlp' || t.engine === 'nm3u8') &&
+      !this.isLiveRecordingTask(t as TaskExt)
+    // 首轮目标快照；后续轮重扫 running 集合追补——窗口开启瞬间「启动在途
+    // （launching）」的任务 DB 恒为 queued 不在快照内，启动完成变 running 后
+    // 必须由重扫捕获，否则整窗口漏暂停（第十一轮审查 P2-2）
     const initial = new Set(
       listTasks({ status: ['running'] })
-        .filter((t) => t.engine === 'aria2' || t.engine === 'ytdlp' || t.engine === 'nm3u8')
+        .filter(engineOf)
         .map((t) => t.id)
     )
     if (initial.size === 0) return
     let paused = 0
     const unpausable: string[] = []
     for (let attempt = 0; attempt < 10; attempt++) {
+      // 第十一轮审查 P2-1：窗口可能在重试循环期间结束（tick 每分钟翻转
+      // appliedPause → resumeScheduledDownloads 已跑且 schedulePaused 已清空）——
+      // 此时再 control('pause') + add 会造成任务永久卡 paused 无恢复出口。
+      // 每轮 sleep 前后都复核窗口状态，已出窗口立即放弃
+      if (!isPausedWindow()) return
       if (attempt > 0) await new Promise((r) => setTimeout(r, 10_000))
+      if (!isPausedWindow()) return
+      // 重扫 running 补快照（launching→running 的迟到转正 + 窗口内新起跑的任务）
+      for (const t of listTasks({ status: ['running'] })) {
+        if (engineOf(t) && !this.schedulePaused.has(t.id)) initial.add(t.id)
+      }
       // 窗口开启到重试之间可能已有任务完成/失败/被删——每轮重读
       const pending = [...initial].filter((id) => !this.schedulePaused.has(id))
       if (pending.length === 0) break
@@ -1830,6 +1881,12 @@ export class TaskManager {
         if (fresh?.status === 'paused') {
           this.schedulePaused.add(id)
           paused++
+          // add 后再复核一次窗口——窗口恰在本轮 sleep 间隙结束的竞态下，刚 add
+          // 的任务不在已跑完的 resumeScheduledDownloads 集合里，必须就地恢复
+          if (!isPausedWindow()) {
+            this.schedulePaused.delete(id)
+            await this.control({ taskId: id, action: 'resume' }).catch(() => {})
+          }
         } else {
           stillBusy = true
         }
@@ -1860,18 +1917,36 @@ export class TaskManager {
     const ids = [...this.schedulePaused]
     this.schedulePaused.clear()
     let resumed = 0
+    // 第十一轮审查 P3：批量恢复此前直接 control('resume')——ytdlp/nm3u8 的 resume
+    // 分支不经 gateStart，窗口内 maxConcurrent 被下调时窗口结束瞬间会全部直接
+    // 重 spawn 突破并发闸门。按运行中数量做预算：预算内恢复，超额任务转 queued
+    // 交末尾 pumpStarts 按闸门派发
+    const max = this.maxConcurrent()
+    let running = this.runningDownloads()
+    const overflow: string[] = []
     for (const id of ids) {
       const t = getTask(id) as TaskExt | null
       if (!t || t.status !== 'paused' || isTrashed(id)) continue
+      if (max > 0 && running >= max) {
+        overflow.push(id)
+        continue
+      }
       try {
         await this.control({ taskId: id, action: 'resume' })
         resumed++
+        running++
       } catch (err) {
         // 恢复失败保持 paused（引擎侧异常等），用户可手动恢复；不阻断其余任务
         log.warn(`schedule resume failed for ${id}`, err)
       }
     }
-    log.info(`schedule pause window ended: resumed ${resumed}/${ids.length}`)
+    for (const id of overflow) {
+      const t = getTask(id) as TaskExt | null
+      if (!t || t.status !== 'paused' || isTrashed(id)) continue
+      updateTaskFields(id, { status: 'queued' })
+      this.pushEvent({ taskId: id, status: 'queued' })
+    }
+    log.info(`schedule pause window ended: resumed ${resumed}/${ids.length}, deferred ${overflow.length}`)
     this.pumpStarts()
   }
 
@@ -2097,26 +2172,37 @@ export class TaskManager {
         const cur = getTask(task.id) as TaskExt | null
         if (!cur || cur.status !== 'failed' || isTrashed(cur.id)) return
         const roomUrl = String(parseParamsJson(cur.params).roomUrl ?? '')
-        if (!roomUrl) return
-        // 重解清单（旧直链必已过期）；未开播/接口变动时维持 failed，用户手动重试
-        let source = cur.source
-        try {
-          const parsed = await import('../live/resolve').then((m) =>
-            m.resolveLiveRoom({ ...cur, source: roomUrl })
-          )
-          if (parsed.manifestUrl) source = parsed.manifestUrl
-        } catch (err) {
-          log.info(`live retry aborted (resolve failed): ${cur.id}`, {
-            error: err instanceof Error ? err.message : String(err)
+        // 第十一轮审查 P3：yt-dlp 原生直录路径只写 liveRoom 标记（source 即房间
+        // URL），无需也不应要求 roomUrl——直接重试，yt-dlp 内部自行重解
+        if (!roomUrl && cur.engine === 'nm3u8') return
+        // 重解清单（旧直链必已过期）；未开播/接口变动时维持 failed，用户手动重试。
+        // yt-dlp 直录无清单直链可刷，跳过重解
+        if (roomUrl) {
+          let source = cur.source
+          try {
+            const parsed = await import('../live/resolve').then((m) =>
+              m.resolveLiveRoom({ ...cur, source: roomUrl })
+            )
+            if (parsed.manifestUrl) source = parsed.manifestUrl
+          } catch (err) {
+            log.info(`live retry aborted (resolve failed): ${cur.id}`, {
+              error: err instanceof Error ? err.message : String(err)
+            })
+            return
+          }
+          const prev = parseParamsJson(cur.params)
+          updateTaskFields(cur.id, {
+            source,
+            error: null,
+            params: JSON.stringify({ ...prev, liveRetries: attempts + 1 })
           })
-          return
+        } else {
+          const prev = parseParamsJson(cur.params)
+          updateTaskFields(cur.id, {
+            error: null,
+            params: JSON.stringify({ ...prev, liveRetries: attempts + 1 })
+          })
         }
-        const prev = parseParamsJson(cur.params)
-        updateTaskFields(cur.id, {
-          source,
-          error: null,
-          params: JSON.stringify({ ...prev, liveRetries: attempts + 1 })
-        })
         broadcastNotices([
           {
             level: 'info',

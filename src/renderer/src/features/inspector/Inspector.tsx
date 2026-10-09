@@ -50,6 +50,9 @@ export function Inspector({
   const [copied, setCopied] = useState(false)
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const detailSeq = useRef(0)
+  // 第十一轮审查 P3：操作防重入——连续快速双击暂停/继续/重试会发双 IPC，
+  // 第二次主进程报错弹噪音 toast（对齐 TaskList 的 runOp 闸门口径）
+  const opBusyRef = useRef(false)
   const [cat, setCat] = useState<'all' | 'video' | 'music' | 'image' | 'doc' | 'other'>('all')
 
   // 打开时拉文件清单（P2-1：序号守卫——快速切换任务时旧响应不得覆盖新任务）
@@ -112,6 +115,7 @@ export function Inspector({
 
   // 返回操作是否实际生效：remove 取消确认或失败时调用方不应关闭抽屉
   const control = async (action: 'pause' | 'resume' | 'remove'): Promise<boolean> => {
+    if (opBusyRef.current) return false
     if (action === 'remove') {
       const ok = await confirmAction({
         title: '移入回收站',
@@ -120,6 +124,7 @@ export function Inspector({
       })
       if (!ok) return false
     }
+    opBusyRef.current = true
     try {
       // 第九轮审查：显式 withFiles:false（与 TaskList 同操作口径一致，不依赖
       // 主进程可缺省默认——默认值一旦变更会出现两处行为分叉）
@@ -132,10 +137,14 @@ export function Inspector({
     } catch (err) {
       toastError('任务操作', err) // UX 硬性标准：失败必须可见反馈
       return false
+    } finally {
+      opBusyRef.current = false
     }
   }
 
   const retry = (): void => {
+    if (opBusyRef.current) return
+    opBusyRef.current = true
     void window.omniget
       .retryTask(task.id)
       .then(() => {
@@ -143,6 +152,9 @@ export function Inspector({
         onChanged()
       })
       .catch((err) => toastError('重试任务', err))
+      .finally(() => {
+        opBusyRef.current = false
+      })
   }
 
   const copySource = (): void => {

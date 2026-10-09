@@ -194,6 +194,19 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
       onClose()
       return
     }
+    // 第十一轮审查 P2：awaiting 阶段（磁力解析最长 90s）关闭会静默丢弃解析
+    // 结果与全部勾选，且任务列表无「继续配置」入口——任务永久卡 awaiting。
+    // Esc/关闭按钮此前裸放行，属误触高发面，补轻量二次确认
+    if (phase === 'awaiting') {
+      void confirmAction({
+        title: '放弃本次解析结果？',
+        message: '磁力元数据解析尚未完成，关闭后将丢失已获取的文件列表与勾选；任务仍会保留在列表中。',
+        confirmLabel: '关闭'
+      }).then((ok) => {
+        if (ok) onClose()
+      })
+      return
+    }
     onClose()
   }
   useEffect(() => {

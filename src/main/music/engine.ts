@@ -305,6 +305,13 @@ export class MusicEngine {
     const ext = extname(mp3Path)
     const preferred = join(dir, base + ext)
     if (preferred === mp3Path) return { mp3: mp3Path, lrc: lrcPath }
+    // 第十一轮审查 P3：Windows 未开启长路径支持时 MAX_PATH=260——saveDir + 嵌套
+    // 模板目录段 + 200 字符段名可超限。路径预算超限时放弃重命名（保留原位）
+    // 而非让 mkdir/rename 在半途失败，行为与「目录建不出来」降级一致
+    if (process.platform === 'win32' && preferred.length > 240) {
+      log.warn(`applyNaming path budget exceeded (${preferred.length} chars), keep original name`)
+      return { mp3: mp3Path, lrc: lrcPath }
+    }
     const dirOk = await mkdir(dir, { recursive: true })
       .then(() => true)
       .catch(() => false)

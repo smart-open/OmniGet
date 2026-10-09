@@ -522,6 +522,13 @@ export function registerIpcHandlers(): void {
       await restartBridge()
     } catch (err) {
       setSetting('bridge.lan', JSON.stringify(prev))
+      // 第十一轮审查 P2：回滚只恢复「设置」不恢复「服务」——restartBridge 内部
+      // 已 closeServer 后 listen 失败，HTTP server 停在已关闭态，桥接/扩展全部
+      // 404 到应用重启。按旧设置补一次重启尽力恢复服务（仍失败只留日志：
+      // 端口被占等根因无解，设置已回滚、UI 已收到真实报错）
+      await import('./bridge')
+        .then((m) => m.restartBridge())
+        .catch((restoreErr) => log.warn('bridge restore after failed lan switch also failed', restoreErr))
       throw err instanceof Error ? err : new Error(String(err))
     }
     log.info(`bridge lan access ${on ? 'enabled' : 'disabled'}`)
@@ -720,7 +727,7 @@ export function registerIpcHandlers(): void {
     'video.subtitleLanguages',
     'video.nfoExport'
   ])
-  ipcMain.handle(IPC_CHANNELS.settingsSet, (_e, key: string, value: unknown) => {
+  ipcMain.handle(IPC_CHANNELS.settingsSet, async (_e, key: string, value: unknown) => {
     const k = String(key ?? '')
     if (!RENDERER_WRITABLE_SETTINGS.has(k)) {
       throw new Error(`设置项 ${k} 不存在或由系统管理，不可修改`)
@@ -744,6 +751,27 @@ export function registerIpcHandlers(): void {
       const v = typeof value === 'string' ? value.trim() : ''
       if (v && !/^https?:\/\//i.test(v)) {
         throw new Error('网盘/WebDAV 地址必须以 http:// 或 https:// 开头')
+      }
+      // 第十一轮审查 P2：endpoint 渲染层可写 + 主进程代发（含 Authorization 头），
+      // 内网地址属「用户显式配置」豁免场景（自托管 NAS）——落库前经 net-guard
+      // 复核并留审计日志，防被攻破的渲染层静默把端点改成内网回显/凭据投递通道
+      if (v) {
+        try {
+          const { isInternalUrl } = await import('./net-guard')
+          if (await isInternalUrl(v)) {
+            log.warn(`netdisk.endpoint 指向内网地址（用户显式配置，已放行并留痕）: ${v}`)
+          }
+        } catch {
+          // 校验自身失败不阻断保存（格式已先行校验）
+        }
+      }
+    }
+    // 第十一轮审查 P3：数值型键此前无类型/范围校验——download.maxConcurrent 传
+    // 字符串/负数/超大值会原样落库，消费端非正数按 0（=不限并发立即全派发）语义放大
+    if (k === 'download.maxConcurrent') {
+      const n = Number(value)
+      if (!Number.isInteger(n) || n < 0 || n > 64) {
+        throw new Error('最大并发数必须是 0–64 的整数（0 = 不限并发）')
       }
     }
     if (k === 'download.saveDir' && typeof value === 'string' && value.trim()) {

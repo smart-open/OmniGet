@@ -190,8 +190,21 @@ async function fetchManifest(base: string): Promise<{ files: Record<string, stri
       lastStatus = 404
       continue
     }
-    if (!res.ok) throw new Error(`manifest 获取失败（HTTP ${res.status}）`)
-    const raw = (await res.json()) as { files?: Record<string, string> }
+    if (!res.ok || !res.body) throw new Error(`manifest 获取失败（HTTP ${res.status}）`)
+    // 第十一轮审查 P3：manifest 响应体截断（1MB）——清单被投毒/异常返回超大 body
+    // 会无界读入内存（SHA256 只兜产物投毒，内存/磁盘耗尽代价应前置避免）
+    const chunks: Buffer[] = []
+    let manifestSize = 0
+    for await (const chunk of res.body) {
+      const b = chunk as Buffer
+      manifestSize += b.length
+      if (manifestSize > 1024 * 1024) {
+        await res.body.cancel().catch(() => {})
+        throw new Error('manifest 体积超过 1MB 上限，已拒绝')
+      }
+      chunks.push(b)
+    }
+    const raw = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { files?: Record<string, string> }
     if (!raw?.files || typeof raw.files !== 'object') throw new Error('manifest 格式不合法')
     return { files: raw.files, layout }
   }
@@ -203,6 +216,10 @@ async function fetchManifest(base: string): Promise<{ files: Record<string, stri
 /** 第七轮：空闲超时——60s 无任何字节进度才中断（硬 10min 总超时对弱网大引擎
  * ~100-200MB 必超时且每次从 0 重来；配合下方 Range 断点续传后弱网也能装完） */
 const FETCH_IDLE_TIMEOUT_MS = 60_000
+
+/** 第十一轮审查 P3：引擎下载体积硬顶（最大引擎 aria2/ffmpeg 量级 <200MB，
+ * 2GB 已留足余量；ytdlp 热更通道另有 256MB 上限） */
+const MAX_ENGINE_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024
 
 async function downloadAndVerify(url: string, sha256: string, dest: string, onProgress?: (received: number, total: number) => void): Promise<void> {
   const part = `${dest}.part`
@@ -278,6 +295,12 @@ async function downloadAndVerify(url: string, sha256: string, dest: string, onPr
             const buf = chunk as Buffer
             hash.update(buf)
             received += buf.length
+            // 第十一轮审查 P3：下载体积硬顶（2GB）——ytdlp 热更通道有 256MB 上限，
+            // 本通道此前无顶，镜像被投毒/异常返回超大 200 时可灌满磁盘
+            if (received > MAX_ENGINE_DOWNLOAD_BYTES) {
+              controller.abort(new Error('引擎包体积超过 2GB 上限'))
+              throw new Error('引擎包体积超过 2GB 上限，已中止（分发源异常）')
+            }
             onProgress?.(received, total)
             yield buf
           }
@@ -369,7 +392,13 @@ async function runFetchMissingEngines(opts: FetchOptions): Promise<FetchResult> 
     const file = fileOf(e.name)
     const sha = manifest[file]
     if (!sha || !/^[0-9a-f]{64}$/i.test(sha)) {
-      result.failed.push({ name: e.name, error: '分发源清单中缺少该引擎的 SHA256（不可信来源，拒绝安装）' })
+      // 第十一轮审查 P3：darwin 静态 aria2 上游绝迹（R9 D7 备案）——此前统一报
+      // 「不可信来源」会让 mac 用户误判为投毒事件。与构建侧 fetch-sidecars 专用文案对齐
+      const msg =
+        process.platform === 'darwin' && e.name === 'aria2c'
+          ? 'macOS 无上游静态 aria2c 构建，请手动下载 aria2c 放入引擎目录（设置页引擎清单有目录位置）'
+          : '分发源清单中缺少该引擎的 SHA256（不可信来源，拒绝安装）'
+      result.failed.push({ name: e.name, error: msg })
       continue
     }
     try {

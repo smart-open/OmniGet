@@ -534,6 +534,8 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
   // 第六轮审查：计划规则加载失败标记——失败后 rules 是空数组，此时允许「保存计划」
   // 会把空规则落盘清空全部调度计划（写前守卫）
   const rulesLoadFailedRef = useRef(false)
+  // 第十一轮审查 P2：订阅列表加载失败态（错误可见 + 重试，不得伪装空态）
+  const [subsLoadFailed, setSubsLoadFailed] = useState(false)
   const t = useI18n((s) => s.t)
 
   useEffect(() => {
@@ -547,7 +549,14 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
       ])
       if (rulesRes.ok) setRules(rulesRes.v)
       else rulesLoadFailedRef.current = true
-      if (subsRes.ok) setSubs(subsRes.v)
+      if (subsRes.ok) {
+        setSubs(subsRes.v)
+        setSubsLoadFailed(false)
+      } else {
+        // 第十一轮审查 P2：订阅列表加载失败此前被丢弃——subs 保持 []，界面
+        // 伪装成「尚无订阅」空态，用户会误以为订阅全部丢失而重复添加
+        setSubsLoadFailed(true)
+      }
       // 三期：订阅源参数预设下拉（失败静默——下拉为空仍可用默认参数）
       window.omniget
         .settingsGet('download.videoPresets')
@@ -1003,8 +1012,15 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                 <Button
                   size="sm"
                   onClick={() => {
+                    // 第十一轮审查 P3：前端预校验 http(s) 前缀（与主进程同口径，
+                    // 事后测试连接兜底不变）
+                    const v = netdiskUrl.trim()
+                    if (v && !/^https?:\/\//i.test(v)) {
+                      toast('网盘/WebDAV 地址必须以 http:// 或 https:// 开头', 'warning')
+                      return
+                    }
                     window.omniget
-                      .settingsSet('netdisk.endpoint', netdiskUrl.trim())
+                      .settingsSet('netdisk.endpoint', v)
                       .then(() => flash('网盘端点已保存'))
                       .catch((err) => toastError('保存网盘端点', err))
                   }}
@@ -1372,7 +1388,28 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
 
             {/* R7 续（backlog #18）：订阅追更 */}
             <Section title="订阅追更">
-              {subs.length === 0 && (
+              {subsLoadFailed && (
+                <div className="mb-2 rounded-panel border border-danger/40 bg-danger/10 p-2.5">
+                  <p className="text-xs text-danger">订阅列表加载失败，当前显示可能不完整。</p>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="mt-1.5"
+                    onClick={() => {
+                      window.omniget
+                        .subscribeList()
+                        .then((v) => {
+                          setSubs(v)
+                          setSubsLoadFailed(false)
+                        })
+                        .catch((err) => toastError('重新加载订阅列表', err))
+                    }}
+                  >
+                    重新加载
+                  </Button>
+                </div>
+              )}
+              {subs.length === 0 && !subsLoadFailed && (
                 <p className="mb-2 text-[10px] text-text-3">
                   尚无订阅。添加频道 / UP主 / 歌单链接后，将按间隔自动抓取新内容并入队下载
                 </p>
@@ -1528,6 +1565,11 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                       disabled={subAdding || !subName.trim() || !subUrl.trim()}
                       onClick={() => {
                         // UX 硬性标准：编辑保存失败必须可见反馈
+                        // 第十一轮审查 P3：订阅 URL 前端预校验（与限速/时段同口径）
+                        if (!/^https?:\/\//i.test(subUrl.trim())) {
+                          toast('订阅地址必须以 http:// 或 https:// 开头', 'warning')
+                          return
+                        }
                         setSubAdding(true)
                         window.omniget
                           .subscribeUpdate({ id: subEditingId, ...subPayload() })
@@ -1552,6 +1594,11 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                     disabled={subAdding || !subName.trim() || !subUrl.trim()}
                     onClick={() => {
                       // 审查修复（P3-5）：防重入——双击此前会重复登记订阅
+                      // 第十一轮审查 P3：订阅 URL 前端预校验（与编辑分支同口径）
+                      if (!/^https?:\/\//i.test(subUrl.trim())) {
+                        toast('订阅地址必须以 http:// 或 https:// 开头', 'warning')
+                        return
+                      }
                       setSubAdding(true)
                       window.omniget
                         .subscribeAdd(subPayload())
@@ -1836,7 +1883,26 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                 </div>
               </>
             ) : (
-              <p className="text-xs text-text-3">桥接服务未就绪（重启应用后重试）</p>
+              <div className="flex items-center gap-2">
+                <p className="text-xs text-text-3">桥接服务未就绪</p>
+                {/* 第十一轮审查 P3：桥接常晚于页面打开才就绪（首次启动），此前只能
+                    重启应用或切走再切回——补「重新检测」按钮 */}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    window.omniget
+                      .getBridgeInfo()
+                      .then((info) => {
+                        setBridgeInfo(info)
+                        if (!info?.running) toast('桥接服务仍未就绪，请稍后再试', 'info')
+                      })
+                      .catch((err) => toastError('重新检测桥接服务', err))
+                  }}
+                >
+                  重新检测
+                </Button>
+              </div>
             )}
           </Section>
         )}

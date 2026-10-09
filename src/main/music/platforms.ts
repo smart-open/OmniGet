@@ -895,7 +895,17 @@ export class PlatformEngine {
           }
         }
         audioUrl = audioUrl.replace(/\\u002F/g, '/')
-        if (trustedAudioUrl(audioUrl) && (await downloadFile(audioUrl, mp3Path, { signal: this.cb.signal }))) {
+        if (
+          trustedAudioUrl(audioUrl) &&
+          (await downloadFile(audioUrl, mp3Path, {
+            signal: this.cb.signal,
+            // 第十一轮审查 P2：exists 兜底命中时必须连 cached 语义一起改——
+            // 五条链中此前唯一漏网，取消清理会误删既有/并发同歌任务产物
+            onForeign: () => {
+              this.lastProductForeign = true
+            }
+          }))
+        ) {
           await writeLrc(lrcPath, EMPTY_LRC)
           return true
         }
@@ -944,12 +954,19 @@ export async function tryAllPlatforms(
   // 下载的产物已被 applyNaming 改名/迁目录，原生命名路径必不存在，重复入队会
   // 全量重下并堆积「(2)」副本。补音乐库兜底：title/artist 命中且文件在盘 →
   // 按 cached 返回（engine 取消清理与改名自动跳过）
-  const libHit = listTracks().find(
-    (t) =>
-      t.title === songName &&
-      (!singer || (t.artist ?? '').includes(singer)) &&
-      stat(t.path).then(() => true).catch(() => false)
+  // 第十一轮审查 P1：此前同步 find 回调里 stat(...).then(...) 返回 Promise 恒
+  // truthy，文件存在性从未被判定——死链库行（文件被移动/删除）会假命中 cached，
+  // mp3Path 指向不存在的文件。先同步筛候选，再逐个 await stat 复核在盘
+  let libHit: (ReturnType<typeof listTracks>)[number] | undefined
+  const libCandidates = listTracks().filter(
+    (t) => t.title === songName && (!singer || (t.artist ?? '').includes(singer))
   )
+  for (const t of libCandidates) {
+    if (await stat(t.path).then(() => true).catch(() => false)) {
+      libHit = t
+      break
+    }
+  }
   if (libHit) {
     log.info(`skip_existing (library): ${libHit.path}`)
     return {
@@ -968,12 +985,15 @@ export async function tryAllPlatforms(
   if (aborted()) return { success: false, source: '', message: '任务已取消', mp3Path: '', lrcPath: '' }
 
   // 二期（无损档）：成功后按文件头对齐产物扩展名（.mp3 → .flac/.m4a/…），
-  // 并把真实路径/专辑名带进结果
-  const finish = async (source: string, message: string): Promise<PlatformResult> => ({
+  // 并把真实路径/专辑名带进结果。
+  // 第十一轮审查 P3：foreign 既有产物不动（对齐 engine.ts downloadById 口径，
+  // 注释明确「foreign 既有产物不动」）——无条件 alignAudioExt 会违反 cached/foreign
+  // 不动不变量，且 rename 竞态下两任务同改一文件
+  const finish = async (source: string, message: string, foreign = false): Promise<PlatformResult> => ({
     success: true,
     source,
     message,
-    mp3Path: await alignAudioExt(mp3Path),
+    mp3Path: foreign ? mp3Path : await alignAudioExt(mp3Path),
     lrcPath,
     album: engine.lastAlbum || undefined
   })
@@ -984,8 +1004,9 @@ export async function tryAllPlatforms(
     onEvent?.({ type: 'platform-ok', platform: 'netease', message: '网易云 下载成功' })
     // 第七轮审查 P2：exists 兜底命中的产物非本任务落盘（lastProductForeign）——
     // 按 cached 语义返回，engine 取消清理/改名跳过，防误删并发同歌任务的产物
-    const r = await finish('网易云', `网易云: ${songName}`)
-    if (engine.lastProductForeign) return { ...r, cached: true }
+    const foreign = engine.lastProductForeign
+    const r = await finish('网易云', `网易云: ${songName}`, foreign)
+    if (foreign) return { ...r, cached: true }
     return r
   }
   onEvent?.({ type: 'progress', platform: 'netease', message: '网易云 未命中' })
@@ -998,8 +1019,9 @@ export async function tryAllPlatforms(
     if (await engine.tryQq(song.id, mp3Path, lrcPath, quality)) {
       onEvent?.({ type: 'platform-ok', platform: 'qq', message: 'QQ 音乐 下载成功' })
       // 第十轮审查：exists 兜底命中的产物按 cached 返回（对齐网易云分支口径）
-      const r = await finish('QQ 音乐', `QQ 音乐: ${song.name}`)
-      if (engine.lastProductForeign) return { ...r, cached: true }
+      const foreign = engine.lastProductForeign
+      const r = await finish('QQ 音乐', `QQ 音乐: ${song.name}`, foreign)
+      if (foreign) return { ...r, cached: true }
       return r
     }
   }
@@ -1012,8 +1034,9 @@ export async function tryAllPlatforms(
     engine.lastAlbum = song.album ?? ''
     if (await engine.tryKugou(song.id, mp3Path, lrcPath, quality)) {
       onEvent?.({ type: 'platform-ok', platform: 'kugou', message: '酷狗 下载成功' })
-      const r = await finish('酷狗', `酷狗: ${song.name}`)
-      if (engine.lastProductForeign) return { ...r, cached: true }
+      const foreign = engine.lastProductForeign
+      const r = await finish('酷狗', `酷狗: ${song.name}`, foreign)
+      if (foreign) return { ...r, cached: true }
       return r
     }
   }
@@ -1025,8 +1048,9 @@ export async function tryAllPlatforms(
   for (const song of await engine.searchMigu(keyword)) {
     if (await engine.tryMigu(song, mp3Path, lrcPath, quality)) {
       onEvent?.({ type: 'platform-ok', platform: 'migu', message: '咪咕 下载成功' })
-      const r = await finish('咪咕', `咪咕: ${song.name}`)
-      if (engine.lastProductForeign) return { ...r, cached: true }
+      const foreign = engine.lastProductForeign
+      const r = await finish('咪咕', `咪咕: ${song.name}`, foreign)
+      if (foreign) return { ...r, cached: true }
       return r
     }
   }
@@ -1038,8 +1062,9 @@ export async function tryAllPlatforms(
   for (const song of await engine.searchSoda(keyword)) {
     if (await engine.trySoda(song, mp3Path, lrcPath)) {
       onEvent?.({ type: 'platform-ok', platform: 'soda', message: '汽水 下载成功' })
-      const r = await finish('汽水', `汽水: ${song.name}`)
-      if (engine.lastProductForeign) return { ...r, cached: true }
+      const foreign = engine.lastProductForeign
+      const r = await finish('汽水', `汽水: ${song.name}`, foreign)
+      if (foreign) return { ...r, cached: true }
       return r
     }
   }

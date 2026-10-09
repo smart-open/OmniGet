@@ -215,7 +215,24 @@ export default function App() {
   useEffect(() => {
     const off = window.omniget.onNotices((items) => {
       if (!Array.isArray(items) || items.length === 0) return
-      for (const n of items) toast(n.message, n.level === 'warning' ? 'warning' : 'info')
+      // 第十一轮审查 P3：success 级此前被降级 info——主进程合流的成功类通知
+      //（批量完成等）丢失绿色成功态语义
+      // 第十一轮审查 P3：通知风暴合并——批量任务（订阅单次 20 条、网盘 50 文件）
+      // 逐条 toast 只能看到最后几条（5 条可见上限），超 3 条合并为一条汇总
+      if (items.length > 3) {
+        const first = items[0]!
+        const warnings = items.filter((n) => n.level === 'warning').length
+        const summary =
+          warnings > 0 && warnings < items.length
+            ? `${items.length} 条通知（${warnings} 条警告），首条：${first.message}`
+            : `${items.length} 条通知，首条：${first.message}`
+        toast(summary, warnings > 0 ? 'warning' : 'info')
+        return
+      }
+      for (const n of items) {
+        // level 以 string 比对——主进程 notice 级别集合可能比渲染层 ToastItem 宽
+        toast(n.message, n.level === 'warning' ? 'warning' : (n.level as string) === 'success' ? 'success' : 'info')
+      }
     })
     return off
   }, [])

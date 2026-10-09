@@ -144,7 +144,41 @@ export async function fetchSubtitleForVideo(
   if (!dlRes.ok) throw new Error(`字幕下载授权失败（HTTP ${dlRes.status}）`)
   const dl = (await dlRes.json()) as { link?: string; file_name?: string }
   if (!dl.link) throw new Error('OpenSubtitles 未返回下载链接')
-  const subRes = await fetch(dl.link, { signal: AbortSignal.timeout(30_000) })
+  // 第十一轮审查 P3：dl.link 来自 API 响应——此前默认 follow 重定向且无内网校验，
+  // 上游被劫持时可让主进程 GET 内网地址并把响应体落盘视频旁。
+  // 对齐 nm3u8/music 口径：入口即查 + 手动逐跳重定向复核（上限 3 跳）
+  const { isInternalUrl } = await import('../net-guard')
+  let subRes: Response
+  {
+    let current = dl.link
+    if (await isInternalUrl(current)) throw new Error('字幕下载地址为内网地址，已拦截')
+    for (let hop = 0; ; hop++) {
+      const res = await fetch(current, { redirect: 'manual', signal: AbortSignal.timeout(30_000) })
+      const location = res.headers.get('location')
+      if (res.status >= 300 && res.status < 400 && location) {
+        try {
+          res.body?.cancel()
+        } catch {
+          // 忽略流取消失败
+        }
+        if (hop >= 3) throw new Error('字幕下载重定向次数超限')
+        let next: URL
+        try {
+          next = new URL(location, current)
+        } catch {
+          throw new Error(`字幕下载重定向地址无效：${location}`)
+        }
+        if (next.protocol !== 'https:' && next.protocol !== 'http:') {
+          throw new Error(`字幕下载重定向协议不允许：${next.protocol}`)
+        }
+        if (await isInternalUrl(next.toString())) throw new Error('字幕下载重定向目标为内网地址，已拦截')
+        current = next.toString()
+        continue
+      }
+      subRes = res
+      break
+    }
+  }
   if (!subRes.ok) throw new Error(`字幕文件下载失败（HTTP ${subRes.status}）`)
   // 第六轮审查：响应体全量入内存前钳制大小（原 arrayBuffer 无上限）
   const declared = Number(subRes.headers.get('content-length') ?? '0')

@@ -49,8 +49,10 @@ function sanitizeRules(rules: unknown): ScheduleRule[] {
       TIME_RE.test(x.to)
     ) {
       // M3 修复：''/'unlimited' 会被 aria2 RPC 拒绝 → 归一化为 aria2 的不限速值 '0'
+      // 第十一轮审查 P3：LIMIT_RE 校验前置——此前先 slice(0,16) 再校验，合法但
+      // 超 16 字符的档位先被截断可能丢单位静默变档。LIMIT_RE 本身限定 1-7 位
+      // 数字+可选 K/M（≤8 字符），无需另行截断
       const raw = x.limit.trim()
-      const limit = /^unlimited$/i.test(raw) || raw === '' ? '0' : raw.slice(0, 16)
       // 五期：mode 校验（缺省 'limit' 向后兼容）；pause 规则不消费限速档，归一 '0'
       const mode = x.mode === 'pause' ? 'pause' : 'limit'
       // 五期：days 校验——0..6 整数去重升序；非法/空 = 每天（缺省兼容旧数据）
@@ -59,6 +61,7 @@ function sanitizeRules(rules: unknown): ScheduleRule[] {
             (a, b) => a - b
           )
         : []
+      const limit = /^unlimited$/i.test(raw) || raw === '' ? '0' : raw
       if (mode === 'limit' && !LIMIT_RE.test(limit)) continue
       out.push({
         from: x.from,
@@ -82,6 +85,9 @@ function inRange(now: Date, rule: ScheduleRule): boolean {
   const mins = now.getHours() * 60 + now.getMinutes()
   const from = (fh ?? 0) * 60 + (fm || 0)
   const to = (th ?? 0) * 60 + (tm || 0)
+  // 夏令时备案（第十一轮审查 P3）：本地时间判定下，春季前拨跳过的整点段
+  // （如 02:00-03:00）当天永不命中——限速/停运短暂失效，属可接受边缘；
+  // 秋季重演小时两分钟值相同，无异常
   // from === to 视为全天生效（原实现落入空区间永不命中）
   if (from === to) return true
   // 支持跨天边界（22:00-06:00）

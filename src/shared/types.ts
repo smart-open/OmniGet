@@ -573,8 +573,8 @@ export interface OmniGetBridge {
   checkAppUpdate(): Promise<AppUpdateCheck>
   /** 打开 Releases 下载页（仅允许发布仓库 https 地址） */
   openReleases(): Promise<void>
-  /** 渲染层平台标识（托盘/更新 UI 分支用） */
-  readonly platform: NodeJS.Platform
+  /** 渲染层平台标识（托盘/更新 UI 分支用；字符串形态，不依赖 @types/node） */
+  readonly platform: 'win32' | 'darwin' | 'linux' | string
   /** 降级黄条等通知（§4.4 降级告警） */
   onNotices(listener: (notices: UiNotice[]) => void): () => void
   /** 审查修复：主题跨窗口热同步（含迷你悬浮窗跟随主窗换肤） */

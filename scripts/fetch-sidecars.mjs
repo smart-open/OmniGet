@@ -285,6 +285,22 @@ async function fetchFfmpegDarwinX64() {
   })
   if (metaRes.status !== 0) throw new Error('ffbinaries API unreachable: https://ffbinaries.com')
   const meta = JSON.parse(metaRes.stdout)
+  // 第十一轮审查 P3：接入官方 checksums 端点（/api/v1/checksums/<version>，
+  // 形如 bin.<platform>.<tool> = sha256hex）——此前 ffbinaries 分支是五源中唯一
+  // 零校验的下载侧。端点不可达/无对应条目时降级明示告警（不强卡 CI）
+  let sums = null
+  if (meta?.version) {
+    try {
+      const sumsRes = spawnSync(
+        'curl',
+        ['-sSL', `https://ffbinaries.com/api/v1/checksums/${encodeURIComponent(meta.version)}`],
+        { encoding: 'utf8', timeout: 60_000 }
+      )
+      if (sumsRes.status === 0) sums = JSON.parse(sumsRes.stdout)
+    } catch {
+      // 降级告警路径
+    }
+  }
   for (const tool of ['ffmpeg', 'ffprobe']) {
     if (!(await need(tool))) continue
     const url = meta?.bin?.['macos-64']?.[tool]
@@ -293,6 +309,16 @@ async function fetchFfmpegDarwinX64() {
     const tmp = join(tmpdir(), `ffb-${tool}.zip`)
     await unlink(tmp).catch(() => {})
     download(url, tmp)
+    const expected = sums?.bin?.['macos-64']?.[tool]
+    if (typeof expected === 'string' && /^[0-9a-f]{64}$/i.test(expected)) {
+      const actual = sha256File(tmp)
+      if (actual !== expected.toLowerCase()) {
+        throw new Error(`ffbinaries ${tool} sha256 校验不符（期望 ${expected.slice(0, 12)}…，实际 ${actual.slice(0, 12)}…）`)
+      }
+      console.log(`  ✓ sha256 校验通过`)
+    } else {
+      console.log('  ! ffbinaries 官方校验和不可用，本次下载未校验（构建产物完整性仅靠运行时 TOFU）')
+    }
     const ex = join(tmpdir(), `ffb-x-${tool}-${Date.now()}`)
     await mkdir(ex, { recursive: true })
     unzip(tmp, ex)
