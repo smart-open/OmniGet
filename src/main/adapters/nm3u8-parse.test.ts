@@ -76,3 +76,48 @@ test('splitHlsAttrs：引号感知 + 键大写归一', () => {
 test('escapeRegex：变体 URI 中的正则元字符被转义（url= 选择器安全）', () => {
   assert.equal(escapeRegex('v/1080p.m3u8?a=1&b=2'), 'v/1080p\\.m3u8\\?a=1&b=2')
 })
+
+// ── backlog #17 增强（2026-10-09）：SUBTITLES 字幕轨解析 ─────────────────
+
+test('master 清单：SUBTITLES 字幕轨解析（GROUP-ID/NAME/LANGUAGE），AUDIO 轨不误收', () => {
+  const master = [
+    '#EXTM3U',
+    '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="English",LANGUAGE="en",DEFAULT=YES',
+    '#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs-en",NAME="English",LANGUAGE="en",DEFAULT=YES,URI="subs/en/playlist.m3u8"',
+    '#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs-zh",NAME="简体中文",LANGUAGE="zh-Hans"',
+    '#EXT-X-STREAM-INF:BANDWIDTH=4128000,RESOLUTION=1920x1080,SUBTITLES="subs-en"',
+    'video-1080p/playlist.m3u8'
+  ].join('\n')
+  const info = parseHlsManifest(master)
+  assert.equal(info.kind, 'master')
+  assert.equal(info.variants.length, 1) // MEDIA 行不得误产变体
+  assert.equal(info.subtitles.length, 2)
+  assert.equal(info.subtitles[0]?.groupId, 'subs-en')
+  assert.equal(info.subtitles[0]?.name, 'English')
+  assert.equal(info.subtitles[0]?.language, 'en')
+  assert.equal(info.subtitles[1]?.groupId, 'subs-zh')
+  assert.equal(info.subtitles[1]?.language, 'zh-Hans')
+})
+
+test('MEDIA 行插在 STREAM-INF 与 URI 行之间：不清 pending，变体不丢', () => {
+  const master = [
+    '#EXTM3U',
+    '#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="简体中文"',
+    '#EXT-X-STREAM-INF:BANDWIDTH=1280000,RESOLUTION=640x360',
+    '#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="简体中文"',
+    'video-360p/playlist.m3u8'
+  ].join('\n')
+  const info = parseHlsManifest(master)
+  assert.equal(info.kind, 'master')
+  assert.equal(info.variants.length, 1)
+  assert.equal(info.variants[0]?.uri, 'video-360p/playlist.m3u8')
+  assert.equal(info.subtitles.length, 2)
+})
+
+test('media/unknown 清单：subtitles 恒为数组（空），无 SUBTITLES 行不报错', () => {
+  const media = parseHlsManifest(
+    ['#EXTM3U', '#EXTINF:9.5,', 'seg-1.ts', '#EXT-X-ENDLIST'].join('\n')
+  )
+  assert.deepEqual(media.subtitles, [])
+  assert.deepEqual(parseHlsManifest('hello world').subtitles, [])
+})

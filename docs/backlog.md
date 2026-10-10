@@ -84,6 +84,17 @@
 > - **观察项（接受现状）**：①`/api/tasks` 关键词/分页仍在 JS 内存过滤（状态过滤已 SQL 下推），任务量数万级时轮询开销上升——量级触达再下沉 store 层；②LAN 模式对 `/?token=` 无速率限制（32 位 hex 熵足够，暴力枚举不现实；如需强加固可加失败退避）；③调度器测试依赖 `OMNIGET_TEST_DATA_DIR` 每文件注入（node:test 默认进程隔离成立，若未来改单进程隔离需改 db 单例注入方式）；
 > - 遗留人工项：停运窗口（跨窗口暂停/恢复/窗口内新建）/ LAN 面板多设备真机回归、任务列表 10k 60fps 实测、macOS/Linux 走查（#9/#10）、签名/公证（#1 外部资源）。
 
+## 〇-G、四期遗留「移动端提交」批次（2026-10-09，roadmap 四期最后一条代码侧待办，0.13.0）
+
+> 前置五期 5.2（Web UI 远程强化）已于 0.12.0 落地，条件解除后补齐。两项落地：Web 面板移动优先重写 / 设置页 LAN 扫码配对，明细见 CHANGELOG 0.13.0 与 git 历史。**口径与接受不修项**（记录备查）：
+> - **页面渲染抽至 `bridge-page.ts`**：零 electron 依赖（bridge.ts 直测会拖入 app 单例），8 例离线单测锁定视口 meta/卡片布局/分页/粘贴降级/轮询门控/安全口径/端点注入/脚本区无模板插值残留；
+> - **粘贴按钮安全上下文降级**：`isSecureContext && navigator.clipboard.readText` 特性检测——LAN 明文 HTTP（非 localhost）下浏览器拒绝 readText，按钮隐藏降级手输；不为此引入 HTTPS 证书链（LAN 面板维持 token 兜底口径）；
+> - **「加载更多」复用既有 offset/limit**：默认每页 50 条，poll 从 0 重取 `offset+PAGE` 条整体替换（offset 仅由加载更多推进）；过滤输入变更即重置 offset；不做无限滚动（触控行为不可预期，显式按钮可控）；
+> - **后台暂停轮询**：`visibilityState === 'hidden'` 时 poll 直接返回 + visibilitychange 回前台补拉——手机省电省流；桌面端常驻可见行为不变（5s 轮询）；
+> - **扫码配对用 devDependency `qrcode`**：纯 JS 无原生绑定，渲染层 vite 打包进 bundle（不增 sidecar/主进程体积，包体预算约束不触）；多网卡点选切换 = 换二维码 + 复制链接（toast 反馈，UX 硬性标准）；
+> - **安全口径零变动**：token 剥离/confirm/CSP/鉴权边界与 M-3 口径一致；客户端脚本禁用模板插值（单测锁 `无 ${`）；
+> - 遗留人工项：手机真机扫码配对与面板触控走查（随 §三 #10 平台回归）。
+
 ---
 
 - **现状**：`electron-builder.yml` mac 段已有 `identity` / `notarize` / `hardenedRuntime` / `entitlements` 注释化占位；代码侧已就绪。
@@ -216,8 +227,8 @@
   - [x] ✅ manager 全量接线：engine 路由（RE 在位→nm3u8，缺失回落 yt-dlp）、确认/暂停/恢复/移除/重试/重启恢复/产物落库/并发闸门/健康面板「nm3u8」引擎行；TOFU 指纹闸门复用（ensureVerified）
   - [x] ✅ 引擎清单增加 `N_m3u8DL-RE`（**发布侧直接放置解包后单文件，免 zip 解压支持**；单文件 ~13MB）；真机 E2E：真实 m3u8 → demo.mp4（68MB）通过
 - **待办（增强，条件触发）**：
-  - [ ] 直播录制：RE `--live-real-time-merge --live-record-limit` 选项已核实存在，待 UI（录制时长选择）+ 嗅探 live 清单分型
-  - [ ] 字幕轨道选择（`-ss` 已核实）与命名模板对接；audioOnly 选项对 hls 任务当前忽略（对话框隐藏）
+  - [ ] 直播录制：RE `--live-real-time-merge --live-record-limit` 选项已核实存在，待 UI（录制时长选择）+ 嗅探 live 清单分型（已由 #20 落地，本行仅存档）
+  - [x] ✅（2026-10-09，0.13.1）字幕轨道选择与命名模板对接 + audioOnly 生效：`nm3u8-parse.ts` 解析 `#EXT-X-MEDIA TYPE=SUBTITLES`（GROUP-ID/NAME/LANGUAGE；MEDIA 行插在 STREAM-INF 与 URI 行之间不清 pending，防误丢变体）→ `ParseOutput.subtitles` 透传对话框「字幕轨道」下拉 → `video.subtitleId` 随 params 持久化重放；RE 参数经本机 v0.6.0-beta（20260628 构建）`--help`/`--morehelp`/实跑参数解析实测：`-ss id=<GroupId正则>` 选轨，`--audio-only` 专用选项不存在、audioOnly 改 `-dv all`（去全部视频轨）+ `-sa for=best` 表达；命名模板 `video.template` 渲染为 `--save-name`（`resolveSaveName` 供 buildArgs 与产物预期路径共用，`/` `\` 中和为 `_`）；单测 +3（nm3u8-parse.test.ts 共 10 例）
 
 ### 18. ✅（2026-10-02）订阅中心（频道 / UP主 / 歌单自动追更）——MVP 落地
 - **依据**：Pinchflat / Tube Archivist（自托管订阅自动下载库，容器化）、spotDL `sync`（歌单与本地目录双向同步、删歌联动）——「订阅自动化」是下载器向「内容管理」演进的高价值方向，OmniGet 已有定时调度器与批量抓取基建，边际成本低。

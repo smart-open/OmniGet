@@ -42,6 +42,8 @@ export interface ParseOutput {
   pendingGid?: string
   /** R7 续（backlog #20）：HLS 直播流（media 清单无 #EXT-X-ENDLIST） */
   live?: boolean
+  /** backlog #17 增强（2026-10-09）：HLS master 清单字幕轨（RE -ss 轨道选择） */
+  subtitles?: { id: string; label: string }[]
   /** 三期（backlog #25）：直播间解析出的流清单直链（manager 据此改写 task.source 喂 RE） */
   manifestUrl?: string
   /** R7 P1 多源：HTTP 探测通过 content-length 校验的同文件镜像列表（start 时 addUri 多 URI 并行） */

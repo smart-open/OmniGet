@@ -99,6 +99,8 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
   const [embedMetadata, setEmbedMetadata] = useState(false)
   // 三期（backlog #23）：B站弹幕压制（仅 bilibili 任务显示）
   const [danmaku, setDanmaku] = useState(false)
+  // backlog #17 增强（2026-10-09）：HLS 字幕轨选择（master 清单 GROUP-ID，仅 RE 引擎任务）
+  const [subtitleId, setSubtitleId] = useState('')
   // R3：批量链接抓取
   const [batchMode, setBatchMode] = useState(false)
   const [batchBusy, setBatchBusy] = useState(false)
@@ -144,6 +146,7 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
       setSponsorBlock(false)
       setSponsorBlockRemove(false)
       setEmbedMetadata(false)
+      setSubtitleId('')
       setSniffPlatform(null)
       // 审查修复（P2-5）：直播录制时长此前不在重置清单——上一会话选的 30/60 分钟
       // 会静默套到新会话的直播任务上，录制被截断
@@ -660,6 +663,8 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
               embedMetadata: embedMetadata || undefined,
               // 三期（backlog #23）：B站弹幕压制
               danmaku: danmaku || undefined,
+              // backlog #17 增强（2026-10-09）：HLS 字幕轨（RE -ss，仅 master 清单有轨可选）
+              subtitleId: subtitleId || undefined,
               // R7 续（backlog #20）：直播录制时长（分钟；仅 RE 引擎的直播流）
               liveRecordMinutes:
                 parsed?.live && liveLimit !== '0' ? Number(liveLimit) : undefined
@@ -1191,6 +1196,25 @@ export function NewTaskDialog({ open, initialSource, onClose }: Props) {
                         <option value="60">1 小时</option>
                         <option value="120">2 小时</option>
                         <option value="0">不限（手动暂停停止）</option>
+                      </select>
+                    </div>
+                  )}
+
+                  {/* backlog #17 增强（2026-10-09）：HLS master 清单字幕轨选择（N_m3u8DL-RE -ss） */}
+                  {(parsed?.subtitles?.length ?? 0) > 0 && (
+                    <div className="mt-2 flex items-center gap-2 text-[11px]">
+                      <span className="text-text-2">字幕轨道：</span>
+                      <select
+                        value={subtitleId}
+                        onChange={(e) => setSubtitleId(e.target.value)}
+                        className="h-7 max-w-72 rounded-ctl border border-border bg-surface-2 px-2 text-[11px] outline-none focus:border-accent"
+                      >
+                        <option value="">不下载字幕</option>
+                        {parsed!.subtitles!.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.label}
+                          </option>
+                        ))}
                       </select>
                     </div>
                   )}

@@ -125,6 +125,8 @@ export interface ConfirmSelectionInput {
     embedMetadata?: boolean
     /** 三期（backlog #23）：B站弹幕压制（完成时取公开弹幕 XML→ASS→ffmpeg 烧录） */
     danmaku?: boolean
+    /** backlog #17 增强（2026-10-09）：HLS 字幕轨选择（master 清单 GROUP-ID，仅 RE 引擎） */
+    subtitleId?: string
   }
 }
 
@@ -340,6 +342,8 @@ export interface ParseOutputPayload {
   pendingGid?: string
   /** R7 续（backlog #20）：HLS 直播流（media 清单无 #EXT-X-ENDLIST），对话框显示录制时长 */
   live?: boolean
+  /** backlog #17 增强（2026-10-09）：HLS master 清单字幕轨（GROUP-ID + 展示名），对话框轨道选择 */
+  subtitles?: { id: string; label: string }[]
 }
 
 export interface CreateTaskResultAwaiting {

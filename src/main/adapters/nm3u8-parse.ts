@@ -16,6 +16,17 @@ export interface HlsManifestInfo {
   variants: HlsVariant[]
   /** media 清单 #EXTINF 时长合计（秒，取整） */
   durationSec?: number
+  /** master 清单 #EXT-X-MEDIA TYPE=SUBTITLES 字幕轨（backlog #17 增强：-ss 轨道选择） */
+  subtitles: HlsSubtitleTrack[]
+}
+
+export interface HlsSubtitleTrack {
+  /** GROUP-ID（变体清单 SUBTITLES="..." 属性值；RE -ss id=<regex> 选择键） */
+  groupId: string
+  /** #EXT-X-MEDIA NAME 属性 */
+  name?: string
+  /** LANGUAGE 属性（ISO 639 码） */
+  language?: string
 }
 
 /** 引号感知的 HLS attribute-list 切分（CODECS="avc1,mp4a" 内含逗号） */
@@ -49,10 +60,11 @@ export function parseHlsManifest(text: string): HlsManifestInfo {
   const trimmed = text.trim()
   // DASH MPD（XML）：不做深度解析——RE 自动选最佳轨
   if (/^\s*<\?xml[\s\S]*?<MPD/i.test(trimmed) || /^\s*<MPD/i.test(trimmed)) {
-    return { kind: 'mpd', variants: [] }
+    return { kind: 'mpd', variants: [], subtitles: [] }
   }
   const lines = trimmed.split(/\r?\n/)
   const variants: HlsVariant[] = []
+  const subtitles: HlsSubtitleTrack[] = []
   let durationSec = 0
   let pending: Record<string, string> | null = null
   for (const raw of lines) {
@@ -65,6 +77,20 @@ export function parseHlsManifest(text: string): HlsManifestInfo {
     if (line.startsWith('#EXTINF:')) {
       const d = parseFloat(line.slice('#EXTINF:'.length))
       if (Number.isFinite(d)) durationSec += d
+      continue
+    }
+    if (line.startsWith('#EXT-X-MEDIA:')) {
+      const attrs = splitHlsAttrs(line.slice('#EXT-X-MEDIA:'.length))
+      // 只收 SUBTITLES 轨（AUDIO 轨由 RE --auto-select/-sa for=best 自动取最佳，无选择 UI）
+      if (attrs['TYPE'] === 'SUBTITLES') {
+        subtitles.push({
+          groupId: attrs['GROUP-ID'] ?? '',
+          name: attrs['NAME'] || undefined,
+          language: attrs['LANGUAGE'] || undefined
+        })
+      }
+      // 注意：不清 pending——实际清单常见 MEDIA 行插在 STREAM-INF 与其 URI 行之间，
+      // 此处重置会误丢变体（对齐 #EXTINF 同样的「不干扰 pending」口径）
       continue
     }
     if (line.startsWith('#')) {
@@ -82,9 +108,10 @@ export function parseHlsManifest(text: string): HlsManifestInfo {
       pending = null
     }
   }
-  if (variants.length > 0) return { kind: 'master', variants, durationSec: durationSec || undefined }
-  if (durationSec > 0) return { kind: 'media', variants: [], durationSec: Math.round(durationSec) }
-  return { kind: 'unknown', variants: [] }
+  if (variants.length > 0)
+    return { kind: 'master', variants, subtitles, durationSec: durationSec || undefined }
+  if (durationSec > 0) return { kind: 'media', variants: [], subtitles, durationSec: Math.round(durationSec) }
+  return { kind: 'unknown', variants: [], subtitles }
 }
 
 /** 变体 URI → N_m3u8DL-RE url= 选择器的正则转义（分片 URL 为绝对地址，子串可命中） */

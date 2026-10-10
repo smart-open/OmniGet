@@ -108,6 +108,13 @@ export interface Nm3u8Selection {
   formatId?: string
   /** R7 续（backlog #20）：直播录制时长（分钟；仅 live 流生效） */
   liveRecordMinutes?: number
+  /** backlog #17 增强（2026-10-09）：字幕轨选择（master 清单 GROUP-ID；RE -ss id=<regex>） */
+  subtitleId?: string
+  /** backlog #17 增强（2026-10-09）：仅提取音频（RE 无 --audio-only 选项，经 -dv all 去全部视频轨表达；
+   * v0.6.0-beta --help 实测无专用选项、-dv all 参数解析通过） */
+  audioOnly?: boolean
+  /** backlog #17 增强（2026-10-09）：任务级命名模板（{{title}} 等，渲染为 --save-name） */
+  template?: string
 }
 
 export class Nm3u8Adapter {
@@ -176,7 +183,17 @@ export class Nm3u8Adapter {
       formats: formats.slice(0, 40),
       totalBytes: 0,
       duration: info.durationSec,
-      live
+      live,
+      // backlog #17 增强：master 清单字幕轨透传对话框（media/MPD 无字幕轨概念）
+      subtitles:
+        info.kind === 'master'
+          ? info.subtitles
+              .filter((s) => s.groupId)
+              .map((s) => ({
+                id: s.groupId,
+                label: [s.name, s.language].filter(Boolean).join(' · ') || s.groupId
+              }))
+          : undefined
     }
   }
 
@@ -188,7 +205,7 @@ export class Nm3u8Adapter {
     const args = await this.buildArgs(task, opts)
     this.emit({ taskId: task.id, status: 'running', message: '开始下载' })
     this.argsByTask.set(task.id, { args })
-    const saveName = sanitizeFilename(task.name || 'stream')
+    const saveName = await this.resolveSaveName(task, opts)
     this.outputFiles.set(task.id, [join(task.saveDir, `${saveName}.mp4`)])
     this.supervisor.spawnProcess(binaryPath('nm3u8re'), task.id, args, {
       isUserPaused: () => this.userPaused.has(task.id),
@@ -200,14 +217,29 @@ export class Nm3u8Adapter {
     return task.id // engineGid = taskId（CLI 无服务端 gid）
   }
 
-  /** v0.6.0-beta 实测选项；分片选择用 url=<变体URI正则> 精确锁定 + 音频取最佳 */
+  /** backlog #17 增强：保存名解析（buildArgs --save-name 与 start 产物预期共用，
+   * 两者必须一致——否则 onExit stat 产物恒 0 字节）。
+   * 模板非空时渲染 {{title}} 等（HLS 无元数据，title = 清单文件名），`/` `\` 中和为 `_`
+   *（--save-name 是单文件名不是路径，同 toYtDlpOutputTemplate 的 L2 加固口径）；空值回落 task.name */
+  private async resolveSaveName(task: Task, opts: Nm3u8Selection): Promise<string> {
+    const tpl = (opts.template ?? '').trim()
+    if (!tpl) return sanitizeFilename(task.name || 'stream')
+    const { renderNamingTemplate } = await import('../naming')
+    const rendered = renderNamingTemplate(tpl, { title: task.name || 'stream' })
+    return sanitizeFilename(rendered.replace(/[\\/]/g, '_')) || 'stream'
+  }
+
+  /** v0.6.0-beta 实测选项；分片选择用 url=<变体URI正则> 精确锁定 + 音频取最佳。
+   * backlog #17 增强（2026-10-09，--help/--morehelp 实测）：字幕轨 -ss id=<regex>；
+   * 仅音频无 --audio-only 专用选项，用 -dv all（去全部视频轨）+ -sa for=best 表达 */
   private async buildArgs(task: Task, opts: Nm3u8Selection): Promise<string[]> {
+    const saveName = await this.resolveSaveName(task, opts)
     const args = [
       task.source,
       '--save-dir',
       task.saveDir,
       '--save-name',
-      sanitizeFilename(task.name || 'stream'),
+      saveName,
       '--thread-count',
       String(Math.min(64, Math.max(1, task.threads || 16))),
       '-M',
@@ -225,10 +257,17 @@ export class Nm3u8Adapter {
     } catch {
       // 动态导入失败不阻断（虎牙/斗鱼等无头可用）
     }
-    if (opts.formatId) {
+    if (opts.audioOnly) {
+      // 仅音频：去全部视频轨（-dv all 实测参数解析通过），音频取最佳
+      args.push('-dv', 'all', '-sa', 'for=best')
+    } else if (opts.formatId) {
       args.push('-sv', `url=${escapeRegex(opts.formatId)}:for=best`, '-sa', 'for=best')
     } else {
       args.push('--auto-select')
+    }
+    // 字幕轨：按 GROUP-ID 精确锁定（-ss id=<regex>，--morehelp select-subtitle 实测）
+    if (opts.subtitleId) {
+      args.push('-ss', `id=${escapeRegex(opts.subtitleId)}`)
     }
     // R7 续（backlog #20）：直播录制（选项经 v0.6.0-beta --help 核实）
     if (opts.liveRecordMinutes && opts.liveRecordMinutes > 0) {

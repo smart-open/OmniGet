@@ -3,6 +3,37 @@
 > OmniGet 产品变更记录。版本号遵循 `0.x.y` 约定：**x（中间版本号）随功能里程碑递增**，y 为里程碑内的小修/加固版本。初始版本 0.1.0。
 > 格式参考 Keep a Changelog；日期为里程碑完成时间。里程碑与验收口径溯源至《OmniGet-产品技术设计文档》§10。
 
+## [0.13.1] - 2026-10-09
+
+### HLS 任务增强（backlog #17 待办清账：字幕轨选择 / audioOnly / 命名模板）
+
+- **字幕轨道选择**：`nm3u8-parse.ts` 解析 master 清单 `#EXT-X-MEDIA TYPE=SUBTITLES`（GROUP-ID/NAME/LANGUAGE；AUDIO 轨不误收；MEDIA 行插在 STREAM-INF 与 URI 行之间不再重置 pending——实际清单常见交错，此前会误丢变体）→ `ParseOutput.subtitles` 透传新建对话框「字幕轨道」下拉（默认「不下载字幕」）→ `video.subtitleId` 随 params 持久化，retry/restart 恢复重放；RE 参数 `-ss id=<GroupId正则>`（v0.6.0-beta `--morehelp select-subtitle` 实测口径）
+- **仅提取音频（hls）**：RE v0.6.0-beta 无 `--audio-only` 专用选项（`--help` 全文核实），audioOnly 改经 `-dv all`（去全部视频轨）+ `-sa for=best` 表达（两选项实跑参数解析实测通过）；此前对话框对 hls 任务显示该复选框但 RE 参数构建静默忽略——消费缺口补齐
+- **命名模板对接**：`video.template` 渲染为 RE `--save-name`（`resolveSaveName` 共用于 buildArgs 与产物预期路径，两者不一致会导致完成记账 0 字节）；HLS 无元数据，`{{title}}` = 清单文件名，`/` `\` 中和为 `_`（同 toYtDlpOutputTemplate L2 加固口径）
+
+### 测试
+
+- `nm3u8-parse.test.ts` +3 例（SUBTITLES 解析/AUDIO 不误收/MEDIA 行交错变体不丢/media·unknown 空数组恒定）；typecheck 双端通过；196/196 单测全绿
+
+### 同批审查修复（0.13.0 面板遗留）
+
+- **P2 Web 面板分页窗口错位**：`/api/tasks` 服务端 limit 硬顶 500（`Math.min(500, …)`），而「加载更多」无封顶——offset 超过 500 后每 5s 轮询重取窗口被服务端钳到 500 条整页替换，DOM 缩水但 offset 状态不变 → 计数虚报，再点「加载更多」产生 501..offset 区间空洞。分页总量同步封顶 500（`MAX_TASKS`）：more() 到顶短路、offset 推进钳顶、poll 重取窗口同步钳顶、按钮文案提示「用过滤缩小范围」；`bridge-page.test.ts` +1 例回归锁
+
+## [0.13.0] - 2026-10-09
+
+### 四期遗留「移动端提交」落地（Web UI 移动适配，Gopeed 范式）
+
+> 前置五期 5.2（Web UI 远程强化）已于 0.12.0 落地，条件解除后补齐四期最后一条代码侧待办。
+
+- **Web 面板移动优先重写**（页面渲染抽至 `bridge-page.ts`，零 electron 依赖可离线单测）：桌面表格改卡片列表（窄屏不横向溢出，宽屏观感统一）；触控目标 ≥36px、输入字号 16px（防 iOS 聚焦缩放）、`viewport-fit=cover` + `theme-color`；剪贴板「粘贴」按钮（`isSecureContext` 特性检测——LAN 明文 HTTP 下浏览器拒绝 readText，自动隐藏降级手输）；「加载更多」分页（复用 `/api/tasks` 既有 offset/limit，默认每页 50 条，长列表不再一次拉 100+）；页面不可见暂停轮询、回前台立即补拉（手机省电省流）；过滤搜索框改 `type=search`
+- **设置页 LAN 扫码配对**：局域网访问开启后展示面板地址二维码（纯 JS `qrcode` 库，devDependency，渲染层打包不增 sidecar 体积）；多网卡地址可点选切换（点选 = 切换二维码 + 复制链接，带 toast 反馈）；手机扫码直达 `http://<ip>:<port>/?token=<token>`，免手输 32 位 token
+- **安全与 UX 口径不变**：token 页面 bootstrap 后立即剥离（replaceState）；移除任务仍 `confirm` 二次确认；全部写操作经 `#msg` 可见反馈；客户端脚本零模板插值（单测锁定）；CSP/鉴权边界未动
+
+### 测试
+
+- 新增 `bridge-page.test.ts` 8 例（视口 meta/卡片布局/分页/粘贴降级/轮询门控/安全口径/端点注入/无插值残留）；typecheck 双端通过；193/193 单测全绿
+- 遗留人工项：手机真机扫码配对与面板触控走查（随 §三 #10 平台回归）
+
 ## [0.12.1] - 2026-10-09
 
 ### 第十一轮全面审查修复（六域并行：下载核心 / 音乐·视频·直播 / 工具箱·网盘·订阅·更新 / IPC·bridge·Web UI·DB / 渲染层 / 横切启动；P1×2 / P2×10 / P3×40+）
