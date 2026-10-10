@@ -2,6 +2,7 @@
 // 模板 / 下载 / Tracker / 更新 / 说明
 import { useEffect, useRef, useState } from 'react'
 import { ArrowClockwise, CheckCircle, FolderOpen, Trash } from '@phosphor-icons/react'
+import QRCode from 'qrcode'
 import type {
   AppUpdateCheck,
   AdapterScriptInfo,
@@ -521,6 +522,9 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
   // 五期（0.12.x）：局域网远程访问开关
   const [bridgeLan, setBridgeLan] = useState(false)
   const [bridgeLanBusy, setBridgeLanBusy] = useState(false)
+  // 四期遗留「移动端提交」（0.13.0）：LAN 扫码配对——二维码 dataURL + 点选网卡地址
+  const [qrIp, setQrIp] = useState('')
+  const [qrData, setQrData] = useState('')
   // R6：引擎按需下载
   const [engineList, setEngineList] = useState<
     Array<{ name: string; file: string; installed: boolean; size?: number }>
@@ -531,6 +535,35 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
   const [engineMirror, setEngineMirror] = useState('')
   /** M11：设置加载完成前不渲染表单——输入框显示默认值时点保存会把默认值当真值落盘 */
   const [settingsLoaded, setSettingsLoaded] = useState(false)
+  // 四期遗留「移动端提交」（0.13.0）：生效的 LAN 配对地址（点选切换，缺省首个网卡）
+  const activeLanIp =
+    bridgeLan && bridgeInfo?.running && bridgeInfo.lanAddresses.length > 0
+      ? qrIp && bridgeInfo.lanAddresses.includes(qrIp)
+        ? qrIp
+        : bridgeInfo.lanAddresses[0]
+      : undefined
+  // 二维码随生效地址/桥接信息变化重生成；失败清空隐藏（不阻塞设置页）
+  useEffect(() => {
+    if (!bridgeLan || !bridgeInfo?.running || !activeLanIp) {
+      setQrData('')
+      return
+    }
+    let alive = true
+    QRCode.toDataURL(`http://${activeLanIp}:${bridgeInfo.port}/?token=${bridgeInfo.token}`, {
+      margin: 1,
+      width: 224,
+      color: { dark: '#0B0C0E', light: '#FFFFFF' }
+    })
+      .then((d) => {
+        if (alive) setQrData(d)
+      })
+      .catch(() => {
+        if (alive) setQrData('')
+      })
+    return () => {
+      alive = false
+    }
+  }, [bridgeLan, bridgeInfo, activeLanIp])
   // 第六轮审查：计划规则加载失败标记——失败后 rules 是空数组，此时允许「保存计划」
   // 会把空规则落盘清空全部调度计划（写前守卫）
   const rulesLoadFailedRef = useRef(false)
@@ -1852,19 +1885,52 @@ export function SettingsPage({ onOpenHelp }: { onOpenHelp?: () => void }) {
                     <span className="text-text-2">允许局域网设备访问 Web 面板（手机/平板远程提交与管理任务）</span>
                   </label>
                   {bridgeLan && bridgeInfo?.running ? (
-                    <div className="mt-1.5 space-y-0.5 pl-6 text-[11px] text-text-3">
-                      <p>
-                        局域网地址（携带令牌访问）：
-                        {bridgeInfo.lanAddresses.length === 0 ? (
+                    <div className="mt-1.5 space-y-2 pl-6 text-[11px] text-text-3">
+                      {bridgeInfo.lanAddresses.length === 0 ? (
+                        <p>
+                          局域网地址（携带令牌访问）：
                           <span className="text-warning">未检测到局域网网卡地址</span>
-                        ) : (
-                          bridgeInfo.lanAddresses.map((ip) => (
-                            <span key={ip} className="num mr-2 text-text-2">
-                              http://{ip}:{bridgeInfo.port}/?token={bridgeInfo.token}
-                            </span>
-                          ))
-                        )}
-                      </p>
+                        </p>
+                      ) : (
+                        <div className="flex items-start gap-3">
+                          {qrData ? (
+                            <img
+                              src={qrData}
+                              alt="Web 面板地址二维码"
+                              width={112}
+                              height={112}
+                              className="shrink-0 rounded-lg bg-white p-1"
+                            />
+                          ) : null}
+                          <div className="min-w-0 flex-1">
+                            <p className="mb-1">手机扫码直达面板（或点地址复制后粘贴到手机浏览器）：</p>
+                            <div className="space-y-0.5">
+                              {bridgeInfo.lanAddresses.map((ip) => {
+                                const url = `http://${ip}:${bridgeInfo.port}/?token=${bridgeInfo.token}`
+                                return (
+                                  <button
+                                    key={ip}
+                                    type="button"
+                                    title={`点选生成二维码并复制：${url}`}
+                                    onClick={() => {
+                                      setQrIp(ip)
+                                      navigator.clipboard
+                                        .writeText(url)
+                                        .then(() => toast('已复制面板链接，粘贴到手机浏览器打开', 'success'))
+                                        .catch(() => toast('复制失败，请手动记录地址', 'warning'))
+                                    }}
+                                    className={`num block max-w-full truncate rounded px-1 py-0.5 text-left text-[11px] hover:bg-surface-2/60 ${
+                                      ip === activeLanIp ? 'bg-surface-2/40 text-accent' : 'text-text-2'
+                                    }`}
+                                  >
+                                    http://{ip}:{bridgeInfo.port}/?token={bridgeInfo.token}
+                                  </button>
+                                )
+                              })}
+                            </div>
+                          </div>
+                        </div>
+                      )}
                       <p className="text-[10px]">注意：开启后同一局域网内的任何设备均可达本端口，务必保管好上方令牌。</p>
                     </div>
                   ) : null}

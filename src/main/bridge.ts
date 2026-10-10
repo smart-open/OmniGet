@@ -8,6 +8,8 @@
 //   保持强制；Host 校验在 LAN 模式放行（局域网设备以 IP:port 访问，token 兜底）
 // - 任务管理端点：/api/tasks 支持过滤/分页/搜索、/api/stats 聚合速度、
 //   POST /api/task/:id/:action（pause|resume|remove|retry）远程任务管理
+// 四期遗留「移动端提交」（0.13.0）：面板页移动优先重写（页面渲染抽至
+// bridge-page.ts——零 electron 依赖可离线单测），设置页补 LAN 扫码配对二维码
 
 import http from 'http'
 import { randomUUID, timingSafeEqual } from 'crypto'
@@ -19,6 +21,7 @@ import type { TaskStatus } from '@shared/types'
 import { getSettingParsed, setSetting } from './db'
 import { listTasksPaged, taskCounts, getTask } from './task/store'
 import { createLogger } from './logger'
+import { renderPage } from './bridge-page'
 
 const log = createLogger('bridge')
 
@@ -316,128 +319,6 @@ async function handle(
   } catch (err) {
     json(res, 500, req, { ok: false, error: err instanceof Error ? err.message : String(err) })
   }
-}
-
-function renderPage(port: number): string {
-  return `<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width, initial-scale=1"><title>OmniGet 远程</title>
-<style>
-:root{color-scheme:dark}
-body{font-family:system-ui,sans-serif;background:#0B0C0E;color:#E7E9EC;margin:0;padding:24px;max-width:760px;margin-inline:auto}
-h1{font-size:16px;margin:0 0 16px}
-input,button{font:inherit}
-.row{display:flex;gap:8px;margin-bottom:12px}
-input[type=text]{flex:1;background:#15171A;border:1px solid #2A2D33;border-radius:8px;color:inherit;padding:8px 12px;font-size:13px}
-button{background:#3B6EFF;color:#fff;border:0;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer}
-button.mini{background:#1E2126;color:#E7E9EC;padding:3px 10px;font-size:11px;border-radius:6px}
-button.mini.danger{color:#E5615C}
-#summary{display:flex;gap:14px;font-size:12px;margin-bottom:14px;flex-wrap:wrap}
-#summary b{color:#3B6EFF}
-table{width:100%;border-collapse:collapse;font-size:12px}
-td,th{text-align:left;padding:6px 8px;border-bottom:1px solid #1E2126;vertical-align:middle}
-.st-Running,.st-running{color:#3B6EFF}.st-completed,.st-Completed{color:#4CAF7D}.st-failed,.st-Failed{color:#E5615C}.st-paused{color:#E8B34B}
-.bar{height:5px;background:#1E2126;border-radius:3px;overflow:hidden;min-width:90px}
-.bar>div{height:100%;background:#3B6EFF}
-.muted{color:#8B9096}
-.grp{display:inline-block;font-size:10px;color:#8B9096;border:1px solid #2A2D33;border-radius:4px;padding:0 5px;margin-left:6px}
-@media (max-width:600px){.hide-sm{display:none}}
-</style></head><body>
-<h1>OmniGet 远程任务面板 <span class="muted" style="font-size:12px">:${port}</span></h1>
-<form class="row" id="f">
-  <input type="text" id="url" placeholder="粘贴磁力 / 视频链接 / 音乐名 / 直链，提交到桌面端下载" />
-  <button type="submit">下载</button>
-</form>
-<div class="row"><input type="text" id="q" placeholder="按名称/链接过滤任务…" /></div>
-<div id="summary" class="muted"></div>
-<div id="msg" class="muted" style="font-size:12px;margin-bottom:12px"></div>
-<table><thead><tr><th style="width:38%">任务</th><th>状态</th><th class="hide-sm">进度</th><th>操作</th></tr></thead>
-<tbody id="rows"></tbody></table>
-<script>
-const token = new URLSearchParams(location.search).get('token')
-// M-3：立即剥离 URL 中的 token（replaceState 替换当前历史条目，token 不进历史/后续 Referer）
-try { history.replaceState(null, '', location.pathname) } catch {}
-const H = { 'x-omniget-token': token, 'content-type': 'application/json' }
-let qTimer = null
-function esc(s) {
-  return String(s ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]))
-}
-function fmtBps(v) {
-  if (!v || v <= 0) return ''
-  const u = ['B/s','KB/s','MB/s','GB/s']; let i = 0; let n = v
-  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++ }
-  return n.toFixed(n >= 100 || i === 0 ? 0 : 1) + ' ' + u[i]
-}
-function fmtSize(v) {
-  if (!v || v <= 0) return ''
-  const u = ['B','KB','MB','GB']; let i = 0; let n = v
-  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++ }
-  return n.toFixed(n >= 100 || i === 0 ? 0 : 1) + ' ' + u[i]
-}
-async function act(id, action, needConfirm) {
-  if (needConfirm && !confirm('确认移除该任务？（文件保留，可进回收站找回）')) return
-  try {
-    const r = await fetch('/api/task/' + encodeURIComponent(id) + '/' + action, { method: 'POST', headers: H })
-    const d = await r.json()
-    document.getElementById('msg').textContent = d.ok ? '操作成功' : ('失败：' + (d.error || ''))
-  } catch (e) { document.getElementById('msg').textContent = '无法连接桌面端' }
-  refresh()
-}
-async function refresh() {
-  try {
-    const qs = new URLSearchParams({ q: document.getElementById('q').value.trim() })
-    const [r, s] = await Promise.all([
-      fetch('/api/tasks?' + qs, { headers: H }),
-      fetch('/api/stats', { headers: H })
-    ])
-    const d = await r.json()
-    const st = await s.json()
-    document.getElementById('summary').innerHTML = st.ok
-      ? '<span>↓ <b>' + (esc(fmtBps(st.downBps)) || '0') + '</b></span>'
-        + '<span>运行 ' + esc(st.running) + '</span><span>排队 ' + esc(st.queued) + '</span>'
-        + '<span>完成 ' + esc(st.counts.completed) + '</span><span>失败 ' + esc(st.counts.failed) + '</span>'
-      : ''
-    document.getElementById('rows').innerHTML = (d.tasks || []).map(t => {
-      const p = t.progress || 0
-      const canPause = t.status === 'running' || t.status === 'queued'
-      const canResume = t.status === 'paused'
-      const canRetry = t.status === 'failed'
-      const canRemove = t.status !== 'removed'
-      return '<tr><td>' + esc(t.name) + (t.queueGroup ? '<span class="grp">' + esc(t.queueGroup) + '</span>' : '')
-        + (t.speedBps > 0 ? '<div class="muted" style="font-size:10px">' + esc(fmtBps(t.speedBps)) + '</div>' : '')
-        + '</td>'
-        + '<td class="st-' + esc(t.status) + '">' + esc(t.status) + '</td>'
-        + '<td class="hide-sm"><div class="bar"><div style="width:' + p + '%"></div></div>'
-        + '<div class="muted" style="font-size:10px;margin-top:2px">' + p + '%' + (t.totalBytes > 0 ? ' · ' + esc(fmtSize(t.totalBytes)) : '') + '</div></td>'
-        + '<td>'
-        + (canPause ? '<button class="mini" data-a="pause" data-id="' + esc(t.id) + '">暂停</button> ' : '')
-        + (canResume ? '<button class="mini" data-a="resume" data-id="' + esc(t.id) + '">继续</button> ' : '')
-        + (canRetry ? '<button class="mini" data-a="retry" data-id="' + esc(t.id) + '">重试</button> ' : '')
-        + (canRemove ? '<button class="mini danger" data-a="remove" data-id="' + esc(t.id) + '">移除</button>' : '')
-        + '</td></tr>'
-    }).join('')
-  } catch (e) { document.getElementById('msg').textContent = '无法连接桌面端' }
-}
-document.body.addEventListener('click', (e) => {
-  const b = e.target.closest('button[data-a]')
-  if (b) act(b.dataset.id, b.dataset.a, b.dataset.a === 'remove')
-})
-document.getElementById('f').addEventListener('submit', async (e) => {
-  e.preventDefault()
-  const url = document.getElementById('url').value.trim()
-  if (!url) return
-  try {
-    const r = await fetch('/api/download', { method: 'POST', headers: H, body: JSON.stringify({ url }) })
-    const d = await r.json()
-    document.getElementById('msg').textContent = d.ok ? '已提交到下载队列' : ('失败：' + (d.error || ''))
-    if (d.ok) { document.getElementById('url').value = ''; refresh() }
-  } catch (e) { document.getElementById('msg').textContent = '无法连接桌面端' }
-})
-document.getElementById('q').addEventListener('input', () => {
-  clearTimeout(qTimer); qTimer = setTimeout(refresh, 350)
-})
-refresh()
-setInterval(refresh, 5000)
-</script></body></html>`
 }
 
 function readLanSetting(): boolean {
